@@ -18,6 +18,7 @@ pub struct Program {
     pub constraints: BTreeMap<usize, Vec<(String, String)>>,
     pub exports: Vec<String>,
     origins: Vec<Origin>,
+    members: Vec<ModuleMember>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -374,7 +375,7 @@ impl AnnotationParser<'_> {
                 Record(fields)
             }
             name if name.strip_prefix('\'').is_some_and(is_ident) => Variable(name.to_owned()),
-            name if is_ident(name) => Named(name.to_owned()),
+            name if is_ident(name) || is_qualified_ident(name) => Named(name.to_owned()),
             _ => {
                 self.i = start;
                 return self.err(format!("unexpected token `{token}` in type annotation"));
@@ -548,25 +549,149 @@ enum Binding {
     Value,
     Record,
 }
-pub fn parse(source: &str) -> PResult<Program> {
-    Parser {
-        toks: lex(source)?,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberKind {
+    Callable(usize),
+    Value,
+    Record,
+    Sum,
+    Constructor(usize),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleMember {
+    pub name: String,
+    pub linked: String,
+    pub kind: MemberKind,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedModule {
+    pub path: String,
+    pub members: Vec<ModuleMember>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportDecl {
+    pub path: String,
+    pub alias: String,
+    pub start: usize,
+}
+
+impl Program {
+    pub fn module_members(&self) -> Vec<ModuleMember> {
+        self.members.clone()
+    }
+    /// Prepend declaration-only, independently parsed dependencies in dependency
+    /// order. Their globally rebased expression origins are retained.
+    pub fn merge_libraries(&mut self, libraries: impl IntoIterator<Item = Program>) {
+        let mut defs = Vec::new();
+        let mut origins = Vec::new();
+        let mut imports = Vec::new();
+        let mut seen = HashSet::new();
+        for mut lib in libraries {
+            assert!(
+                lib.entry.is_none(),
+                "cannot link a script entry as a library"
+            );
+            defs.append(&mut lib.defs);
+            origins.append(&mut lib.origins);
+            self.constraints.append(&mut lib.constraints);
+            for x in lib.imports {
+                if seen.insert(x.clone()) {
+                    imports.push(x);
+                }
+            }
+        }
+        defs.append(&mut self.defs);
+        self.defs = defs;
+        origins.append(&mut self.origins);
+        self.origins = origins;
+        for x in self.imports.drain(..) {
+            if seen.insert(x.clone()) {
+                imports.push(x);
+            }
+        }
+        self.imports = imports;
+    }
+}
+
+fn parser_for(
+    source: &str,
+    base: usize,
+    namespace: Option<&str>,
+    imports: &[ImportedModule],
+) -> PResult<Parser> {
+    let eof = source
+        .len()
+        .checked_add(base)
+        .ok_or_else(|| Error::new(base, "source location exceeds addressable size"))?;
+    let mut toks = lex(source).map_err(|e| Error::new(base.saturating_add(e.start), e.message))?;
+    for t in &mut toks {
+        t.start += base;
+        t.end += base;
+    }
+    Ok(Parser {
+        toks,
         pos: 0,
-        eof: source.len(),
+        eof,
         scopes: Vec::new(),
+        type_scopes: Vec::new(),
         standard: HashMap::new(),
+        native_type_names: HashSet::new(),
         aliases: HashMap::new(),
+        source_interfaces: imports.to_vec(),
+        links: HashMap::new(),
+        namespace: namespace.map(str::to_owned),
         depth: 0,
         constraints: BTreeMap::new(),
         origins: Vec::new(),
-    }
-    .program()
+    })
 }
+
+/// Parse an independently scoped module, with globally rebased locations.
+pub fn parse_module(
+    source: &str,
+    base: usize,
+    namespace: Option<&str>,
+    imports: &[ImportedModule],
+) -> PResult<Program> {
+    parser_for(source, base, namespace, imports)?.program()
+}
+
+/// Discover only top-level imports before binding interfaces. No imported
+/// members or callable arities are needed for this lexical pass.
+pub fn discover_imports(source: &str, base: usize) -> PResult<Vec<ImportDecl>> {
+    let mut p = parser_for(source, base, None, &[])?;
+    let mut imports = Vec::new();
+    let mut i = 0;
+    while !p.at(i).is_empty() {
+        if p.at(i) == "<<" {
+            let start = p.toks[i].start;
+            p.pos = i + 1;
+            let (path, alias, _) = p.import_decl()?;
+            i = p.pos;
+            imports.push(ImportDecl { path, alias, start });
+        } else if let Some(end) = p.find(i, &[";"], &[]) {
+            i = end + 1;
+        } else {
+            break;
+        }
+    }
+    Ok(imports)
+}
+
+pub fn parse(source: &str) -> PResult<Program> {
+    parse_module(source, 0, None, &[])
+}
+type Prelude = (HashMap<String, Binding>, HashSet<String>);
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
     eof: usize,
     scopes: Vec<HashMap<String, Binding>>,
+    type_scopes: Vec<HashMap<String, String>>,
+    native_type_names: HashSet<String>,
+    source_interfaces: Vec<ImportedModule>,
+    links: HashMap<String, String>,
+    namespace: Option<String>,
     standard: HashMap<String, Binding>,
     aliases: HashMap<String, String>,
     depth: usize,
@@ -577,6 +702,10 @@ fn is_ident(s: &str) -> bool {
     let mut bytes = s.bytes();
     bytes.next().is_some_and(|b| b.is_ascii_lowercase())
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+fn is_qualified_ident(s: &str) -> bool {
+    s.split_once('.')
+        .is_some_and(|(a, b)| is_ident(a) && is_ident(b))
 }
 fn close(s: &str) -> Option<&'static str> {
     match s {
@@ -653,7 +782,25 @@ impl Parser {
                 }
             })
     }
+    fn own_name(&self, n: &str) -> String {
+        self.namespace
+            .as_ref()
+            .map_or_else(|| n.to_owned(), |m| format!("\0{m}:{n}"))
+    }
+    fn decl_link(&self, n: &str) -> String {
+        if self.scopes.len() == 1 {
+            self.own_name(n)
+        } else {
+            n.to_owned()
+        }
+    }
     fn canonical(&self, n: &str) -> String {
+        if self.scopes.iter().skip(1).rev().any(|s| s.contains_key(n)) {
+            return n.to_owned();
+        }
+        if let Some(link) = self.links.get(n) {
+            return link.clone();
+        }
         if let Some((alias, member)) = n.split_once('.') {
             if let Some(path) = self.aliases.get(alias) {
                 let path = if path == "table" { "df" } else { path };
@@ -661,6 +808,50 @@ impl Parser {
             }
         }
         n.to_owned()
+    }
+    fn annotation_links(&self, mut node: TypeAnnotation) -> PResult<TypeAnnotation> {
+        fn rewrite(p: &Parser, t: &mut TypeAnnotation) -> PResult<()> {
+            use TypeAnnotationKind::*;
+            match &mut t.kind {
+                Named(n) => {
+                    if let Some(name) = p.type_scopes.iter().rev().find_map(|s| s.get(n)) {
+                        *n = name.clone();
+                    } else if is_qualified_ident(n) {
+                        return Err(Error::new(
+                            t.span.start,
+                            format!("unknown or unexported module type `{n}`"),
+                        ));
+                    } else if p.namespace.is_some() && !p.native_type_names.contains(n) {
+                        return Err(Error::new(t.span.start, format!("unknown type {n}")));
+                    }
+                }
+                Optional(t) | Action(t) | Table(t) | Sequence(t) => rewrite(p, t)?,
+                PositionalTable(ts) | Tuple(ts) => {
+                    for t in ts {
+                        rewrite(p, t)?;
+                    }
+                }
+                Dictionary(k, v) | Result(k, v) => {
+                    rewrite(p, k)?;
+                    rewrite(p, v)?;
+                }
+                Record(fields) => {
+                    for (_, t) in fields {
+                        rewrite(p, t)?;
+                    }
+                }
+                Function(args, ret) => {
+                    for t in args {
+                        rewrite(p, t)?;
+                    }
+                    rewrite(p, ret)?;
+                }
+                Primitive(_) | Variable(_) | Hole => {}
+            }
+            Ok(())
+        }
+        rewrite(self, &mut node)?;
+        Ok(node)
     }
     fn scope(&mut self) -> &mut HashMap<String, Binding> {
         self.scopes.last_mut().expect("parser scope")
@@ -715,7 +906,7 @@ impl Parser {
             _ => false,
         }
     }
-    fn prepass(&self, mut i: usize, root: bool) -> PResult<HashMap<String, Binding>> {
+    fn prepass(&self, mut i: usize, root: bool) -> PResult<Prelude> {
         let mut names = HashSet::new();
         let mut type_names = HashSet::new();
         let mut hoisted = HashMap::new();
@@ -785,11 +976,23 @@ impl Parser {
             };
             i = end + 1;
         }
-        Ok(hoisted)
+        Ok((hoisted, type_names))
     }
     fn program(mut self) -> PResult<Program> {
-        let hoisted = self.prepass(0, true)?;
+        let (hoisted, type_names) = self.prepass(0, true)?;
+        self.links = hoisted
+            .keys()
+            .map(|n| (n.clone(), self.own_name(n)))
+            .collect();
         self.scopes.push(hoisted);
+        self.type_scopes.push(
+            type_names
+                .iter()
+                .map(|n| (n.clone(), self.own_name(n)))
+                .collect(),
+        );
+        let mut used_interfaces = vec![false; self.source_interfaces.len()];
+        let mut used_aliases = HashSet::new();
         let mut p = Program {
             defs: Vec::new(),
             imports: Vec::new(),
@@ -798,6 +1001,7 @@ impl Parser {
             constraints: BTreeMap::new(),
             exports: Vec::new(),
             origins: Vec::new(),
+            members: Vec::new(),
         };
         let mut exports = Vec::new();
         // Resolve top-level interfaces before any expression is parsed;
@@ -809,23 +1013,66 @@ impl Parser {
             };
             if self.at(i) == "<<" {
                 self.pos = i + 1;
-                let (path, alias, start) = self.import_decl()?;
-                if self.aliases.insert(alias.clone(), path.clone()).is_some() {
-                    return self.err(format!("duplicate module alias `{alias}`"));
+                let (raw, alias, start) = self.import_decl()?;
+                if !used_aliases.insert(alias.clone()) {
+                    return Err(Error::new(
+                        start,
+                        format!("duplicate module alias `{alias}`"),
+                    ));
                 }
-                for (name, arity) in builtins::module_items(&path)
-                    .ok_or_else(|| Error::new(start, format!("unknown module `{path}`")))?
+                if let Some((at, module)) = self
+                    .source_interfaces
+                    .iter()
+                    .enumerate()
+                    .find(|(i, m)| !used_interfaces[*i] && m.path == raw)
                 {
-                    self.scope()
-                        .insert(format!("{alias}.{name}"), Binding::Callable(arity));
-                }
-                for owner in standard_owners(&path) {
-                    for v in errors041::variants(owner) {
-                        self.standard
-                            .insert(v.name.to_owned(), Binding::Constructor(v.payload.len()));
+                    used_interfaces[at] = true;
+                    let members = module.members.clone();
+                    for member in members {
+                        let surface = format!("{alias}.{}", member.name);
+                        let value = match member.kind {
+                            MemberKind::Callable(n) => Some(Binding::Callable(n)),
+                            MemberKind::Value => Some(Binding::Value),
+                            MemberKind::Record => Some(Binding::Record),
+                            MemberKind::Constructor(n) => Some(Binding::Constructor(n)),
+                            MemberKind::Sum => None,
+                        };
+                        if let Some(b) = value {
+                            self.scope().insert(surface.clone(), b);
+                            self.links.insert(surface.clone(), member.linked.clone());
+                        }
+                        if matches!(member.kind, MemberKind::Record | MemberKind::Sum) {
+                            self.type_scopes[0].insert(surface, member.linked);
+                        }
                     }
+                } else {
+                    let native = std::path::Path::new(&raw)
+                        .file_stem()
+                        .and_then(|x| x.to_str())
+                        .unwrap_or("");
+                    if self.namespace.is_some() && (raw.starts_with("./") || raw.starts_with("../"))
+                    {
+                        return Err(Error::new(
+                            start,
+                            format!("source module `{raw}` requires a loaded interface"),
+                        ));
+                    }
+                    let items = builtins::module_items(native)
+                        .ok_or_else(|| Error::new(start, format!("unknown module `{raw}`")))?;
+                    self.aliases.insert(alias.clone(), native.to_owned());
+                    for (name, arity) in items {
+                        self.scope()
+                            .insert(format!("{alias}.{name}"), Binding::Callable(arity));
+                    }
+                    for &owner in standard_owners(native) {
+                        self.native_type_names.insert(owner.to_owned());
+                        for v in errors041::variants(owner) {
+                            self.standard
+                                .insert(v.name.to_owned(), Binding::Constructor(v.payload.len()));
+                        }
+                    }
+                    p.imports.push(native.to_owned());
                 }
-                p.imports.push(path);
             }
             i = end + 1;
         }
@@ -869,19 +1116,53 @@ impl Parser {
             if !seen.insert(n.clone()) {
                 return self.err(format!("duplicate export `{n}`"));
             }
-            let d = p
-                .defs
-                .iter()
-                .find(|d| matches!(d,Stmt::Def{name,..}|Stmt::Schema{name,..}|Stmt::Sum{name,..} if name==n));
-            match d {
-                Some(Stmt::Def {
-                    result_type: Some(_),
-                    param_types,
-                    ..
-                }) if param_types.iter().all(Option::is_some) => {}
-                Some(Stmt::Schema { .. } | Stmt::Sum { .. }) => {}
-                Some(_) => return self.err(format!("export `{n}` requires a complete signature")),
-                None => return self.err(format!("unknown export `{n}`")),
+            let linked = self.own_name(n);
+            let mut found = false;
+            for d in &p.defs {
+                let kind = match d {
+                    Stmt::Def {
+                        name,
+                        params,
+                        result_type,
+                        param_types,
+                        ..
+                    } if name == &linked => {
+                        if result_type.is_none() || !param_types.iter().all(Option::is_some) {
+                            return self.err(format!("export `{n}` requires a complete signature"));
+                        }
+                        if params.is_empty() {
+                            MemberKind::Value
+                        } else {
+                            MemberKind::Callable(params.len())
+                        }
+                    }
+                    Stmt::Schema { name, .. } if name == &linked => MemberKind::Record,
+                    Stmt::Sum { name, variants, .. } if name == &linked => {
+                        for v in variants {
+                            let surface = if self.namespace.is_some() {
+                                v.name.rsplit_once(':').unwrap().1
+                            } else {
+                                &v.name
+                            };
+                            p.members.push(ModuleMember {
+                                name: surface.to_owned(),
+                                linked: v.name.clone(),
+                                kind: MemberKind::Constructor(v.payload.len()),
+                            });
+                        }
+                        MemberKind::Sum
+                    }
+                    _ => continue,
+                };
+                found = true;
+                p.members.push(ModuleMember {
+                    name: n.clone(),
+                    linked: linked.clone(),
+                    kind,
+                });
+            }
+            if !found {
+                return self.err(format!("unknown export `{n}`"));
             }
         }
         p.constraints = self.constraints;
@@ -917,8 +1198,7 @@ impl Parser {
             stem.to_owned()
         };
         self.expect(";")?;
-        // This prototype resolves only bundled interfaces, identified by their stem.
-        Ok((stem.to_owned(), alias, t.start))
+        Ok((raw, alias, t.start))
     }
     fn type_tokens_until(&mut self, ends: &[&str]) -> PResult<Vec<Token>> {
         let start = self.pos;
@@ -935,7 +1215,9 @@ impl Parser {
     fn annotation(&mut self, ends: &[&str]) -> PResult<Option<TypeAnnotation>> {
         if self.eat(":") {
             let tokens = self.type_tokens_until(ends)?;
-            return annotation_tokens(&tokens, self.offset()).map(Some);
+            return self
+                .annotation_links(annotation_tokens(&tokens, self.offset())?)
+                .map(Some);
         }
         if self.eat(":#") {
             let end = self.toks[self.pos - 1].end;
@@ -945,7 +1227,9 @@ impl Parser {
                 end,
             }];
             tokens.extend(self.type_tokens_until(ends)?);
-            return annotation_tokens(&tokens, self.offset()).map(Some);
+            return self
+                .annotation_links(annotation_tokens(&tokens, self.offset())?)
+                .map(Some);
         }
         Ok(None)
     }
@@ -1017,13 +1301,20 @@ impl Parser {
 
     fn definition(&mut self, effect: bool) -> PResult<Stmt> {
         let start = self.offset();
-        let name = self.ident()?;
+        let surface = self.ident()?;
+        let name = self.decl_link(&surface);
         if self.eat("::") {
             self.expect("{")?;
             if self.peek() == "|" {
                 let mut variants = Vec::new();
                 while self.peek() == "|" {
-                    let (v, next) = self.variant_at(self.pos)?;
+                    let (mut v, next) = self.variant_at(self.pos)?;
+                    v.name = self.decl_link(&v.name);
+                    v.payload = v
+                        .payload
+                        .into_iter()
+                        .map(|t| self.annotation_links(t))
+                        .collect::<PResult<_>>()?;
                     self.pos = next;
                     variants.push(v);
                 }
@@ -1102,7 +1393,7 @@ impl Parser {
         };
         self.expect(";")?;
         if params.is_empty() {
-            self.scope().insert(name.clone(), Binding::Value);
+            self.scope().insert(surface, Binding::Value);
         }
         Ok(Stmt::Def {
             name,
@@ -1301,10 +1592,12 @@ impl Parser {
                 }
             }
             _ => match self.lookup(&t.text) {
-                Some(Binding::Value | Binding::Constructor(0)) => Ok(Expr::Name(t.text)),
-                Some(Binding::Constructor(n)) => self.call(t.text, n, effect),
+                Some(Binding::Value | Binding::Constructor(0)) => {
+                    Ok(Expr::Name(self.canonical(&t.text)))
+                }
+                Some(Binding::Constructor(n)) => self.call(self.canonical(&t.text), n, effect),
                 Some(Binding::Callable(n)) => self.call(self.canonical(&t.text), n, effect),
-                Some(Binding::Record) => self.record(t.text, effect),
+                Some(Binding::Record) => self.record(self.canonical(&t.text), effect),
                 None => Err(Error::new(
                     t.start,
                     format!("unknown name or invalid expression token `{}`", t.text),
@@ -1360,10 +1653,13 @@ impl Parser {
         Ok(Expr::Call(n, args))
     }
     fn block(&mut self, effect: bool) -> PResult<Expr> {
-        let h = self.prepass(self.pos, false)?;
+        let (h, types) = self.prepass(self.pos, false)?;
         self.scopes.push(h);
+        self.type_scopes
+            .push(types.into_iter().map(|n| (n.clone(), n)).collect());
         let r = self.block_contents(effect);
         self.scopes.pop();
+        self.type_scopes.pop();
         let (stmts, last) = r?;
         Ok(if effect {
             Expr::Action(stmts, last)
@@ -1372,10 +1668,13 @@ impl Parser {
         })
     }
     fn fallible(&mut self, effect: bool) -> PResult<Expr> {
-        let h = self.prepass(self.pos, false)?;
+        let (h, types) = self.prepass(self.pos, false)?;
         self.scopes.push(h);
+        self.type_scopes
+            .push(types.into_iter().map(|n| (n.clone(), n)).collect());
         let r = self.block_sequence(effect, true, false);
         self.scopes.pop();
+        self.type_scopes.pop();
         let (ss, last) = r?;
         Ok(Expr::Fallible(ss, last))
     }
@@ -1388,7 +1687,11 @@ impl Parser {
             let (pattern, names) = if self.eat("_") {
                 (RecoveryPattern::Wildcard, Vec::new())
             } else {
-                let name = self.ident()?;
+                let name = if is_qualified_ident(self.peek()) {
+                    self.next()?.text
+                } else {
+                    self.ident()?
+                };
                 match self.lookup(&name) {
                     Some(Binding::Constructor(n)) => {
                         let mut slots = Vec::new();
@@ -1406,7 +1709,16 @@ impl Parser {
                                 slots.push(binder);
                             }
                         }
-                        (RecoveryPattern::Constructor(name, slots), names)
+                        (
+                            RecoveryPattern::Constructor(self.canonical(&name), slots),
+                            names,
+                        )
+                    }
+                    _ if is_qualified_ident(&name) => {
+                        return Err(Error::new(
+                            start,
+                            format!("unknown or unexported recovery constructor `{name}`"),
+                        ))
                     }
                     _ => (RecoveryPattern::Bind(name.clone()), vec![name]),
                 }
@@ -1726,5 +2038,108 @@ f(x:q^err^e):q := 0;";
         let problem = parse(source).unwrap_err();
         assert_eq!(problem.start, source.rfind('^').unwrap());
         assert!(problem.message.contains("parentheses"));
+    }
+    #[test]
+    fn source_module_links_only_exports_and_rebases_origins() {
+        let library_src = ">> (f,row,err); f(x:q):q := + x private; private := 2; row :: { x:q; }; err :: { | bad n; | zero; };";
+        let lib = parse_module(library_src, 200, Some("library"), &[]).unwrap();
+        let members = lib.module_members();
+        assert_eq!(members.len(), 5);
+        assert!(members.iter().all(|m| m.linked.as_bytes()[0] == 0));
+        assert!(members.iter().all(|m| m.name != "private"));
+        let imports = [ImportedModule {
+            path: "./dep.flx".into(),
+            members,
+        }];
+        let source = r#"<< "./dep.flx" : d; private := 9; x:d.row := d.row { x := d.f 2q; }; rr:e^d.err := ^{ ^: d.bad 4n }; e :: { val:n; }; y := ^= rr { d.bad n : e { val := n; }; d.zero : e { val := 0n; }; };"#;
+        let mut root = parse_module(source, 600, Some("root"), &imports).unwrap();
+        assert!(parse_module(
+            r#"<< "./dep.flx" : d; x := d.private;"#,
+            0,
+            Some("other"),
+            &imports
+        )
+        .is_err());
+        assert!(parse_module(
+            r#"<< "./dep.flx" : d; x := d.f 1 2;"#,
+            0,
+            Some("other"),
+            &imports
+        )
+        .is_err());
+        let Stmt::Def {
+            result_type: Some(t),
+            ..
+        } = &root.defs[1]
+        else {
+            panic!()
+        };
+        let TypeAnnotationKind::Named(n) = &t.kind else {
+            panic!()
+        };
+        assert_eq!(
+            n,
+            &imports[0]
+                .members
+                .iter()
+                .find(|m| m.name == "row")
+                .unwrap()
+                .linked
+        );
+        assert_eq!(&source[t.span.start - 600..t.span.end - 600], "d.row");
+        root.merge_libraries([lib]);
+        let origins = root.expression_origins();
+        assert!(origins
+            .iter()
+            .any(|(_, s)| s.start >= 200 && s.end <= 200 + library_src.len()));
+        assert!(origins
+            .iter()
+            .any(|(_, s)| s.start >= 600 && s.end <= 600 + source.len()));
+        let res = crate::resolve::resolve(&root).unwrap();
+        assert!(res.groups.len() >= 8);
+    }
+
+    #[test]
+    fn linked_nominal_scope_blocks_native_and_foreign_leakage() {
+        assert!(parse_module("f(x:ioerr):ioerr := x;", 0, Some("m"), &[]).is_err());
+        assert!(parse_module(r#"<< "csv"; f(x:ioerr):ioerr := x;"#, 0, Some("m"), &[]).is_ok());
+        let p = parse_module(
+            r#"row :: { x:q; }; a := { row :: { y:s; }; r:row := row {y:="ok";}; r };"#,
+            100,
+            Some("m"),
+            &[],
+        )
+        .unwrap();
+        let Stmt::Def {
+            body: Expr::Block(ss, _),
+            ..
+        } = &p.defs[1]
+        else {
+            panic!()
+        };
+        let Stmt::Def {
+            result_type: Some(t),
+            ..
+        } = &ss[1]
+        else {
+            panic!()
+        };
+        assert!(matches!(&t.kind,TypeAnnotationKind::Named(n) if n=="row"));
+        let smuggled = format!("x := 0; y := {}m:x;", char::from(0));
+        assert!(parse_module(&smuggled, 0, Some("m"), &[]).is_err());
+    }
+
+    #[test]
+    fn import_discovery_preserves_original_paths_aliases_and_offsets() {
+        let src = r#"-- comment
+           x := "! << fake;";
+           << "./folder/lib.flx" : dep;
+           << csv;"#;
+        let imports = discover_imports(src, 500).unwrap();
+        assert_eq!(imports[0].path, "./folder/lib.flx");
+        assert_eq!(imports[0].alias, "dep");
+        assert_eq!(imports[0].start, 500 + src.find(r#"<< "./folder"#).unwrap());
+        assert_eq!(imports[1].path, "csv");
+        assert_eq!(imports[1].alias, "csv");
     }
 }

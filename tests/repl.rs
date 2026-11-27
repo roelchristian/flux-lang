@@ -109,3 +109,48 @@ fn inline_comments_preserve_submission_boundaries() {
     assert!(err.is_empty(), "{err}");
     assert_eq!(out, "8 : n\n");
 }
+
+#[test]
+fn load_resolves_imports_relative_to_each_fragment_without_executing_actions() {
+    struct Folder(PathBuf);
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let root = loop {
+        let i = SERIAL.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("flux-repl-modules-{}-{i}", std::process::id()));
+        match fs::create_dir(&path) {
+            Ok(()) => break Folder(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("{e}"),
+        }
+    };
+    let a = root.0.join("a");
+    let b = root.0.join("b");
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    for (dir, n, alias, name) in [(&a, 3, "liba", "ax"), (&b, 8, "libb", "bx")] {
+        fs::write(
+            dir.join("lib.flx"),
+            format!("<< \"io\";\n>> (x);\nx:n := {n};\nheld := io.print \"not executed\";\n"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("session.flx"),
+            format!("<< \"lib.flx\" : {alias};\n{name}:n := {alias}.x;\n"),
+        )
+        .unwrap();
+    }
+    let (out, err) = repl(&format!(
+        ":load \"{}\"\n:load \"{}\"\n+ ax bx\n:quit\n",
+        a.join("session.flx").display(),
+        b.join("session.flx").display(),
+    ));
+    assert!(err.is_empty(), "{err}");
+    assert!(out.ends_with("11 : n\n"), "{out}");
+    assert!(!out.contains("not executed"), "{out}");
+}

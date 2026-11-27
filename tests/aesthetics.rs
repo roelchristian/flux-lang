@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 struct Temp(PathBuf);
 impl Temp {
@@ -9,10 +12,18 @@ impl Temp {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("flux-aesthetics-{}-{nonce}", std::process::id()));
-        fs::create_dir(&path).unwrap();
-        Self(path)
+        loop {
+            let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "flux-aesthetics-{}-{nonce}-{id}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("cannot create test directory: {error}"),
+            }
+        }
     }
     fn run(&self, script: &str) -> Output {
         fs::write(self.0.join("test.flx"), script).unwrap();

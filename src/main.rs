@@ -1,9 +1,10 @@
 use flux_lang::{
-    format_source, lexer, parser,
-    semantic::{prepare, prepare_timed, Mode as SemanticMode, Policy, Timings},
+    format_path, interface_path, lexer, modules,
+    parser::MemberKind,
+    semantic::{prepare_modules, prepare_modules_timed, Mode as SemanticMode, Policy, Timings},
 };
-use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -20,14 +21,14 @@ const REPL_HELP: &str =
 Parenthesize a suspended action to inspect it; use ! to execute it.";
 
 struct Session {
-    declarations: String,
+    declarations: Vec<(PathBuf, String)>,
     expressions: Vec<String>,
 }
 
 impl Session {
     fn new() -> Self {
         Self {
-            declarations: String::from("<< \"io\" : io;\n"),
+            declarations: vec![(PathBuf::from("<repl>"), String::from("<< \"io\" : io;\n"))],
             expressions: Vec::new(),
         }
     }
@@ -50,11 +51,16 @@ impl Session {
         }
         // Leave a newline before the closing delimiter; a line comment must not
         // consume the synthetic wrapper.
-        let source = format!("{}!{{\n{expression}\n}};", self.declarations);
-        let diag = |error: flux_lang::Error| error.diagnostic("<repl>", &source);
-        let program = parser::parse(&source).map_err(diag)?;
-        let prepared =
-            prepare(&program, SemanticMode::Inspection, Policy::TypedOnly).map_err(diag)?;
+        let source = format!("!{{\n{expression}\n}};");
+        let loaded = self.candidate(PathBuf::from("<repl>"), source)?;
+        let diag = |error: flux_lang::Error| loaded.diagnostic(&error);
+        let prepared = prepare_modules(
+            &loaded.program,
+            SemanticMode::Inspection,
+            Policy::TypedOnly,
+            &loaded.module_inputs,
+        )
+        .map_err(diag)?;
         let inspection = prepared
             .inspection()
             .ok_or("missing expression to inspect")?;
@@ -92,50 +98,57 @@ impl Session {
         if path.is_empty() {
             return Err("usage: :load PATH".into());
         }
-        let file = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-        let candidate = format!("{}{file}\n", self.declarations);
-        let diagnostic = |e: flux_lang::Error| {
-            if let Some(start) = e.start.checked_sub(self.declarations.len()) {
-                flux_lang::Error::new(start, e.message).diagnostic(path, &file)
-            } else {
-                e.diagnostic("<repl>", &candidate)
-            }
-        };
-        let program = parser::parse(&candidate).map_err(diagnostic)?;
-        if program.entry.is_some() {
+        let (origin, file) = modules::read_fragment(path).map_err(|error| error.diagnostic())?;
+        let loaded = self.candidate(origin.clone(), file.clone())?;
+        if loaded.program.entry.is_some() {
             return Err(format!(
                 "{path}: :load accepts declarations only; run script entries with flux FILE"
             ));
         }
-        prepare(&program, SemanticMode::Script, Policy::TypedOnly).map_err(diagnostic)?;
-        self.declarations = candidate;
+        prepare_modules(
+            &loaded.program,
+            SemanticMode::Script,
+            Policy::TypedOnly,
+            &loaded.module_inputs,
+        )
+        .map_err(|error| loaded.diagnostic(&error))?;
+        self.declarations.push((origin, file));
         println!("loaded {path}");
         Ok(())
+    }
+
+    fn candidate(&self, origin: PathBuf, source: String) -> Result<modules::LoadedProgram, String> {
+        let mut fragments = self.declarations.clone();
+        fragments.push((origin, source));
+        modules::load_virtual_parts("<repl>", &fragments).map_err(|error| error.diagnostic())
     }
 
     fn submission(&mut self, line: &str) -> Result<(), String> {
         let lexed = lexer::lex(line).map_err(|e| e.diagnostic("<repl>", line))?;
         let terminated = lexed.last().is_some_and(|t| t.text == ";");
-        let source = format!(
-            "{}{line}\n{}\n",
-            self.declarations,
-            if terminated { "" } else { ";" }
-        );
-        if let Ok(program) = parser::parse(&source) {
-            if program.entry.is_none() {
-                prepare(&program, SemanticMode::Script, Policy::TypedOnly)
-                    .map_err(|e| e.diagnostic("<repl>", &source))?;
-                self.declarations = source;
-                return Ok(());
+        let source = format!("{line}\n{}\n", if terminated { "" } else { ";" });
+        let origin = PathBuf::from("<repl>");
+        match self.candidate(origin.clone(), source.clone()) {
+            Ok(loaded) => {
+                let prepared = prepare_modules(
+                    &loaded.program,
+                    SemanticMode::Script,
+                    Policy::TypedOnly,
+                    &loaded.module_inputs,
+                )
+                .map_err(|error| loaded.diagnostic(&error))?;
+                if loaded.program.entry.is_none() {
+                    self.declarations.push((origin, source));
+                } else {
+                    prepared
+                        .run_with_output(&mut io::stdout())
+                        .map_err(|error| loaded.diagnostic(&error))?;
+                }
+                Ok(())
             }
-            let prepared = prepare(&program, SemanticMode::Script, Policy::TypedOnly)
-                .map_err(|e| e.diagnostic("<repl>", &source))?;
-            prepared
-                .run_with_output(&mut io::stdout())
-                .map_err(|e| e.diagnostic("<repl>", &source))?;
-            return Ok(());
+            Err(error) if lexed.first().is_some_and(|token| token.text == "<<") => Err(error),
+            Err(_) => self.expression(line, Mode::View),
         }
-        self.expression(line, Mode::View)
     }
 
     fn dispatch(&mut self, line: &str) -> Result<bool, String> {
@@ -203,11 +216,14 @@ fn repl() -> Result<u8, String> {
 }
 
 fn cli() -> Result<u8, String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    const COMMANDS: &[&str] = &["check", "fmt", "hir", "interface", "phases", "run-hir"];
+    const USAGE: &str =
+        "flux [FILE | check FILE | hir FILE | interface FILE | run-hir FILE | phases FILE | fmt FILE | --version]";
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
     let (mode, path) = match args.as_slice() {
         [] => return repl(),
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("Flux reference prototype\n\nUsage: flux [FILE | check FILE | hir FILE | run-hir FILE | phases FILE | fmt FILE | --version]\n\nRun without arguments for the REPL. fmt writes to stdout.");
+            println!("Flux reference prototype\n\nUsage: {USAGE}\n\nRun without arguments for the REPL. fmt writes to stdout.");
             return Ok(0);
         }
         [flag] if flag == "--version" || flag == "-V" => {
@@ -215,32 +231,60 @@ fn cli() -> Result<u8, String> {
             return Ok(0);
         }
         [file]
-            if !matches!(
-                file.as_str(),
-                "check" | "fmt" | "hir" | "phases" | "run-hir"
-            ) && !file.starts_with('-') =>
+            if file
+                .to_str()
+                .is_none_or(|text| !COMMANDS.contains(&text) && !text.starts_with('-')) =>
         {
-            ("run", file)
+            ("run", Path::new(file))
         }
-        [command, file]
-            if matches!(
-                command.as_str(),
-                "check" | "fmt" | "hir" | "phases" | "run-hir"
-            ) =>
-        {
-            (command.as_str(), file)
-        }
-        _ => return Err("usage: flux [FILE | check FILE | fmt FILE]".into()),
+        [command, file] => (
+            command
+                .to_str()
+                .filter(|text| COMMANDS.contains(text))
+                .ok_or_else(|| format!("usage: {USAGE}"))?,
+            Path::new(file),
+        ),
+        _ => return Err(format!("usage: {USAGE}")),
     };
-    let source = fs::read_to_string(path).map_err(|err| format!("{path}: {err}"))?;
-    let diagnostic = |err: flux_lang::Error| err.diagnostic(path, &source);
+    if mode == "fmt" {
+        print!("{}", format_path(path).map_err(|error| error.diagnostic())?);
+        return Ok(0);
+    }
+
+    if mode == "interface" {
+        let interface = interface_path(path).map_err(|error| error.diagnostic())?;
+        println!("{}", interface.path.display());
+        for export in interface.exports {
+            let kind = match export.member.kind {
+                MemberKind::Callable(arity) => format!("callable/{arity}"),
+                MemberKind::Constructor(arity) => format!("constructor/{arity}"),
+                MemberKind::Value => "value".into(),
+                MemberKind::Record => "record".into(),
+                MemberKind::Sum => "sum".into(),
+            };
+            if let Some(row) = export.row {
+                println!("  {kind} {}: {row}", export.member.name);
+            } else {
+                println!("  {kind} {}: {}", export.member.name, export.scheme);
+            }
+        }
+        return Ok(0);
+    }
+
+    // The parse phase now includes discovery, local loads, parse of each
+    // dependency, and assembly. Keep the stable timing key for tooling.
+    let start = Instant::now();
+    let loaded = modules::load(path).map_err(|error| error.diagnostic())?;
+    let parse = start.elapsed();
+    let diagnostic = |error: flux_lang::Error| loaded.diagnostic(&error);
+    let program = &loaded.program;
+    let inputs = &loaded.module_inputs;
     match mode {
         "check" | "hir" => {
-            let program = parser::parse(&source).map_err(diagnostic)?;
-            let strict = mode == "hir";
             let prepared =
-                prepare(&program, SemanticMode::Script, Policy::TypedOnly).map_err(diagnostic)?;
-            if strict {
+                prepare_modules(program, SemanticMode::Script, Policy::TypedOnly, inputs)
+                    .map_err(diagnostic)?;
+            if mode == "hir" {
                 println!(
                     "{:#?}",
                     prepared.hir().expect("strict compilation yields HIR")
@@ -248,14 +292,12 @@ fn cli() -> Result<u8, String> {
             }
         }
         "phases" => {
-            let start = Instant::now();
-            let program = parser::parse(&source).map_err(diagnostic)?;
-            let parse = start.elapsed();
             let mut timing = Timings::default();
-            let plan = prepare_timed(
-                &program,
+            let plan = prepare_modules_timed(
+                program,
                 SemanticMode::Script,
                 Policy::TypedOnly,
+                inputs,
                 &mut timing,
             )
             .map_err(diagnostic)?;
@@ -266,11 +308,11 @@ fn cli() -> Result<u8, String> {
             }
             let run = start.elapsed();
             eprintln!(
-                "parse_ns	{}
-resolve_ns	{}
-infer_ns	{}
-elaborate_ns	{}
-eval_ns	{}",
+                "parse_ns\t{}
+resolve_ns\t{}
+infer_ns\t{}
+elaborate_ns\t{}
+eval_ns\t{}",
                 parse.as_nanos(),
                 timing.resolution.as_nanos(),
                 timing.inference.as_nanos(),
@@ -278,15 +320,14 @@ eval_ns	{}",
                 run.as_nanos()
             );
         }
-        "fmt" => print!("{}", format_source(&source).map_err(diagnostic)?),
         _ => {
-            let program = parser::parse(&source).map_err(diagnostic)?;
             if program.entry.is_none() {
                 return Err(format!(
-                    "{path}: no executable !{{ ... }}; block (try flux check)"
+                    "{}: no executable !{{ ... }}; block (try flux check)",
+                    path.display()
                 ));
             }
-            let output = prepare(&program, SemanticMode::Script, Policy::TypedOnly)
+            let output = prepare_modules(program, SemanticMode::Script, Policy::TypedOnly, inputs)
                 .map_err(diagnostic)?
                 .run_with_output(&mut io::stdout())
                 .map_err(diagnostic)?;

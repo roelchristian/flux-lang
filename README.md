@@ -3,7 +3,7 @@
 Flux is a statically typed, predominantly functional, array-oriented programming
 language with strict Polish expressions and an ASCII source format. It is
 designed for numerical work, tabular analysis, and scripting. This repository
-contains the Draft 0.4.2 typed HIR interpreter in Rust, not a stable language release.
+contains the Draft 0.4.3 typed HIR interpreter in Rust, not a stable language release.
 
 ```flux
 << "io" : io;
@@ -58,6 +58,7 @@ propagate them explicitly.
 
 ## Specification
 
+- [Draft 0.4.3 local source modules](docs/draft-0.4.3.md) and [independent review](docs/review-0.4.3.md)
 - [Draft 0.4.2 semantic consolidation](docs/plan-0.4.2.md) and [independent review](docs/review-0.4.2.md)
 - [Draft 0.4.1 typed errors and migration](docs/draft-0.4.1.md)
 - [Draft 0.4.1 implementation review and measurements](docs/review-0.4.1.md)

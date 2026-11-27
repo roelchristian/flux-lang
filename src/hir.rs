@@ -403,7 +403,7 @@ pub fn lower(
         .constructors
         .iter()
         .map(|(&id, c)| {
-            let name = resolution.symbol(id).name.as_str();
+            let name = crate::visible_symbol(&resolution.symbol(id).name);
             (
                 id,
                 ConstructorDef {

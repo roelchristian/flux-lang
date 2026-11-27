@@ -73,12 +73,29 @@ pub mod hir;
 pub mod hir_eval;
 pub mod infer;
 pub mod lexer;
+pub mod modules;
 pub mod parser;
 pub mod resolve;
 pub mod semantic;
 pub mod types;
 
 pub use csv::{FsInput, OpenedInput, RuntimeInput};
+
+// Linked names encode a canonical path, but their source names are display metadata.
+fn linked_prefix(name: &str) -> Option<usize> {
+    let head = name.strip_prefix('\0')?;
+    let (tag, _) = head.split_once(':')?;
+    (!tag.is_empty()
+        && tag.len() % 2 == 0
+        && tag
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(tag.len() + 2)
+}
+
+pub(crate) fn visible_symbol(name: &str) -> &str {
+    linked_prefix(name).map_or(name, |prefix| &name[prefix..])
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Error {
@@ -108,20 +125,38 @@ impl Error {
     }
 
     pub fn diagnostic(&self, path: &str, source: &str) -> String {
-        let position = (0..=self.start.min(source.len()))
-            .rev()
-            .find(|p| source.is_char_boundary(*p))
-            .unwrap_or(0);
-        let preceding = &source[..position];
-        let line = preceding.bytes().filter(|c| *c == b'\n').count() + 1;
-        let column = preceding.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+        self.diagnostic_with(|offset| Some((path, source, offset)))
+    }
+
+    /// Render global byte offsets against their original source, including
+    /// notes whose source file differs from the primary error.
+    pub fn diagnostic_with<'a>(
+        &self,
+        locate: impl Fn(usize) -> Option<(&'a str, &'a str, usize)>,
+    ) -> String {
+        let coordinates = |source: &str, offset: usize| {
+            let position = (0..=offset.min(source.len()))
+                .rev()
+                .find(|p| source.is_char_boundary(*p))
+                .unwrap_or(0);
+            let preceding = &source[..position];
+            let line = preceding.bytes().filter(|c| *c == b'\n').count() + 1;
+            let column = preceding.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+            (position, line, column)
+        };
+        let Some((path, source, offset)) = locate(self.start) else {
+            return self.message.clone();
+        };
+        let (position, line, column) = coordinates(source, offset);
         let mut result = format!("{path}:{line}:{column}: {}", self.message);
         if let Some(detail) = self.structured() {
-            let line_start = preceding.rfind('\n').map_or(0, |end| end + 1);
+            let line_start = source[..position].rfind('\n').map_or(0, |end| end + 1);
             let line_end = source[position..]
                 .find('\n')
                 .map_or(source.len(), |end| position + end);
-            let end = detail.primary.end.min(line_end);
+            let end = offset
+                .saturating_add(detail.primary.end.saturating_sub(self.start))
+                .min(line_end);
             if let Some(mark) = source.get(position..end).filter(|s| !s.is_empty()) {
                 result.push_str(&format!(
                     "\n  {}\n  {}{}",
@@ -140,13 +175,15 @@ impl Error {
                 }
             }
             for related in &detail.related {
-                let prefix = source.get(..related.span.start).unwrap_or("");
-                let line = prefix.bytes().filter(|b| *b == b'\n').count() + 1;
-                let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
-                result.push_str(&format!(
-                    "\n  note: {path}:{line}:{column}: {}",
-                    related.label
-                ));
+                if let Some((path, source, offset)) = locate(related.span.start) {
+                    let (_, line, column) = coordinates(source, offset);
+                    result.push_str(&format!(
+                        "\n  note: {path}:{line}:{column}: {}",
+                        related.label
+                    ));
+                } else {
+                    result.push_str(&format!("\n  note: {}", related.label));
+                }
             }
             if let Some(suggestion) = &detail.suggestion {
                 result.push_str(&format!("\n  help: {suggestion}"));
@@ -182,10 +219,101 @@ pub fn run_source(source: &str) -> Result<eval::Output, Error> {
     .run()
 }
 
+/// Failure from a path-based frontend or runtime operation.
+#[derive(Debug)]
+pub enum PathError {
+    Load(modules::LoadError),
+    Semantic { error: Error, rendered: String },
+}
+
+impl PathError {
+    pub fn diagnostic(&self) -> String {
+        match self {
+            Self::Load(error) => error.diagnostic(),
+            Self::Semantic { rendered, .. } => rendered.clone(),
+        }
+    }
+
+    pub fn semantic(loaded: &modules::LoadedProgram, error: Error) -> Self {
+        let rendered = loaded.diagnostic(&error);
+        Self::Semantic { error, rendered }
+    }
+}
+
+impl From<modules::LoadError> for PathError {
+    fn from(error: modules::LoadError) -> Self {
+        Self::Load(error)
+    }
+}
+
+impl std::fmt::Display for PathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.diagnostic())
+    }
+}
+
+impl std::error::Error for PathError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Load(error) => Some(error),
+            Self::Semantic { error, .. } => Some(error),
+        }
+    }
+}
+
+/// Load and type-check a file and its local dependency graph without evaluating.
+pub fn check_path(path: impl AsRef<std::path::Path>) -> Result<modules::LoadedProgram, PathError> {
+    let loaded = modules::load(path)?;
+    semantic::prepare_modules(
+        &loaded.program,
+        semantic::Mode::Script,
+        semantic::Policy::TypedOnly,
+        &loaded.module_inputs,
+    )
+    .map_err(|error| PathError::semantic(&loaded, error))?;
+    Ok(loaded)
+}
+
+/// Check the complete graph and return the root module's explicit public interface.
+pub fn interface_path(
+    path: impl AsRef<std::path::Path>,
+) -> Result<semantic::ModuleInterface, PathError> {
+    let loaded = modules::load(path)?;
+    let interfaces = semantic::check_module_interfaces(&loaded.program, &loaded.module_inputs)
+        .map_err(|error| PathError::semantic(&loaded, error))?;
+    interfaces
+        .into_iter()
+        .find(|interface| interface.path == loaded.root)
+        .ok_or_else(|| PathError::semantic(&loaded, Error::new(0, "missing root module interface")))
+}
+
+/// Load, check and execute one file using typed HIR.
+pub fn run_path(path: impl AsRef<std::path::Path>) -> Result<eval::Output, PathError> {
+    let loaded = modules::load(path)?;
+    semantic::prepare_modules(
+        &loaded.program,
+        semantic::Mode::Script,
+        semantic::Policy::TypedOnly,
+        &loaded.module_inputs,
+    )
+    .and_then(|prepared| prepared.run())
+    .map_err(|error| PathError::semantic(&loaded, error))
+}
+
+/// Parse a file and its local imports, then format only the original root text.
+pub fn format_path(path: impl AsRef<std::path::Path>) -> Result<String, PathError> {
+    let loaded = modules::load(path)?;
+    format_tokens(loaded.root_source()).map_err(|error| PathError::semantic(&loaded, error))
+}
+
 /// Conservative early formatter: normalize line endings and remove trailing whitespace.
 /// Does not reorder operators, reindent code, or modify comments' textual content.
 pub fn format_source(source: &str) -> Result<String, Error> {
     parser::parse(source)?;
+    format_tokens(source)
+}
+
+fn format_tokens(source: &str) -> Result<String, Error> {
     let mut result = source
         .lines()
         .map(|line| line.trim_end_matches([' ', '\t']))
@@ -234,6 +362,28 @@ pub fn documentation_comments(source: &str) -> Result<Vec<DocComment<'_>>, Error
 #[cfg(test)]
 mod format_tests {
     use super::*;
+
+    #[test]
+    fn mapped_diagnostic_preserves_cross_file_notes_and_byte_ranges() {
+        use crate::diagnostic::{Category, Diagnostic, Related, Span};
+
+        let mut detail = Diagnostic::new(Category::Type, Span::new(103, 106), "wrong type");
+        detail.related.push(Related {
+            label: "declared here".into(),
+            span: Span::at(203),
+        });
+        let display = detail.into_error().diagnostic_with(|offset| match offset {
+            100..=106 => Some(("app.flx", "x;\néa;", offset - 100)),
+            200..=205 => Some(("lib.flx", "x;\né;", offset - 200)),
+            _ => None,
+        });
+        assert!(display.starts_with("app.flx:2:1: E0200:"), "{display}");
+        assert!(display.contains("\n  éa;\n  ^^"), "{display}");
+        assert!(
+            display.ends_with("note: lib.flx:2:1: declared here"),
+            "{display}"
+        );
+    }
 
     #[test]
     fn preserves_guard_alignment_and_documents_only_standalone_lines() {

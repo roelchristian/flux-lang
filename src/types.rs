@@ -164,7 +164,7 @@ impl fmt::Display for Type {
                 f.write_str("#")?;
                 result_operand(t, f)
             }
-            Self::Nominal(n) => f.write_str(&n.name),
+            Self::Nominal(n) => f.write_str(crate::visible_symbol(&n.name)),
             Self::Record(row) => write!(f, "{row}"),
         }
     }
@@ -471,6 +471,21 @@ impl InferCtx {
                 Ok(())
             }
             (Record(x), Record(y)) => self.unify_rows(x, y),
+            (Nominal(x), Nominal(y))
+                if a != b && crate::visible_symbol(&x.name) == crate::visible_symbol(&y.name) =>
+            {
+                let left = crate::semantic::public_text(&x.name);
+                let right = crate::semantic::public_text(&y.name);
+                if left == right {
+                    Err(format!(
+                        "cannot unify distinct nominal declarations of {left}"
+                    ))
+                } else {
+                    Err(format!(
+                        "cannot unify distinct nominal types {left} and {right}"
+                    ))
+                }
+            }
             _ if a == b => Ok(()),
             _ => Err(format!("cannot unify {a} with {b}")),
         }
