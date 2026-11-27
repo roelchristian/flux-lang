@@ -1,0 +1,37 @@
+<< "csv";
+<< "df";
+<< "io";
+
+apperr :: { | dataerr csverr; | printer ioerr; };
+
+obs :: {
+    station:s;
+    value:q;
+    valid:b;
+};
+
+--- Summarise valid positive readings for one monitoring station.
+summ(k:s,t:#obs) := .{
+    station := k;
+    count   := # t;
+    mean    := avg .value t;
+    median  := med .value t;
+    sd      := sd .value t;
+};
+
+!{
+    ^{
+        input:#obs^csverr := ! csv.read "examples/monitoring.csv";
+        t := ^= input { e : ^: dataerr e; };
+        u := |{
+            t;
+            ?: .valid $ $;
+            ?: (> .value $ 0) $
+        };
+        a := df.agg &.station &summ u;
+        b := <: &.count a;
+        ^= ! io.print b { e : ^: printer e; };
+        ^= ! csv.write "summary.csv" b { e : ^: dataerr e; };
+        ()
+    }
+};

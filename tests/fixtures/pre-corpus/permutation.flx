@@ -1,0 +1,17 @@
+<< "io" : io;
+
+p(n,r:n):n := ? {
+    > r n : 0;
+    _     : */ (.. (+ (- n r) 1) n);
+};
+
+apply2(f:n->n->n,x,y:n):n := @@ f (x,y);
+
+!{
+    ^{
+        ^? ! io.print (apply2 &p 5 3);
+        ^? ! io.print (p 5 0);
+        ^? ! io.print (p 3 5);
+        ()
+    }
+};
