@@ -10,10 +10,12 @@ err :: { | input csverr; | output csverr; | trace ioerr; };
 
 lmark(x:ledgerrow):marked := marked { id:=.id x; ledger:=1n; statement:=0n; };
 smark(x:stmtrow):marked := marked { id:=.id x; ledger:=0n; statement:=1n; };
+ledger_count:#marked->n := &{ @. +/ .ledger };
+statement_count:#marked->n := &{ @. +/ .statement };
 counts(k:s,x:#marked):counted := counted {
     id        := k;
-    ledger    := +/ .ledger x;
-    statement := +/ .statement x;
+    ledger    := @ ledger_count x;
+    statement := @ statement_count x;
 };
 
 duplicate(x:counted):finding := finding {
@@ -28,14 +30,18 @@ statement_only(x:stmtrow):finding := finding {
 };
 has_amount(x:(ledgerrow,stmtrow)):b := ?+ .amount (.2 x);
 lacks_amount(x:(ledgerrow,stmtrow)):b := ~ has_amount x;
-delta(x:(ledgerrow,stmtrow)):d := - .amount (.1 x) (?! .amount (.2 x));
+amount_or_fail(x:stmtrow):d := ?! .amount x;
+delta_fn:(ledgerrow,stmtrow)->d :=
+    &{ @* - (@. .amount .1) (@. amount_or_fail .2) };
+delta(x:(ledgerrow,stmtrow)):d := @ delta_fn x;
+pair_key:(ledgerrow,stmtrow)->s := &{ @. .id .1 };
 differs(x:(ledgerrow,stmtrow)):b := /= (delta x) 0.00d;
 missing_amount(x:(ledgerrow,stmtrow)):finding := finding {
-    key:=.id (.1 x); status:="missing_statement_amount";
+    key:=@ pair_key x; status:="missing_statement_amount";
     ledger:=1n; statement:=1n; difference:=?0;
 };
 mismatch(x:(ledgerrow,stmtrow)):finding := finding {
-    key:=.id (.1 x); status:="amount_difference";
+    key:=@ pair_key x; status:="amount_difference";
     ledger:=1n; statement:=1n; difference:=?1 (delta x);
 };
 
