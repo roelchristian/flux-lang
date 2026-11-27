@@ -16,14 +16,14 @@ fn symbol_at(bytes: &[u8]) -> Option<&'static str> {
         b'#' => &["#:", "#[", "#{", "#"],
         b'$' => &["$"],
         b'%' => &["%"],
-        b'&' => &["&&/", "&&", "&:", "&"],
+        b'&' => &["&&/", "&&", "&:", "&{", "&"],
         b'(' => &["("],
         b')' => &[")"],
         b'*' => &["*/", "*:", "*=", "*?", "*"],
         b'+' => &["+//", "+/", "+:", "+"],
         b',' => &[","],
         b'-' => &["-:", "->", "-"],
-        b'.' => &["..", ".:", ".{"],
+        b'.' => &["..", ".:", ".{", "."],
         b'/' => &["//", "/:", "/=", "/"],
         b':' => &[":#", "::", ":=", ":"],
         b';' => &[";"],
@@ -31,7 +31,18 @@ fn symbol_at(bytes: &[u8]) -> Option<&'static str> {
         b'=' => &["=.", "=:", "==", "="],
         b'>' => &[">/", ">:", ">=", ">>", ">"],
         b'?' => &["?!", "?+", "?/", "?0", "?1", "?:", "?=", "??", "?{", "?"],
-        b'@' => &["@:", "@>", "@@", "@"],
+        // Preserve compact ordinary application to an existing compound
+        // operand or selector: @.field, @.1, @?{, @?!, and similar forms.
+        b'@' if matches!(bytes.get(1), Some(b'.' | b'?' | b'*'))
+            && (symbol_at(&bytes[1..]).is_some_and(|op| op.len() > 1)
+                || bytes[1] == b'.'
+                    && bytes
+                        .get(2)
+                        .is_some_and(|b| ident_start(*b) || b.is_ascii_digit())) =>
+        {
+            &["@"]
+        }
+        b'@' => &["@:", "@>", "@@", "@.", "@*", "@?", "@"],
         b'[' => &["[:", "["],
         b'\\' => &["\\:", "\\"],
         b']' => &["]"],
@@ -338,5 +349,20 @@ mod tests {
         ] {
             assert!(lex(malformed).is_err(), "{malformed}");
         }
+    }
+
+    #[test]
+    fn tacit_tokens_keep_projection_qualified_name_and_numeral_boundaries() {
+        let source = "&{ @. (lib.f) . @* &.cost .1 @? .{ .: .. 1.20d } &.";
+        let tokens = lex(source).unwrap();
+        let terms: Vec<_> = tokens.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            terms,
+            [
+                "&{", "@.", "(", "lib.f", ")", ".", "@*", "&", ".cost", ".1", "@?", ".{", ".:",
+                "..", "1.20d", "}", "&", "."
+            ]
+        );
+        assert!(tokens.iter().all(|t| t.text == source[t.start..t.end]));
     }
 }

@@ -408,6 +408,8 @@ fn all_bundled_examples_work_in_both_executor_entry_points() {
         ("observations", "2\n?1 15\n"),
         ("permutation", "60\n1\n0\n"),
         ("pipeline", "337965\n"),
+        ("tacit", "(10, 13, 12, identity)\n"),
+        ("tacit-finance", "([C], [0.00 0.00 0.02])\n"),
     ];
     let known_files: BTreeSet<_> = outputs
         .iter()

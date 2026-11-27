@@ -66,3 +66,11 @@ be carried from a named or structural return annotation, a record-literal body o
 reachable helper. A shape hidden behind an opaque function value still needs static metadata
 passed to the evaluator. A CSV optional value that would serialize indistinguishably from
 absence is rejected. There is no automatic overwrite.
+
+
+## Draft 0.7: reference frontend and subsequent work
+
+See the [tacit plan](plan-0.7-tacit.md) for the current typed frontend.
+Tacit constructs lower to ordinary references, lambdas, and applications;
+the legacy oracle is not required to parse the new syntax. Generalized
+trains, rank, and optimizer-only changes remain outside this draft.

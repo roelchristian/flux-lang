@@ -1,6 +1,6 @@
 use flux_lang::{
     format_path, interface_path, lexer, modules,
-    parser::MemberKind,
+    parser::{needs_continuation, MemberKind},
     semantic::{prepare_modules, prepare_modules_timed, Mode as SemanticMode, Policy, Timings},
 };
 use std::io::{self, IsTerminal, Write};
@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 const REPL_HELP: &str =
-    "Submit one line at a time. Expressions print their value and type. Definitions and history last for this session.
+    "Use one line or continue an open delimiter on another line. Expressions print their value and type.
 :type EXPR    show the static type without evaluating
 :schema EXPR  show a table's static schema without evaluating
 :load PATH    load and check a file of declarations without executing it
@@ -205,22 +205,51 @@ enum Mode {
 fn repl() -> Result<u8, String> {
     let stdin = io::stdin();
     let interactive = stdin.is_terminal();
+    const MAX_PENDING_BYTES: usize = 64 * 1024;
     let mut line = String::new();
+    let mut pending = String::new();
     let mut session = Session::new();
     loop {
         if interactive {
-            print!("flux> ");
+            print!(
+                "{}",
+                if pending.is_empty() {
+                    "flux> "
+                } else {
+                    "...> "
+                }
+            );
             io::stdout().flush().map_err(|e| e.to_string())?;
         }
         line.clear();
         if stdin.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+            if !pending.is_empty() {
+                eprintln!("incomplete REPL submission at end of input");
+            }
             break;
         }
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("--") {
+        if pending.is_empty() && (line.trim().is_empty() || line.trim_start().starts_with("--")) {
             continue;
         }
-        match session.dispatch(line) {
+        if pending.is_empty() && line.trim_start().starts_with(":load ") {
+            // Filesystem paths are not Flux expression tokens.
+            if let Err(error) = session.dispatch(line.trim()) {
+                eprintln!("{error}");
+            }
+            continue;
+        }
+        if pending.len() + line.len() > MAX_PENDING_BYTES {
+            pending.clear();
+            eprintln!("REPL submission exceeds 64 KiB");
+            continue;
+        }
+        pending.push_str(&line);
+        if needs_continuation(&pending) {
+            continue;
+        }
+        let proceed = session.dispatch(pending.trim());
+        pending.clear();
+        match proceed {
             Ok(false) => break,
             Ok(true) => {}
             Err(error) => eprintln!("{error}"),
