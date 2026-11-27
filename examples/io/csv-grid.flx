@@ -1,12 +1,25 @@
 << "csv";
 
-problem :: { | input csverr; | output ioerr; };
-!{ ^{
-    grid:[[s]] := ^= ! csv.read "examples/io/data/quoted-grid.csv" { e : ^: input e; };
-    first := ?! .: 2n grid;
-    second := ?! .: 3n grid;
-    ^= ! print (# grid) { e : ^: output e; };
-    ^= ! print (?! .: 2n first) { e : ^: output e; };
-    ^= ! print (?! .: 2n second) { e : ^: output e; };
-    ()
-} };
+problem :: {
+    | input csverr;
+    | output ioerr;
+};
+!{
+    ^{
+        grid: [[s]] := ^= ! csv.read "examples/io/data/quoted-grid.csv" {
+            e : ^: input e;
+        };
+        first := ?! .: 2n grid;
+        second := ?! .: 3n grid;
+        ^= ! print (# grid) {
+            e : ^: output e;
+        };
+        ^= ! print (?! .: 2n first) {
+            e : ^: output e;
+        };
+        ^= ! print (?! .: 2n second) {
+            e : ^: output e;
+        };
+        ()
+    }
+};

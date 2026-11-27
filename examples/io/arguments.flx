@@ -1,8 +1,10 @@
 << "sys";
 
-!{ ^{
-    xs := ! sys.args;
-    ^? ! print (# xs,?? "no arguments" (.: 1n xs));
-    ^? ! print xs;
-    ()
-} };
+!{
+    ^{
+        xs := ! sys.args;
+        ^? ! print (# xs, ?? "no arguments" (.: 1n xs));
+        ^? ! print xs;
+        ()
+    }
+};
