@@ -5,7 +5,7 @@ poly := &{ @? + square };
 
 !{
     ^{
-        ^? ! print (@ square 4z,@ cube 4z,@ poly 4z);
+        ^? ! print (@ square 4z, @ cube 4z, @ poly 4z);
         ^? ! print (@: poly (.. 1z 4z));
         ()
     }
