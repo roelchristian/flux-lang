@@ -1,0 +1,8 @@
+--- Rational operators normalize signs and cancel common factors.
+a := / 5q 12q;
+b := / 7q 18q;
+sum := + a b;
+difference := - a b;
+product := * a b;
+
+!{ ^{ ^? ! print (sum,difference,product); () } };

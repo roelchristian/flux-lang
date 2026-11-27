@@ -1,0 +1,10 @@
+--- Trial division stops at the square root without computing a real.
+trial(n,d:n):b :=
+    ?{
+        > (* d d) n : 1b;
+        = (% n d) 0 : 0b;
+        _           : trial n (+ d 1);
+    };
+prime(n:n):b := ? (< n 2) 0b (trial n 2);
+
+!{ ^{ ^? ! print (?: &prime (.. 2n 30n)); () } };
