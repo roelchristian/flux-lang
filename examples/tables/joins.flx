@@ -2,16 +2,28 @@
 << "df";
 << "opt";
 
-err :: { | data csverr; | output ioerr; };
-reading :: { code:?s; sample:s; };
-station :: { code:?s; label:s; };
+err :: {
+    | data csverr;
+    | output ioerr;
+};
+reading :: {
+    code   : ?s;
+    sample : s;
+};
+station :: {
+    code  : ?s;
+    label : s;
+};
 empty:#station := #[];
 
 --- A missing key matches a missing key; this is not SQL NULL equality.
 --- Both north matches are retained in the right table's original order.
-label(x:station):s := .label x;
-report(x:(reading,?station)) :=
-    .{ sample := .sample .1 x; site := ?? "no match" (opt.map &label .2 x); };
+label(x: station): s := .label x;
+report(x: (reading, ?station)) :=
+    .{
+        sample := .sample .1 x;
+        site   := ?? "no match" (opt.map &label .2 x);
+    };
 
 !{
     ^{
@@ -19,17 +31,30 @@ report(x:(reading,?station)) :=
             e : ^: data e;
         };
         samples := #[
-            reading { code := ?1 "north"; sample := "A"; }
-            reading { code := ?0; sample := "B"; }
-            reading { code := ?1 "west"; sample := "C"; }
+            reading {
+                code   := ?1 "north";
+                sample := "A";
+            }
+            reading {
+                code   := ?0;
+                sample := "B";
+            }
+            reading {
+                code   := ?1 "west";
+                sample := "C";
+            }
         ];
         inner := *= &.code &.code samples sites;
         joined := df.select &report (*? &.code &.code samples sites);
         unmatched := df.anti &.code &.code samples sites;
         --- Even with an empty right side, the type of the optional row is known.
-        blank:#(reading,?station) := *? &.code &.code samples empty;
-        ^= ! print (# inner,.sample joined,.site joined) { e : ^: output e; };
-        ^= ! print (.sample unmatched,.site (df.select &report blank)) { e : ^: output e; };
+        blank:#(reading, ?station) := *? &.code &.code samples empty;
+        ^= ! print (# inner, .sample joined, .site joined) {
+            e : ^: output e;
+        };
+        ^= ! print (.sample unmatched, .site (df.select &report blank)) {
+            e : ^: output e;
+        };
         ()
     }
 };

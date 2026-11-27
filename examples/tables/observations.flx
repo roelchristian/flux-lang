@@ -1,7 +1,14 @@
 << "csv";
 
-err :: { | data csverr; | output ioerr; };
-obs :: { station:s; value:q; valid:b; };
+err :: {
+    | data csverr;
+    | output ioerr;
+};
+obs :: {
+    station : s;
+    value   : q;
+    valid   : b;
+};
 
 !{
     ^{
@@ -9,8 +16,12 @@ obs :: { station:s; value:q; valid:b; };
             e : ^: data e;
         };
         u := ?: (&& (.valid t) (> (.value t) 0q)) t;
-        ^= ! print # u { e : ^: output e; };
-        ^= ! print avg .value u { e : ^: output e; };
+        ^= ! print # u {
+            e : ^: output e;
+        };
+        ^= ! print avg .value u {
+            e : ^: output e;
+        };
         ()
     }
 };
