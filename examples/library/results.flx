@@ -1,16 +1,27 @@
 << "res";
 
-missing :: { | unfound s; };
-checked(x:z):z^missing := ^{
-    ?{ < x 0z : ^: unfound "reading"; _ : x; }
+missing :: {
+    | unfound s;
 };
-bump(x:z):z := + x 1z;
+checked(x: z): z ^ missing := ^{
+    ?{
+        < x 0z : ^: unfound "reading";
+        _      : x;
+    }
+};
+bump(x: z): z := + x 1z;
 all := [checked 4z checked -1z checked 8z];
 partition := res.partition all;
-first_error := ^= res.collect all { unfound _ : [-1z]; };
-mapped := ^= res.map &bump (checked 7z) { unfound _ : 0z; };
-!{ ^{
-    ^? ! print (.1 partition,# .2 partition,mapped);
-    ^? ! print first_error;
-    ()
-} };
+first_error := ^= res.collect all {
+    unfound _ : [-1z];
+};
+mapped := ^= res.map &bump (checked 7z) {
+    unfound _ : 0z;
+};
+!{
+    ^{
+        ^? ! print (.1 partition, # .2 partition, mapped);
+        ^? ! print first_error;
+        ()
+    }
+};
