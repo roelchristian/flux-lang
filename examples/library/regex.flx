@@ -3,9 +3,15 @@
 first := ^= rx.find "[A-Z]+-[0-9]+" "ticket AB-42 then CD-3" {
     badpattern _ : ?0;
 };
-second := ^= rx.find "[A-Z]+" "lowercase" { badpattern _ : ?0; };
-bad := ^= rx.find "bad(" "text" { badpattern p : ?1 p; };
-!{ ^{
-    ^? ! print (?? "no match" first,?+ second,== (?? "" bad) "bad(");
-    ()
-} };
+second := ^= rx.find "[A-Z]+" "lowercase" {
+    badpattern _ : ?0;
+};
+bad := ^= rx.find "bad(" "text" {
+    badpattern p : ?1 p;
+};
+!{
+    ^{
+        ^? ! print (?? "no match" first, ?+ second, == (?? "" bad) "bad(");
+        ()
+    }
+};

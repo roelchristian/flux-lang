@@ -3,9 +3,11 @@
 a := + 1.20d 2.3d;
 b := * 1.20d 2.0d;
 
-!{ ^{
-    ^? ! print (a,b);
-    ^? ! print (math.quantize 2 2.345d,math.quantize 2 -2.355d);
-    ^? ! print (math.quantize 4 (/ 1q 3q));
-    ()
-} };
+!{
+    ^{
+        ^? ! print (a, b);
+        ^? ! print (math.quantize 2 2.345d, math.quantize 2 -2.355d);
+        ^? ! print (math.quantize 4 (/ 1q 3q));
+        ()
+    }
+};

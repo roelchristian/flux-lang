@@ -147,6 +147,20 @@ fn every_public_example_checks_and_runs_with_its_manifest_contract() {
             all.insert(path.canonicalize().unwrap());
         }
     });
+    // Include library-only modules as well as executable entry points.
+    // All tracked Flux source uses LF, including Windows checkouts.
+    for path in &all {
+        let out = Command::new(env!("CARGO_BIN_EXE_flux"))
+            .args(["fmt", "--check"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+            "noncanonical example {path:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     let mut covered = BTreeSet::new();
     let mut entries = BTreeSet::new();
     let example_files = snapshot(&repo.join("examples"));

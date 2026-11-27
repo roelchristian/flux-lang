@@ -5,7 +5,7 @@ transformation and scripting. It uses strict prefix notation: `+ 2 3` means
 “add 2 and 3”. Formulas compose as functions, while file and terminal operations
 run only when explicitly requested.
 
-This repository contains the **Draft 0.7** reference interpreter in Rust.
+This repository contains the **Draft 0.8** reference interpreter in Rust.
 The language is still experimental.
 
 ## Quickstart
@@ -20,7 +20,8 @@ Expected output: `Salve, munde.`
 
 Install the CLI with `cargo install --locked --path .`. Run `flux FILE` to execute
 a script, `flux check FILE` to check it without running it, or `flux fmt FILE` to
-print formatted source. Run `flux` without arguments for the REPL; try
+print formatted source (`flux fmt --check FILE` checks formatting without
+writing it). Run `flux` without arguments for the REPL; try
 `+/ [1 2 3];` or `:type / 1 3;`.
 
 ## A small program
@@ -30,10 +31,12 @@ Save this as `squares.flx` and run `flux squares.flx`:
 ```flux
 sq := &{ @* * . . };
 
-!{ ^{
-    ^? ! print (@: sq (.. 1z 5z));
-    ()
-} };
+!{
+    ^{
+        ^? ! print (@: sq (.. 1z 5z));
+        ()
+    }
+};
 ```
 
 It prints `[1 4 9 16 25]`. In the tacit block `&{ ... }`, each `.` supplies the
@@ -57,7 +60,7 @@ commands, sample inputs and expected outputs.
 
 ## Reference and development
 
-- [Syntax](docs/specification.md) and [type system](docs/draft-0.4.md)
+- [Syntax](docs/specification.md), [layout](docs/draft-0.8-layout.md) and [type system](docs/draft-0.4.md)
 - [Tacit function algebra](docs/draft-0.7-tacit.md) and [source modules](docs/draft-0.4.3.md)
 - [Standard library and typed results](docs/draft-0.5-stdlib.md), [numerics](docs/draft-0.5-numerics.md) and [tables](docs/draft-0.6-relational.md)
 - [Implementation notes](docs/implementation.md) and [performance](docs/performance.md)

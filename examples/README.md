@@ -8,7 +8,9 @@ otherwise. Install the CLI with `cargo install --path .`, or replace
 
 Start with [hello](basics/hello.flx), then try [prefix expressions](basics/expressions.flx),
 [collections](basics/collections.flx), [guards](basics/guards.flx), and [pipelines](basics/pipeline.flx).
-Try `flux fmt examples/basics/pipeline.flx` to see the source formatting.
+Try `flux fmt examples/basics/pipeline.flx` to see the canonical layout, or
+add `--check` after `fmt` to check it without producing formatted output.
+See the [layout conventions](../docs/draft-0.8-layout.md) for the margins.
 
 ## 2. Functions and inference
 

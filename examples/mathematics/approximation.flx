@@ -1,6 +1,11 @@
 --- Convert to a finite real deliberately; converting back reveals its value.
 qv := / 1q 10q;
-rv := :r qv;
+rv := : r qv;
 root := ^/ 2q;
 
-!{ ^{ ^? ! print (qv,rv,:q rv,root); () } };
+!{
+    ^{
+        ^? ! print (qv, rv,: q rv, root);
+        ()
+    }
+};

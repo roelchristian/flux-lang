@@ -1,15 +1,22 @@
 << "csv";
 << "df";
 
-err :: { | data csverr; | output ioerr; };
-obs :: { station:s; value:q; valid:b; };
+err :: {
+    | data csverr;
+    | output ioerr;
+};
+obs :: {
+    station : s;
+    value   : q;
+    valid   : b;
+};
 
-summ(k:s,t:#obs) := .{
+summ(k: s, t:#obs) := .{
     station := k;
-    count := # t;
-    mean := avg .value t;
-    median := med .value t;
-    sd := sd .value t;
+    count   := # t;
+    mean    := avg .value t;
+    median  := med .value t;
+    sd      := sd .value t;
 };
 
 !{
@@ -24,8 +31,12 @@ summ(k:s,t:#obs) := .{
             df.agg &.station &summ $;
             <: &.count $
         };
-        ^= ! print summary { e : ^: output e; };
-        ^= ! csv.write "summary.csv" summary { e : ^: data e; };
+        ^= ! print summary {
+            e : ^: output e;
+        };
+        ^= ! csv.write "summary.csv" summary {
+            e : ^: data e;
+        };
         ()
     }
 };

@@ -1,14 +1,18 @@
 << "opt";
 
-bump(x:z):z := + x 1z;
-only_positive(x:z):?z := ? (> x 0z) (?1 x) ?0;
-absent:?z := ?0;
+bump(x: z): z := + x 1z;
+only_positive(x: z): ?z := ? (> x 0z) (?1 x) ?0;
+absent: ?z := ?0;
 present := opt.map &bump (?1 7z);
 kept := opt.bind &only_positive present;
 dropped := opt.bind &only_positive (?1 -1z);
-converted := ^= opt.result "missing reading" absent { _ : -1z; };
-!{ ^{
-    ^? ! print (?? 0z kept,?+ dropped,?+ (opt.map &bump absent));
-    ^? ! print converted;
-    ()
-} };
+converted := ^= opt.result "missing reading" absent {
+    _ : -1z;
+};
+!{
+    ^{
+        ^? ! print (?? 0z kept, ?+ dropped, ?+ (opt.map &bump absent));
+        ^? ! print converted;
+        ()
+    }
+};

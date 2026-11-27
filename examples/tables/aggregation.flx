@@ -1,17 +1,42 @@
 << "df";
 
-obs :: { site:s; band:?s; signal:q; };
-key(x:obs): (s,?s) := (.site x,.band x);
-report(k:(s,?s),t:#obs) :=
-    .{ site := .1 k; band := .2 k; count := # t; mean := avg .signal t; };
+obs :: {
+    site   : s;
+    band   : ?s;
+    signal : q;
+};
+key(x: obs): (s, ?s) := (.site x, .band x);
+report(k: (s, ?s), t:#obs) :=
+    .{
+        site  := .1 k;
+        band  := .2 k;
+        count := # t;
+        mean  := avg .signal t;
+    };
 
 !{
     ^{
         t := #[
-            obs { site := "ridge"; band := ?1 "red"; signal := 9q; }
-            obs { site := "ridge"; band := ?0; signal := 0q; }
-            obs { site := "ridge"; band := ?1 "red"; signal := 12q; }
-            obs { site := "marsh"; band := ?1 "red"; signal := 8q; }
+            obs {
+                site   := "ridge";
+                band   := ?1 "red";
+                signal := 9q;
+            }
+            obs {
+                site   := "ridge";
+                band   := ?0;
+                signal := 0q;
+            }
+            obs {
+                site   := "ridge";
+                band   := ?1 "red";
+                signal := 12q;
+            }
+            obs {
+                site   := "marsh";
+                band   := ?1 "red";
+                signal := 8q;
+            }
         ];
         --- Compound groups remain in first-seen order, including absent bands.
         ^? ! print (df.agg &key &report t);

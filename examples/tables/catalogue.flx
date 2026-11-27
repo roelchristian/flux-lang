@@ -1,8 +1,16 @@
 << "csv";
 << "df";
 
-err :: { | data csverr; | output ioerr; };
-entry :: { star:s; constellation:s; magnitude:?d; parallax_mas:?d; };
+err :: {
+    | data csverr;
+    | output ioerr;
+};
+entry :: {
+    star          : s;
+    constellation : s;
+    magnitude     : ?d;
+    parallax_mas  : ?d;
+};
 
 !{
     ^{
@@ -13,7 +21,9 @@ entry :: { star:s; constellation:s; magnitude:?d; parallax_mas:?d; };
         --- Each constellation key retains its source rows.
         groups := =: &.constellation known;
         lyra := .: "Lyra" groups;
-        ^= ! print (# stars,# known,# groups,lyra) { e : ^: output e; };
+        ^= ! print (# stars, # known, # groups, lyra) {
+            e : ^: output e;
+        };
         ()
     }
 };

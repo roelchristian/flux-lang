@@ -19,7 +19,19 @@ pub struct Program {
     pub exports: Vec<String>,
     origins: Vec<Origin>,
     members: Vec<ModuleMember>,
+    formatting_applications: Vec<FormattingApplication>,
 }
+/// Original source ranges for one ordinary prefix or tacit application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormattingApplication {
+    /// From the operator through its final operand, excluding outer grouping.
+    pub span: Range<usize>,
+    pub operator: Range<usize>,
+    /// Operand ranges include any explicit grouping and exclude surrounding trivia.
+    pub operands: Vec<Range<usize>>,
+    pub tacit: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Def {
@@ -576,6 +588,11 @@ pub struct ImportDecl {
 }
 
 impl Program {
+    /// Available only for parses that explicitly requested layout metadata.
+    pub fn formatting_applications(&self) -> &[FormattingApplication] {
+        &self.formatting_applications
+    }
+
     pub fn module_members(&self) -> Vec<ModuleMember> {
         self.members.clone()
     }
@@ -646,6 +663,7 @@ fn parser_for(
         depth: 0,
         constraints: BTreeMap::new(),
         origins: Vec::new(),
+        formatting_applications: None,
     })
 }
 
@@ -657,6 +675,23 @@ pub fn parse_module(
     imports: &[ImportedModule],
 ) -> PResult<Program> {
     parser_for(source, base, namespace, imports)?.program()
+}
+
+/// Like `parse`, collecting original call ranges for source formatting.
+pub fn parse_with_layout(source: &str) -> PResult<Program> {
+    parse_module_with_layout(source, 0, None, &[])
+}
+
+/// Like `parse_module`, collecting layout for this source file only.
+pub(crate) fn parse_module_with_layout(
+    source: &str,
+    base: usize,
+    namespace: Option<&str>,
+    imports: &[ImportedModule],
+) -> PResult<Program> {
+    let mut p = parser_for(source, base, namespace, imports)?;
+    p.formatting_applications = Some(Vec::new());
+    p.program()
 }
 
 /// Discover only top-level imports before binding interfaces. No imported
@@ -700,6 +735,7 @@ struct Parser {
     depth: usize,
     constraints: BTreeMap<usize, Vec<(String, String)>>,
     origins: Vec<Origin>,
+    formatting_applications: Option<Vec<FormattingApplication>>,
 }
 fn is_ident(s: &str) -> bool {
     let mut bytes = s.bytes();
@@ -1111,6 +1147,7 @@ impl Parser {
             exports: Vec::new(),
             origins: Vec::new(),
             members: Vec::new(),
+            formatting_applications: Vec::new(),
         };
         let mut exports = Vec::new();
         // Resolve top-level interfaces before any expression is parsed;
@@ -1277,6 +1314,7 @@ impl Parser {
         p.constraints = self.constraints;
         p.exports = exports;
         p.origins = self.origins;
+        p.formatting_applications = self.formatting_applications.unwrap_or_default();
         Ok(p)
     }
     fn import_decl(&mut self) -> PResult<(String, String, usize)> {
@@ -1554,8 +1592,25 @@ impl Parser {
                 };
                 let first = operand(self)?;
                 let second = operand(self)?;
-                if required == 3 {
-                    TacitKind::Fork(first, second, operand(self)?)
+                let third = if required == 3 {
+                    Some(operand(self)?)
+                } else {
+                    None
+                };
+                if let Some(layout) = &mut self.formatting_applications {
+                    let mut operands = vec![first.span.clone(), second.span.clone()];
+                    if let Some(third) = &third {
+                        operands.push(third.span.clone());
+                    }
+                    layout.push(FormattingApplication {
+                        span: token.start..operands.last().unwrap().end,
+                        operator: token.start..token.end,
+                        operands,
+                        tacit: true,
+                    });
+                }
+                if let Some(third) = third {
+                    TacitKind::Fork(first, second, third)
                 } else if token.text == "@." {
                     TacitKind::Compose(first, second)
                 } else {
@@ -1658,7 +1713,7 @@ impl Parser {
             "^=" => self.recover(effect),
             "!{" => self.block(true),
             "!" if self.eat("{") => self.block(true),
-            "!" if effect => self.call(t.text, 1, effect),
+            "!" if effect => self.call(t.text, 1, effect, t.start..t.end),
             "!" => Err(Error::new(
                 t.start,
                 "action execution is only legal inside an action block",
@@ -1758,7 +1813,7 @@ impl Parser {
                         "expected numeric conversion target n, z, q, d, or r",
                     ));
                 }
-                self.call(format!(":{}", s.text), 1, effect)
+                self.call(format!(":{}", s.text), 1, effect, t.start..s.end)
             }
             "0b" => Ok(Expr::Bool(false)),
             "1b" => Ok(Expr::Bool(true)),
@@ -1796,8 +1851,12 @@ impl Parser {
                 Some(Binding::Value | Binding::Constructor(0)) => {
                     Ok(Expr::Name(self.canonical(&t.text)))
                 }
-                Some(Binding::Constructor(n)) => self.call(self.canonical(&t.text), n, effect),
-                Some(Binding::Callable(n)) => self.call(self.canonical(&t.text), n, effect),
+                Some(Binding::Constructor(n)) => {
+                    self.call(self.canonical(&t.text), n, effect, t.start..t.end)
+                }
+                Some(Binding::Callable(n)) => {
+                    self.call(self.canonical(&t.text), n, effect, t.start..t.end)
+                }
                 Some(Binding::Record) => self.record(self.canonical(&t.text), effect),
                 None => Err(Error::new(
                     t.start,
@@ -1843,13 +1902,37 @@ impl Parser {
         tail?;
         Ok(Expr::Pipeline(stages))
     }
-    fn call(&mut self, n: String, arity: usize, effect: bool) -> PResult<Expr> {
+    fn call(
+        &mut self,
+        n: String,
+        arity: usize,
+        effect: bool,
+        operator: Range<usize>,
+    ) -> PResult<Expr> {
         let mut args = Vec::with_capacity(arity);
+        let mut spans = self
+            .formatting_applications
+            .is_some()
+            .then(|| Vec::with_capacity(arity));
         for i in 0..arity {
             if matches!(self.peek(), "" | ";" | "}" | ")" | "]" | ",") {
                 return self.err(format!("missing operand {} of {arity} for `{n}`", i + 1));
             }
+            let start = self.offset();
             args.push(self.expr(effect)?);
+            if let Some(spans) = &mut spans {
+                spans.push(start..self.toks[self.pos - 1].end);
+            }
+        }
+        if let (Some(layout), Some(operands)) = (&mut self.formatting_applications, spans) {
+            if let Some(last) = operands.last() {
+                layout.push(FormattingApplication {
+                    span: operator.start..last.end,
+                    operator,
+                    operands,
+                    tacit: false,
+                });
+            }
         }
         Ok(Expr::Call(n, args))
     }
@@ -2460,5 +2543,47 @@ f(x:q^err^e):q := 0;";
         assert_eq!(imports.len(), 1);
         assert_eq!(imports[0].start, text.find("<<").unwrap() + 71);
         assert_eq!(imports[0].path, "./external.flx");
+    }
+
+    #[test]
+    fn formatting_layout_preserves_original_calls_grouping_and_trivia() {
+        let source = concat!(
+            "n := + (* 2 3) -- between operands\n  :q 4;\n",
+            "f := &{ @* + (@. .x .y) @? - . };\n"
+        );
+        let p = parse_with_layout(source).unwrap();
+        let ordinary = parse(source).unwrap();
+        assert!(ordinary.formatting_applications().is_empty());
+        assert_eq!(ordinary.defs, p.defs);
+        let forms = p
+            .formatting_applications()
+            .iter()
+            .map(|a| {
+                (
+                    &source[a.operator.clone()],
+                    a.operands
+                        .iter()
+                        .map(|r| &source[r.clone()])
+                        .collect::<Vec<_>>(),
+                    a.tacit,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            forms,
+            [
+                ("*", vec!["2", "3"], false),
+                (":q", vec!["4"], false),
+                ("+", vec!["(* 2 3)", ":q 4"], false),
+                ("@.", vec![".x", ".y"], true),
+                ("@?", vec!["-", "."], true),
+                ("@*", vec!["+", "(@. .x .y)", "@? - ."], true),
+            ]
+        );
+        let app = &p.formatting_applications()[2];
+        assert_eq!(
+            &source[app.span.clone()],
+            "+ (* 2 3) -- between operands\n  :q 4"
+        );
     }
 }

@@ -3,41 +3,92 @@
 << "dt";
 << "res";
 
-reading :: { station:s; date:s; temperature_c:?q; rain_mm:?q; };
-daily :: {
-    station:s; date:s; accepted:n; temperatures:n; mean_c:?q;
-    median_c:?q; min_c:?q; max_c:?q; rain_observations:n; rain_total_mm:?q;
+reading :: {
+    station       : s;
+    date          : s;
+    temperature_c : ?q;
+    rain_mm       : ?q;
 };
-apperr :: { | input csverr; | output ioerr; };
+daily :: {
+    station           : s;
+    date              : s;
+    accepted          : n;
+    temperatures      : n;
+    mean_c            : ?q;
+    median_c          : ?q;
+    min_c             : ?q;
+    max_c             : ?q;
+    rain_observations : n;
+    rain_total_mm     : ?q;
+};
+apperr :: {
+    | input csverr;
+    | output ioerr;
+};
 
-valid_date(date:s):b := res.ok (dt.days date);
-valid_temperature(sample:?q):b := |{
+valid_date(date: s): b := res.ok (dt.days date);
+valid_temperature(sample: ?q): b := |{
     sample;
     ?? 0q $;
     && (>= $ -90q) (<= $ 60q)
 };
-valid_rain(sample:?q):b := >= (?? 0q sample) 0q;
-good(x:reading):b := && (/= .station x "")
-    (&& (valid_date .date x) (&& (valid_temperature .temperature_c x) (valid_rain .rain_mm x)));
-key(x:reading):(s,s) := (.station x,.date x);
-total(values:[q]):?q := ?{ /= (# values) 0n : ?1 (+/ values); _ : ?0; };
-summary(k:(s,s),rows:#reading):daily := {
+valid_rain(sample: ?q): b := >= (?? 0q sample) 0q;
+good(x: reading): b :=
+    &&
+        /= .station x ""
+        &&
+            valid_date .date x
+            &&
+                valid_temperature .temperature_c x
+                valid_rain .rain_mm x;
+key(x: reading): (s, s) := (.station x, .date x);
+total(values: [q]): ?q := ?{
+    /= (# values) 0n : ?1 (+/ values);
+    _ : ?0;
+};
+summary(k: (s, s), rows:#reading): daily := {
     temperatures := df.present (.temperature_c rows);
     rain := df.present (.rain_mm rows);
     daily {
-        station:=.1 k; date:=.2 k; accepted:=# rows; temperatures:=# temperatures;
-        mean_c:=avg temperatures; median_c:=med temperatures; min_c:= </ temperatures;
-        max_c:= >/ temperatures; rain_observations:=# rain; rain_total_mm:=total rain;
+        station           := .1 k;
+        date              := .2 k;
+        accepted          := # rows;
+        temperatures      := # temperatures;
+        mean_c            := avg temperatures;
+        median_c          := med temperatures;
+        min_c             := </ temperatures;
+        max_c             := >/ temperatures;
+        rain_observations := # rain;
+        rain_total_mm     := total rain;
     }
 };
-show(x:daily) := (.station x,.date x,.accepted x,.temperatures x,.mean_c x,
-                   .median_c x,.min_c x,.max_c x,.rain_observations x,.rain_total_mm x);
+show(x: daily) := (
+    .station x,
+    .date x,
+    .accepted x,
+    .temperatures x,
+    .mean_c x,
+    .median_c x,
+    .min_c x,
+    .max_c x,
+    .rain_observations x,
+    .rain_total_mm x
+);
 
-!{ ^{
-    raw:#reading := ^= ! csv.read "examples/applications/meteorology/observations.csv" { e : ^: input e; };
-    usable := ?: &good raw;
-    report := >: &.station (>: &.date (df.agg &key &summary usable));
-    ^= ! print ("accepted",# usable,"rejected", - (# raw) (# usable)) { e : ^: output e; };
-    ^= ! print (@: &show report) { e : ^: output e; };
-    ()
-} };
+!{
+    ^{
+        raw:#reading := ^= ! csv.read "examples/applications/meteorology/observations.csv" {
+            e : ^: input e;
+        };
+        usable := ?: &good raw;
+        report := >: &.station (>: &.date (df.agg &key &summary usable));
+        ^= !
+            print ("accepted", # usable, "rejected", - (# raw) (# usable)) {
+            e : ^: output e;
+        };
+        ^= ! print (@: &show report) {
+            e : ^: output e;
+        };
+        ()
+    }
+};

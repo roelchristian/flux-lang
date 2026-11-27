@@ -1,15 +1,30 @@
 << "df";
 
-reading :: { site:s; celsius:d; sensor:n; };
-shift(x:d):d := + x 273.15d;
-kelvin:reading->d := &{ @. shift .celsius };
-project(x:reading) := .{ station := .site x; kelvin := @ kelvin x; };
+reading :: {
+    site    : s;
+    celsius : d;
+    sensor  : n;
+};
+shift(x: d): d := + x 273.15d;
+kelvin: reading -> d := &{ @. shift .celsius };
+project(x: reading) := .{
+    station := .site x;
+    kelvin  := @ kelvin x;
+};
 
 !{
     ^{
         t := #[
-            reading { site := "ridge"; celsius := -4.50d; sensor := 10n; }
-            reading { site := "marsh"; celsius := 16.75d; sensor := 12n; }
+            reading {
+                site    := "ridge";
+                celsius := -4.50d;
+                sensor  := 10n;
+            }
+            reading {
+                site    := "marsh";
+                celsius := 16.75d;
+                sensor  := 12n;
+            }
         ];
         --- Project, rename and compute without modifying the source rows.
         ^? ! print (df.select &project t);

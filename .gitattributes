@@ -1,0 +1,2 @@
+# The source formatter emits LF on every host.
+*.flx text eol=lf

@@ -1,7 +1,28 @@
-point :: { x:z; y:z; };
-segment :: { endpoints:(point,point); };
-start_x:segment->z := &{ @. .x (@. .1 .endpoints) };
-end_y:segment->z := &{ @. .y (@. .2 .endpoints) };
+point :: {
+    x : z;
+    y : z;
+};
+segment :: {
+    endpoints: (point, point);
+};
+start_x: segment -> z := &{ @. .x @. .1 .endpoints };
+end_y: segment -> z := &{ @. .y @. .2 .endpoints };
 
-line := segment { endpoints:=(point {x:=2z;y:=3z;},point {x:=5z;y:=8z;}); };
-!{ ^{ ^? ! print (@ start_x line,@ end_y line); () } };
+line := segment {
+    endpoints := (
+        point {
+            x := 2z;
+            y := 3z;
+        },
+        point {
+            x := 5z;
+            y := 8z;
+        }
+    );
+};
+!{
+    ^{
+        ^? ! print (@ start_x line, @ end_y line);
+        ()
+    }
+};

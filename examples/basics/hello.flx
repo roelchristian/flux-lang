@@ -1,1 +1,6 @@
-!{ ^{ ^? ! print "Salve, munde."; () } };
+!{
+    ^{
+        ^? ! print "Salve, munde.";
+        ()
+    }
+};

@@ -1,11 +1,13 @@
 --- Exactly computed summaries of a small observation sample.
 xs := [2q 4q 4q 4q 5q 5q 7q 9q];
 
-empty:[q] := [];
+empty: [q] := [];
 
-!{ ^{
-    ^? ! print (# xs,avg xs,med xs,var xs);
-    ^? ! print (</ xs,>/ xs,sd xs);
-    ^? ! print (avg empty);
-    ()
-} };
+!{
+    ^{
+        ^? ! print (# xs, avg xs, med xs, var xs);
+        ^? ! print (</ xs, >/ xs, sd xs);
+        ^? ! print (avg empty);
+        ()
+    }
+};

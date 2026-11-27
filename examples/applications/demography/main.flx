@@ -3,34 +3,72 @@
 << "math";
 << "opt";
 
-err :: { | data csverr; | output ioerr; };
-census :: { district:s; ward:s; year:z; residents:n; };
-total :: { district:s; year:z; residents:n; };
-classification :: { district:s; region:s; };
-classified :: { region:s; residents:n; };
-
-key(x:census):(s,z) := (.district x,.year x);
-aggregate(k:(s,z),t:#census):total :=
-    total { district := .1 k; year := .2 k; residents := +/ .residents t; };
-
-change(now:n,old:?n):?d := opt.bind (\n -> ?{
-    = n 0n : ?0;
-    _ : ?1 (math.quantize 2n (* 100q (/ (- (:z now) (:z n)) n)));
-}) old;
-
-report(x:(total,?total)) := {
-    current := .1 x;
-    old := opt.map &.residents .2 x;
-    .{ district := .district current; then := old; now := .residents current;
-       change_pct := change .residents current old; }
+err :: {
+    | data csverr;
+    | output ioerr;
+};
+census :: {
+    district  : s;
+    ward      : s;
+    year      : z;
+    residents : n;
+};
+total :: {
+    district  : s;
+    year      : z;
+    residents : n;
+};
+classification :: {
+    district : s;
+    region   : s;
+};
+classified :: {
+    region    : s;
+    residents : n;
 };
 
-tag(x:(total,classification)):classified :=
-    classified { region := .region .2 x; residents := .residents .1 x; };
-region_sum(k:s,t:#classified):classified :=
-    classified { region := k; residents := +/ .residents t; };
-share(x:classified,whole:n) :=
-    .{ region := .region x; residents := .residents x; share := / .residents x whole; };
+key(x: census): (s, z) := (.district x, .year x);
+aggregate(k: (s, z), t:#census): total :=
+total {
+    district  := .1 k;
+    year      := .2 k;
+    residents := +/ .residents t;
+};
+
+change(now: n, old: ?n): ?d := opt.bind
+    (\ n -> ?{
+        = n 0n : ?0;
+        _      : ?1 (math.quantize 2n (* 100q (/ (- (: z now) (: z n)) n)));
+    })
+    old;
+
+report(x: (total, ?total)) := {
+    current := .1 x;
+    old := opt.map &.residents .2 x;
+    .{
+        district   := .district current;
+        then       := old;
+        now        := .residents current;
+        change_pct := change .residents current old;
+    }
+};
+
+tag(x: (total, classification)): classified :=
+classified {
+    region    := .region .2 x;
+    residents := .residents .1 x;
+};
+region_sum(k: s, t:#classified): classified :=
+classified {
+    region    := k;
+    residents := +/ .residents t;
+};
+share(x: classified, whole: n) :=
+    .{
+        region    := .region x;
+        residents := .residents x;
+        share     := / .residents x whole;
+    };
 
 !{
     ^{
@@ -41,7 +79,9 @@ share(x:classified,whole:n) :=
         before := ?: (= .year totals 2020z) totals;
         after := ?: (= .year totals 2025z) totals;
         joined := *? &.district &.district after before;
-        ^= ! print (df.select &report joined) { e : ^: output e; };
+        ^= ! print (df.select &report joined) {
+            e : ^: output e;
+        };
 
         regions:#classification := ^= ! csv.read "examples/data/regions.csv" {
             e : ^: data e;
@@ -49,7 +89,9 @@ share(x:classified,whole:n) :=
         classified := df.select &tag (*= &.district &.district after regions);
         regional := df.agg &.region &region_sum classified;
         whole := +/ .residents regional;
-        ^= ! print (df.select (\x -> share x whole) regional) { e : ^: output e; };
+        ^= ! print (df.select (\ x -> share x whole) regional) {
+            e : ^: output e;
+        };
         ()
     }
 };
