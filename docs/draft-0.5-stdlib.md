@@ -152,7 +152,10 @@ as `null` are rejected rather than silently conflated with absence.
 Malformed JSON text yields `invalidjson s`; a document or value that does
 not match the checked representation yields `jsonshape s`. The reference
 implementation limits input and output to 1 MiB and also bounds nesting,
-node counts, and numerical expansion. JSON operations
+node counts, and numerical expansion. Decoding allows at most 1,000,000
+numeric digits per document, charging each number for the greater of its
+written mantissa digits and its digit count after expansion to plain
+decimal notation. Exceeding this budget returns `jsonshape`. JSON operations
 are pure and do not read or write files. Library error constructors are
 ordinary nominal alternatives; printed labels are not exception keywords.
 

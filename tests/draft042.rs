@@ -202,6 +202,20 @@ const STDLIB_05: &[&str] = &[
     "json.decode",
 ];
 
+// Each entry has a strict public fixture in tests/draft06_relational.rs.
+const RELATIONAL_06: &[&str] = &[
+    "*=",
+    "*?",
+    "df.semi",
+    "df.anti",
+    "df.union",
+    "df.distinct",
+    "df.select",
+    "df.dropna",
+    "df.fill",
+    "df.present",
+];
+
 fn expression_source(expression: &str) -> String {
     format!("{PRELUDE}\n!{{ ^= ! io.print {expression} {{ _ : (); }}; }};")
 }
@@ -227,7 +241,13 @@ fn every_runtime_registry_entry_has_a_strict_fixture() {
     let covered: BTreeSet<_> = [ARITHMETIC, LOGIC, COLLECTIONS, REDUCTIONS, TABLES]
         .into_iter()
         .flat_map(|cases| cases.iter().map(|case| case.0))
-        .chain(EFFECTS.iter().chain(STDLIB_05).copied())
+        .chain(
+            EFFECTS
+                .iter()
+                .chain(STDLIB_05)
+                .chain(RELATIONAL_06)
+                .copied(),
+        )
         .collect();
     let registered: BTreeSet<_> = REGISTRY
         .iter()
@@ -369,11 +389,19 @@ fn all_bundled_examples_work_in_both_executor_entry_points() {
     let f = Script::new("!{ () };");
     let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
     let target = f.0.join("examples");
-    fs::create_dir(&target).unwrap();
-    for sample in fs::read_dir(examples).unwrap() {
-        let sample = sample.unwrap();
-        fs::copy(sample.path(), target.join(sample.file_name())).unwrap();
+    fn copy_directory(source: &std::path::Path, destination: &std::path::Path) {
+        fs::create_dir(destination).unwrap();
+        for item in fs::read_dir(source).unwrap() {
+            let item = item.unwrap();
+            let target = destination.join(item.file_name());
+            if item.file_type().unwrap().is_dir() {
+                copy_directory(&item.path(), &target);
+            } else {
+                fs::copy(item.path(), target).unwrap();
+            }
+        }
     }
+    copy_directory(&examples, &target);
     let outputs = [
         ("csv-grid", "5\n[[station value valid] [north 12 true] [south -3 true] [north 18 true] [west, upland 40 false]]\n"),
         ("monitoring", "#[{station := north; count := 2; mean := ?1 15; median := ?1 15; sd := ?1 3}]\n"),
@@ -439,12 +467,7 @@ summ(k:z,g:#row) := .{ k := k; size := # g; };
 
 #[test]
 fn recognized_unsupported_operations_do_not_execute_or_fall_back() {
-    let cases = [
-        ("~=", "~= 0.1r 1r 2r"),
-        ("*=", "*= &k &k #[(1z,2z)] #[(1z,3z)]"),
-        ("*?", "*? &k &k #[(1z,2z)] #[(1z,3z)]"),
-        ("cor", "cor [1q 2q] [1q 2q]"),
-    ];
+    let cases = [("~=", "~= 0.1r 1r 2r"), ("cor", "cor [1q 2q] [1q 2q]")];
     let exercised: BTreeSet<_> = cases.iter().map(|(op, _)| *op).collect();
     let registered: BTreeSet<_> = REGISTRY
         .iter()

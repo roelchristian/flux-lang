@@ -1638,6 +1638,199 @@ impl Engine<'_> {
         }
         Ok(if bottom { Type::Never } else { output })
     }
+    fn table_row(&mut self, t: &Type, op: &str) -> R<Type> {
+        match self.cx.resolve(t) {
+            Type::Table(row) => Ok(*row),
+            v @ Type::Var(_) => {
+                let row = self.cx.fresh();
+                self.unify(&v, &Type::Table(b(row.clone())))?;
+                Ok(row)
+            }
+            x => Err(self.err(format!("{op} expects a table, found {x}"))),
+        }
+    }
+    fn selectable_row(&self, t: &Type) -> R<()> {
+        match self.cx.resolve(t) {
+            Type::Tuple(_) => Ok(()),
+            Type::Record(row) if row.tail.is_none() => Ok(()),
+            Type::Nominal(id) if self.schemas.contains_key(&id) => Ok(()),
+            x => Err(self.err(format!(
+                "df.select callback must return a closed record or tuple row, found {x}"
+            ))),
+        }
+    }
+    fn join_output(&self, op: &str, left: Type, right: Type) -> Type {
+        Type::Table(b(match op {
+            "*=" => Type::Tuple(vec![left, right]),
+            "*?" => Type::Tuple(vec![left, o(right)]),
+            _ => left,
+        }))
+    }
+    fn relational_call(
+        &mut self,
+        env: &Env,
+        op: &str,
+        args: &[Expr],
+        want: Option<&Type>,
+        effect: bool,
+    ) -> R<Type> {
+        let wanted = want.map(|t| self.cx.resolve(t));
+        match op {
+            "*=" | "*?" | "df.semi" | "df.anti" => {
+                let mut input_wants = [None, None];
+                if let Some(Type::Table(result)) = wanted {
+                    match (op, *result) {
+                        ("*=" | "*?", Type::Tuple(mut ts)) if ts.len() == 2 => {
+                            let right = ts.pop().unwrap();
+                            let left = ts.pop().unwrap();
+                            input_wants[0] = Some(Type::Table(b(left)));
+                            match (op, right) {
+                                ("*?", Type::Optional(t)) => input_wants[1] = Some(Type::Table(t)),
+                                ("*=", t) => input_wants[1] = Some(Type::Table(b(t))),
+                                _ => {}
+                            }
+                        }
+                        ("df.semi" | "df.anti", t) => input_wants[0] = Some(Type::Table(b(t))),
+                        _ => {}
+                    }
+                }
+                let left = self.expr(env, &args[2], input_wants[0].as_ref(), effect)?;
+                let right = self.expr(env, &args[3], input_wants[1].as_ref(), effect)?;
+                let row_a = if left == Type::Never {
+                    self.cx.fresh()
+                } else {
+                    self.table_row(&left, op)?
+                };
+                let row_b = if right == Type::Never {
+                    self.cx.fresh()
+                } else {
+                    self.table_row(&right, op)?
+                };
+                // A shared key type requires identity, not numeric promotion.
+                let key = self.cx.fresh();
+                let l = self.expr(env, &args[0], Some(&f(row_a.clone(), key.clone())), effect)?;
+                let r = self.expr(env, &args[1], Some(&f(row_b.clone(), key.clone())), effect)?;
+                self.req(Class::Hash, &key)?;
+                Ok(if [l, r, left, right].contains(&Type::Never) {
+                    Type::Never
+                } else {
+                    self.join_output(op, row_a, row_b)
+                })
+            }
+            "df.select" | "df.dropna" => {
+                let input = self.expr(
+                    env,
+                    &args[1],
+                    if op == "df.dropna" { want } else { None },
+                    effect,
+                )?;
+                let row = if input == Type::Never {
+                    self.cx.fresh()
+                } else {
+                    self.table_row(&input, op)?
+                };
+                let mapped = if op == "df.select" {
+                    match wanted {
+                        Some(Type::Table(t)) => *t,
+                        _ => self.cx.fresh(),
+                    }
+                } else {
+                    o(self.cx.fresh())
+                };
+                let selector = self.expr(env, &args[0], Some(&f(row, mapped.clone())), effect)?;
+                if selector == Type::Never || input == Type::Never {
+                    return Ok(Type::Never);
+                }
+                if op == "df.select" {
+                    self.selectable_row(&mapped)?;
+                    Ok(Type::Table(b(mapped)))
+                } else {
+                    Ok(input)
+                }
+            }
+            "df.union" | "df.distinct" => {
+                let row = self.cx.fresh();
+                let result = Type::Table(b(row.clone()));
+                if let Some(w) = want {
+                    self.unify(&result, w)?;
+                }
+                let mut bottom = false;
+                for x in args {
+                    bottom |= self.expr(env, x, Some(&result), effect)? == Type::Never;
+                }
+                self.req(Class::Eq, &row)?;
+                Ok(if bottom { Type::Never } else { result })
+            }
+            "df.fill" | "df.present" => {
+                let item = match wanted {
+                    Some(Type::Seq(t)) => *t,
+                    _ => self.cx.fresh(),
+                };
+                let input =
+                    self.expr(env, args.last().unwrap(), Some(&s(o(item.clone()))), effect)?;
+                let fill = if op == "df.fill" {
+                    self.expr(env, &args[0], Some(&item), effect)?
+                } else {
+                    item.clone()
+                };
+                Ok(if input == Type::Never || fill == Type::Never {
+                    Type::Never
+                } else {
+                    s(item)
+                })
+            }
+            _ => unreachable!(),
+        }
+    }
+    fn relational_types(&mut self, op: &str, xs: &[Type], want: Option<&Type>) -> R<Type> {
+        match op {
+            "*=" | "*?" | "df.semi" | "df.anti" => {
+                let row_a = self.table_row(&xs[2], op)?;
+                let row_b = self.table_row(&xs[3], op)?;
+                let key = self.cx.fresh();
+                self.unify(&xs[0], &f(row_a.clone(), key.clone()))?;
+                self.unify(&xs[1], &f(row_b.clone(), key.clone()))?;
+                self.req(Class::Hash, &key)?;
+                Ok(self.join_output(op, row_a, row_b))
+            }
+            "df.select" | "df.dropna" => {
+                let row = self.table_row(&xs[1], op)?;
+                let mapped = if op == "df.select" {
+                    match want.map(|w| self.cx.resolve(w)) {
+                        Some(Type::Table(t)) => *t,
+                        _ => self.cx.fresh(),
+                    }
+                } else {
+                    o(self.cx.fresh())
+                };
+                self.unify(&xs[0], &f(row.clone(), mapped.clone()))?;
+                if op == "df.select" {
+                    self.selectable_row(&mapped)?;
+                    Ok(Type::Table(b(mapped)))
+                } else {
+                    Ok(Type::Table(b(row)))
+                }
+            }
+            "df.union" | "df.distinct" => {
+                let row = self.table_row(&xs[0], op)?;
+                let out = Type::Table(b(row.clone()));
+                if op == "df.union" {
+                    self.unify(&xs[1], &out)?;
+                }
+                self.req(Class::Eq, &row)?;
+                Ok(out)
+            }
+            "df.fill" | "df.present" => {
+                let item = self.cx.fresh();
+                self.unify(xs.last().unwrap(), &s(o(item.clone())))?;
+                if op == "df.fill" {
+                    self.unify(&xs[0], &item)?;
+                }
+                Ok(s(item))
+            }
+            _ => unreachable!(),
+        }
+    }
     fn builtin_call(
         &mut self,
         env: &Env,
@@ -1668,6 +1861,11 @@ impl Engine<'_> {
             self.saw_result = true;
         }
         let result = match n {
+            "*=" | "*?" | "df.semi" | "df.anti" | "df.union" | "df.distinct" | "df.select"
+            | "df.dropna" | "df.fill" | "df.present" => {
+                self.relational_call(env, n, args, want, effect)?
+            }
+
             "opt.map" | "opt.bind" | "opt.result" | "res.map" | "res.maperr" | "res.collect"
             | "res.partition" | "res.ok" | "res.optional" => {
                 self.native_combinator(env, n, args, want, effect)?
@@ -2072,6 +2270,9 @@ impl Engine<'_> {
             }
         }
         Ok(match n {
+            "*=" | "*?" | "df.semi" | "df.anti" | "df.union" | "df.distinct" | "df.select"
+            | "df.dropna" | "df.fill" | "df.present" => self.relational_types(n, xs, want)?,
+
             "opt.map" | "opt.bind" => {
                 let (a0, b0) = (self.cx.fresh(), self.cx.fresh());
                 let out = if n == "opt.bind" {
@@ -3509,5 +3710,63 @@ mod tests {
         ] {
             assert_eq!(check(source).unwrap_err().kind, InferErrorKind::TypeError);
         }
+    }
+    #[test]
+    fn relational_joins_require_equal_hashable_keys_and_produce_typed_rows() {
+        check(r#"
+            << "df";
+            leftrow :: { code:n; slot:?s; };
+            rightrow :: { code:n; slot:?s; };
+            leftkey(x:leftrow):(n,?s) := (.code x,.slot x);
+            rightkey(x:rightrow):(n,?s) := (.code x,.slot x);
+            l:#leftrow := #[leftrow { code:=1; slot:=?0; }];
+            r:#rightrow := #[rightrow { code:=1; slot:=?0; }];
+            inner:#(leftrow,rightrow) := *= &leftkey &rightkey l r;
+            pairs:#(leftrow,?rightrow) := *? &leftkey &rightkey l r;
+            semi:#leftrow := df.semi &leftkey &rightkey l r;
+            anti:#leftrow := df.anti &leftkey &rightkey l r;
+            refjoin:(leftrow->(n,?s))->(rightrow->(n,?s))->#leftrow->#rightrow->#(leftrow,rightrow) := &*=;
+            indirect:#(leftrow,rightrow) := @@ refjoin (&leftkey,&rightkey,l,r);
+        "#).unwrap();
+        for source in [
+            "a:#[(n,n)] := #[(1n,2n)]; b:#[(z,n)] := #[(1z,2n)]; j := *= &.1 &.1 a b;",
+            "id(x:n):n := x; a := #[.{ fnn:=&id; }]; j := *= &.fnn &.fnn a a;",
+        ] {
+            assert_eq!(
+                check(source).unwrap_err().kind,
+                InferErrorKind::TypeError,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn relational_projection_and_optional_transforms_get_context() {
+        check(
+            r#"
+            << "df";
+            row :: { val:?q; note:s; };
+            table:#row := #[row { val:=?0; note:="x"; }];
+            union:#row := df.union #[] table;
+            dedup:#row := df.distinct union;
+            picked:#.{ amount:?q; } := df.select (\r -> .{ amount:=.val r; }) table;
+            rows:#row := df.dropna &.val table;
+            filled:[q] := df.fill 0 .val rows;
+            present:[q] := df.present [];
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            check(r#"<< "df"; t := #[(1z,2z)]; p := df.select &.1 t;"#)
+                .unwrap_err()
+                .kind,
+            InferErrorKind::TypeError
+        );
+        assert_eq!(
+            check(r#"<< "df"; t := #[(1z,2z)]; p := df.dropna &.1 t;"#)
+                .unwrap_err()
+                .kind,
+            InferErrorKind::TypeError
+        );
     }
 }

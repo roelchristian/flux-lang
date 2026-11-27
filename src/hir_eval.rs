@@ -23,8 +23,10 @@ use std::{
 mod collections042;
 mod combinators05;
 mod decimal05;
+mod joins06;
 mod json05;
 mod library05;
+mod relations06;
 mod wide05;
 use wide05::Wide;
 mod operations041;
@@ -672,7 +674,13 @@ fn repr(v: &V) -> String {
                 .collect::<Vec<_>>()
                 .join("; ")
         ),
-        V::Table(xs, _) => format!("#[{}]", xs.iter().map(repr).collect::<Vec<_>>().join(" ")),
+        V::Table(xs, schema) => format!(
+            "#[{}]",
+            xs.iter()
+                .map(|row| repr_table_row(row, schema))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
         V::Dict(xs) => format!(
             "#{{{}}}",
             xs.iter()
@@ -699,6 +707,66 @@ fn repr(v: &V) -> String {
         V::Action(_) => "<action>".into(),
     }
 }
+fn repr_table_row(row: &V, schema: &TableSchema) -> String {
+    if let (V::Record(fields), TableSchema::Named(columns)) = (row, schema) {
+        if fields
+            .iter()
+            .map(|(n, _)| n.as_ref())
+            .ne(columns.iter().map(|(n, _)| n.as_str()))
+        {
+            let ordered = columns
+                .iter()
+                .map(|(name, _)| {
+                    fields
+                        .iter()
+                        .find(|(key, _)| key.as_ref() == name)
+                        .map(|(_, value)| format!("{name} := {}", repr(value)))
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(values) = ordered.filter(|_| fields.len() == columns.len()) {
+                return format!("{{{}}}", values.join("; "));
+            }
+        }
+    }
+    repr(row)
+}
+
+// A schema's stored order controls presentation, not structural equality.
+// Preserve order for tuple slots and retain lexical identity for nominal types.
+fn same_field_types(a: &[(String, Type)], b: &[(String, Type)]) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|(name, ty)| {
+            b.iter()
+                .find(|(other, _)| name == other)
+                .is_some_and(|(_, rhs)| same_type_layout(ty, rhs))
+        })
+}
+fn same_tuple_types(a: &[Type], b: &[Type]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_type_layout(a, b))
+}
+fn same_type_layout(a: &Type, b: &Type) -> bool {
+    use Type::*;
+    match (a, b) {
+        (Record(a), Record(b)) => a.tail == b.tail && same_field_types(&a.fields, &b.fields),
+        (Tuple(a), Tuple(b)) => same_tuple_types(a, b),
+        (Seq(a), Seq(b))
+        | (Table(a), Table(b))
+        | (Optional(a), Optional(b))
+        | (Action(a), Action(b)) => same_type_layout(a, b),
+        (Dict(a, b), Dict(c, d)) | (Result(a, b), Result(c, d)) | (Fun(a, b), Fun(c, d)) => {
+            same_type_layout(a, c) && same_type_layout(b, d)
+        }
+        _ => a == b,
+    }
+}
+fn same_table_layout(a: &TableSchema, b: &TableSchema) -> bool {
+    a == b
+        || match (a, b) {
+            (TableSchema::Named(a), TableSchema::Named(b)) => same_field_types(a, b),
+            (TableSchema::Positional(a), TableSchema::Positional(b)) => same_tuple_types(a, b),
+            _ => false,
+        }
+}
 fn equal(a: &V, b: &V) -> bool {
     match (a, b) {
         (V::Exact(a), V::Exact(b)) => a.n == b.n && a.d == b.d,
@@ -720,7 +788,9 @@ fn equal(a: &V, b: &V) -> bool {
                     .all(|(k, v)| b.iter().any(|(l, w)| k == l && equal(v, w)))
         }
         (V::Table(a, ta), V::Table(b, tb)) => {
-            ta == tb && a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| equal(a, b))
+            same_table_layout(ta, tb)
+                && a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(a, b)| equal(a, b))
         }
         (V::Dict(a), V::Dict(b)) => {
             a.len() == b.len()
@@ -818,6 +888,8 @@ fn column_rows(v: &V, span: Span) -> R<Vec<RowCells>> {
     }
     Ok(rows)
 }
+const KEY_WORK_LIMIT: usize = 64 * 1024 * 1024;
+
 #[derive(PartialEq, Eq, Hash)]
 enum Key {
     Num(i128, i128),
@@ -828,12 +900,31 @@ enum Key {
     Char(char),
     Unit,
     None,
+    Some(Box<Key>),
+    Tuple(Box<[Key]>),
+}
+fn relation_op(op: CoreOp) -> bool {
+    use CoreOp::*;
+    matches!(
+        op,
+        TableUnion | TableDistinct | TableSelect | DropNa | Fill | PresentOnly
+    )
 }
 fn key(v: &V) -> Option<Key> {
+    let mut budget = KEY_WORK_LIMIT;
+    key_with_budget(v, &mut budget, 0)
+}
+fn key_with_budget(v: &V, budget: &mut usize, depth: usize) -> Option<Key> {
+    if depth >= 128 {
+        return None;
+    }
+    *budget = budget.checked_sub(std::mem::size_of::<Key>())?;
     Some(match v {
         V::Exact(x) => Key::Num(x.n, x.d),
         V::Wide(_) => {
             let q = wide05::ratio(v).ok()?;
+            let bytes = (q.numer().bits() + q.denom().bits()).div_ceil(8);
+            *budget = budget.checked_sub(usize::try_from(bytes).ok()?)?;
             if let (Some(n), Some(d)) = (q.numer().to_i128(), q.denom().to_i128()) {
                 Key::Num(n, d)
             } else {
@@ -842,10 +933,20 @@ fn key(v: &V) -> Option<Key> {
         }
         V::Real(r) => Key::Real(if *r == 0.0 { 0 } else { r.to_bits() }),
         V::Bool(b) => Key::Bool(*b),
-        V::String(s) => Key::Str(s.clone()),
+        V::String(s) => {
+            *budget = budget.checked_sub(s.len())?;
+            Key::Str(s.clone())
+        }
         V::Char(c) => Key::Char(*c),
         V::Unit => Key::Unit,
         V::Optional(None) => Key::None,
+        V::Optional(Some(x)) => Key::Some(Box::new(key_with_budget(x, budget, depth + 1)?)),
+        V::Tuple(xs) => Key::Tuple(
+            xs.iter()
+                .map(|x| key_with_budget(x, budget, depth + 1))
+                .collect::<Option<Vec<_>>>()?
+                .into_boxed_slice(),
+        ),
         _ => return None,
     })
 }
@@ -1378,7 +1479,13 @@ impl Eval<'_> {
                             _ => &n.ty,
                         };
                         let ty = self.type_at(ty, env);
-                        if combinators05::handles(*op) {
+                        if joins06::handles(*op) || relation_op(*op) {
+                            let types = ids
+                                .iter()
+                                .map(|id| self.type_at(&p.node(*id).ty, env))
+                                .collect::<Vec<_>>();
+                            self.relation(*op, args, &types, &ty, n.table_schema.as_ref(), s)?
+                        } else if combinators05::handles(*op) {
                             let types = ids
                                 .iter()
                                 .map(|id| self.type_at(&p.node(*id).ty, env))
@@ -1661,6 +1768,9 @@ impl Eval<'_> {
             }
             Function::Core(op, ty, schema) => {
                 let out = out.as_ref().unwrap_or_else(|| result_type(&ty, arity));
+                if joins06::handles(op) || relation_op(op) {
+                    return self.relation(op, f.bound, &f.bound_types, out, schema.as_ref(), span);
+                }
                 if combinators05::handles(op) {
                     return combinators05::apply(op, f.bound, &f.bound_types, out, self, span);
                 }
@@ -1721,16 +1831,16 @@ impl Eval<'_> {
     fn group(&mut self, f: V, xs: &[V], span: Span) -> R<Vec<(V, Vec<V>)>> {
         let mut groups: Vec<(V, Vec<V>)> = Vec::new();
         let mut index = HashMap::new();
+        let mut budget = KEY_WORK_LIMIT;
         for row in xs {
             let k = self.apply(f.clone(), vec![row.clone()], span)?;
-            let i = if let Some(key) = key(&k) {
-                *index.entry(key).or_insert(groups.len())
-            } else {
-                groups
-                    .iter()
-                    .position(|(old, _)| equal(old, &k))
-                    .unwrap_or(groups.len())
-            };
+            let key = key_with_budget(&k, &mut budget, 0).ok_or_else(|| {
+                error(
+                    span,
+                    "group key exceeds supported hash complexity or resource limit",
+                )
+            })?;
+            let i = *index.entry(key).or_insert(groups.len());
             if let Some(g) = groups.get_mut(i) {
                 g.1.push(row.clone())
             } else {
@@ -1739,6 +1849,39 @@ impl Eval<'_> {
         }
         Ok(groups)
     }
+    fn relation(
+        &mut self,
+        op: CoreOp,
+        args: Vec<V>,
+        types: &[Type],
+        ty: &Type,
+        schema: Option<&Rc<TableSchema>>,
+        span: Span,
+    ) -> R<V> {
+        if args.len() != operation_arity(op, span)? || types.len() != args.len() {
+            return Err(invariant(span, "invalid checked relation arity"));
+        }
+        if joins06::handles(op) {
+            return joins06::apply(op, args, types, ty, schema, self, span);
+        }
+        self.tick(span)?;
+        let concrete = if op == CoreOp::TableSelect {
+            self.p.instance_schema(ty)
+        } else {
+            None
+        };
+        relations06::apply(
+            op,
+            &args,
+            types,
+            ty,
+            concrete.as_ref().or(schema),
+            self,
+            span,
+        )
+        .unwrap_or_else(|| Err(invariant(span, "checked relation has no implementation")))
+    }
+
     fn core(
         &mut self,
         op: CoreOp,
@@ -1793,6 +1936,13 @@ impl Eval<'_> {
                     span,
                     "checked collection operation has no implementation",
                 ))
+            }
+            InnerJoin | LeftJoin | SemiJoin | AntiJoin | TableUnion | TableDistinct
+            | TableSelect | DropNa | Fill | PresentOnly => {
+                return Err(invariant(
+                    span,
+                    "checked relation requires operand evidence",
+                ));
             }
             OptMap | OptBind | OptResult | ResMap | ResMapErr | ResCollect | ResPartition
             | ResOk | ResOptional | ReadLine | FsList | FsMkdir | FsBase | FsJoin | SysArgs
@@ -2652,6 +2802,53 @@ mod tests {
         "#,
         );
         assert_eq!(view_entry(&ir).unwrap().value, "1b");
+    }
+
+    #[test]
+    fn optional_tuple_keys_and_duplicate_join_rows_are_stable() {
+        let ir = compile(
+            r#"
+            l:#(?s,z) := #[(?0,1) (?1 "x",2) (?0,3)];
+            r:#(?s,z) := #[(?0,4) (?0,5) (?1 "y",6)];
+            key(row:(?s,z)) := (.1 row,0z);
+            j := *= &key &key l r;
+            wanted:#((?s,z),(?s,z)) := #[
+                ((?0,1),(?0,4)) ((?0,1),(?0,5))
+                ((?0,3),(?0,4)) ((?0,3),(?0,5))
+            ];
+            !{ == j wanted };
+        "#,
+        );
+        assert_eq!(view_entry(&ir).unwrap().value, "1b");
+    }
+
+    #[test]
+    fn real_signed_zeros_share_one_join_key() {
+        let ir = compile(
+            r#"
+            left:#(r,z) := #[(-0.0r,4z)];
+            right:#(r,z) := #[(0.0r,5z)];
+            !{ # (*= &.1 &.1 left right) };
+        "#,
+        );
+        assert_eq!(view_entry(&ir).unwrap().value, "1");
+    }
+
+    #[test]
+    fn empty_join_keeps_instantiated_paired_layout() {
+        let ir = compile(
+            r#"
+            left:#(z,s) := #[];
+            right:#(z,b) := #[(1,1b)];
+            lk(row:(z,s)) := .1 row;
+            rk(row:(z,b)) := .1 row;
+            outer := &*?;
+            !{ @@ outer (&lk,&rk,left,right) };
+        "#,
+        );
+        let out = view_entry(&ir).unwrap().value;
+        assert!(out.contains(".1 | .2"), "{out}");
+        assert_eq!(out.lines().count(), 2, "{out}");
     }
 
     #[test]
