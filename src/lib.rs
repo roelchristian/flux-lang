@@ -69,6 +69,7 @@ pub mod eval {
         prepare(program, Mode::Inspection, Policy::TypedOnly)?.view()
     }
 }
+mod formatter;
 pub mod hir;
 pub mod hir_eval;
 pub mod infer;
@@ -302,36 +303,25 @@ pub fn run_path(path: impl AsRef<std::path::Path>) -> Result<eval::Output, PathE
 
 /// Parse a file and its local imports, then format only the original root text.
 pub fn format_path(path: impl AsRef<std::path::Path>) -> Result<String, PathError> {
-    let loaded = modules::load(path)?;
-    format_tokens(loaded.root_source()).map_err(|error| PathError::semantic(&loaded, error))
-}
-
-/// Conservative early formatter: normalize line endings and remove trailing whitespace.
-/// Does not reorder operators, reindent code, or modify comments' textual content.
-pub fn format_source(source: &str) -> Result<String, Error> {
-    parser::parse(source)?;
-    format_tokens(source)
-}
-
-fn format_tokens(source: &str) -> Result<String, Error> {
-    let mut result = source
-        .lines()
-        .map(|line| line.trim_end_matches([' ', '\t']))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !result.is_empty() {
-        result.push('\n');
-    }
-    let old = lexer::lex(source)?;
-    let new = lexer::lex(&result)?;
-    if old
+    let loaded = modules::load_for_format(path)?;
+    let base = loaded
+        .sources
+        .files()
         .iter()
-        .map(|token| &token.text)
-        .ne(new.iter().map(|token| &token.text))
-    {
-        return Err(Error::new(0, "formatting would change one or more tokens"));
-    }
-    Ok(result)
+        .find(|file| file.path == loaded.root)
+        .map_or(0, |file| file.base);
+    formatter::format(
+        loaded.root_source(),
+        base,
+        loaded.program.formatting_applications(),
+    )
+    .map_err(|error| PathError::semantic(&loaded, error))
+}
+
+/// Format original source without changing lexemes or adjacency-sensitive syntax.
+pub fn format_source(source: &str) -> Result<String, Error> {
+    let program = parser::parse_with_layout(source)?;
+    formatter::format(source, 0, program.formatting_applications())
 }
 
 /// A source documentation line. Triple-hyphen comments have no runtime effect.
@@ -388,7 +378,10 @@ mod format_tests {
     #[test]
     fn preserves_guard_alignment_and_documents_only_standalone_lines() {
         let source = "--- absolute value\nabs(x:z):z := ?{\n    < x 0 : -: x;\n    _     : x;\n}; -- ordinary\n";
-        assert_eq!(format_source(source).unwrap(), source);
+        assert_eq!(
+            format_source(source).unwrap(),
+            "--- absolute value\nabs(x: z): z := ?{\n    < x 0 : -: x;\n    _     : x;\n}; -- ordinary\n"
+        );
         assert_eq!(
             documentation_comments(source).unwrap(),
             [DocComment {

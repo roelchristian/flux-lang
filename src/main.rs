@@ -261,7 +261,7 @@ fn repl() -> Result<u8, String> {
 fn cli() -> Result<u8, String> {
     const COMMANDS: &[&str] = &["check", "fmt", "hir", "interface", "phases", "run-hir"];
     const USAGE: &str =
-        "flux [FILE [-- ARGS...] | check FILE | hir FILE | interface FILE | run-hir FILE [-- ARGS...] | phases FILE | fmt FILE | --version]";
+        "flux [FILE [-- ARGS...] | check FILE | hir FILE | interface FILE | run-hir FILE [-- ARGS...] | phases FILE | fmt [--check] FILE | --version]";
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let separator = args.iter().position(|arg| arg == "--");
     let arguments = match separator {
@@ -285,7 +285,7 @@ fn cli() -> Result<u8, String> {
     let (mode, path) = match cli_args {
         [] => return repl(),
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("Flux reference prototype\n\nUsage: {USAGE}\n\nRun without arguments for the REPL. fmt writes to stdout.");
+            println!("Flux reference prototype\n\nUsage: {USAGE}\n\nRun without arguments for the REPL.\nfmt FILE writes formatted text to stdout without editing FILE.\nfmt --check FILE writes nothing to stdout and exits 1 if FILE needs formatting.");
             return Ok(0);
         }
         [flag] if flag == "--version" || flag == "-V" => {
@@ -299,6 +299,12 @@ fn cli() -> Result<u8, String> {
         {
             ("run", Path::new(file))
         }
+        [command, flag, file] if command == "fmt" && flag == "--check" => {
+            ("fmt-check", Path::new(file))
+        }
+        [command, flag] if command == "fmt" && flag == "--check" => {
+            return Err(format!("usage: {USAGE}"));
+        }
         [command, file] => (
             command
                 .to_str()
@@ -308,8 +314,16 @@ fn cli() -> Result<u8, String> {
         ),
         _ => return Err(format!("usage: {USAGE}")),
     };
-    if mode == "fmt" {
-        print!("{}", format_path(path).map_err(|error| error.diagnostic())?);
+    if matches!(mode, "fmt" | "fmt-check") {
+        let formatted = format_path(path).map_err(|error| error.diagnostic())?;
+        if mode == "fmt" {
+            print!("{formatted}");
+        } else {
+            let (_, original) = modules::read_fragment(path).map_err(|error| error.diagnostic())?;
+            if original != formatted {
+                return Err(format!("{}: needs formatting", path.display()));
+            }
+        }
         return Ok(0);
     }
 

@@ -122,6 +122,7 @@ struct Loader {
     files: Vec<LoadedFile>,
     complete: HashMap<PathBuf, usize>,
     root_text: Option<Arc<str>>,
+    formatting: bool,
 }
 
 /// Read a bounded, regular UTF-8 source fragment without parsing or executing it.
@@ -142,8 +143,19 @@ pub fn read_fragment(path: impl AsRef<Path>) -> Result<(PathBuf, String), LoadEr
 
 /// Load a root program and its explicit local source imports.
 pub fn load(path: impl AsRef<Path>) -> Result<LoadedProgram, LoadError> {
-    let path = path.as_ref();
-    let mut loader = Loader::default();
+    load_path(path.as_ref(), false)
+}
+
+/// Load a source graph for formatting and collect syntax metadata only for its root.
+pub(crate) fn load_for_format(path: impl AsRef<Path>) -> Result<LoadedProgram, LoadError> {
+    load_path(path.as_ref(), true)
+}
+
+fn load_path(path: &Path, formatting: bool) -> Result<LoadedProgram, LoadError> {
+    let mut loader = Loader {
+        formatting,
+        ..Loader::default()
+    };
     let begin =
         || fs::canonicalize(path).map_err(|e| issue(0, format!("cannot resolve root file: {e}")));
     let result = begin().and_then(|root| {
@@ -466,7 +478,11 @@ impl Loader {
             });
         }
         let tag = namespace(&path);
-        let program = parser::parse_module(&text, base, Some(&tag), &interfaces)?;
+        let program = if self.formatting && import.is_none() {
+            parser::parse_module_with_layout(&text, base, Some(&tag), &interfaces)?
+        } else {
+            parser::parse_module(&text, base, Some(&tag), &interfaces)?
+        };
         if import.is_some() && program.entry.is_some() {
             return Err(issue(
                 program.entry_start.unwrap_or(base),
@@ -646,5 +662,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ready.run().unwrap().status, 9);
+    }
+
+    #[test]
+    fn formatting_layout_uses_loaded_arity_and_stays_in_root_file() {
+        let fx = Fixture::new();
+        fx.put("library.flx", ">> (plus); plus(a,b:n):n := + a b;");
+        let source = "<< \"./library.flx\" : m; val := m.plus 1n (+ 2n 3n);";
+        fx.put("root.flx", source);
+        let root = fx.0.join("root.flx");
+        assert!(load(&root)
+            .unwrap()
+            .program
+            .formatting_applications()
+            .is_empty());
+        let loaded = load_for_format(&root).unwrap();
+        let apps = loaded.program.formatting_applications();
+        assert_eq!(apps.len(), 2);
+        assert_eq!(&source[apps[0].operator.clone()], "+");
+        assert_eq!(&source[apps[1].operator.clone()], "m.plus");
+        assert_eq!(&source[apps[1].operands[1].clone()], "(+ 2n 3n)");
     }
 }
