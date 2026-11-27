@@ -1,0 +1,891 @@
+use crate::lexer::{lex, Token};
+pub use crate::Error;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Program {
+    pub defs: Vec<Stmt>,
+    pub imports: Vec<String>,
+    pub entry: Option<Expr>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub enum Stmt {
+    Def {
+        name: String,
+        params: Vec<String>,
+        param_types: Vec<Option<String>>,
+        result_type: Option<String>,
+        body: Expr,
+        start: usize,
+    },
+    Schema {
+        name: String,
+        fields: Vec<(String, String)>,
+        start: usize,
+    },
+    Effect {
+        name: Option<String>,
+        body: Expr,
+        start: usize,
+    },
+}
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Int(i128),
+    Str(String),
+    Bool(bool),
+    Unit,
+    Name(String),
+    Call(String, Vec<Expr>),
+    Ref(String),
+    Tuple(Vec<Expr>),
+    Array(Vec<Expr>),
+    Cases(Vec<(Expr, Expr)>, Box<Expr>),
+    Lambda(Vec<String>, Box<Expr>),
+    Record(Vec<(String, Expr)>),
+    Block(Vec<Stmt>, Option<Box<Expr>>),
+    Action(Vec<Stmt>, Option<Box<Expr>>),
+    Num(String),
+    Char(char),
+    NamedRecord(String, Vec<(String, Expr)>),
+}
+
+type PResult<T> = Result<T, Error>;
+#[derive(Copy, Clone, Debug)]
+enum Binding {
+    Callable(usize),
+    Value,
+    Record,
+}
+const PRELUDE: &[(&str, usize)] = &[
+    ("+", 2),
+    ("-", 2),
+    ("*", 2),
+    ("/", 2),
+    ("//", 2),
+    ("%", 2),
+    ("^", 2),
+    ("-:", 1),
+    ("^/", 1),
+    ("|", 1),
+    ("<", 2),
+    ("<=", 2),
+    (">", 2),
+    (">=", 2),
+    ("=", 2),
+    ("/=", 2),
+    ("==", 2),
+    ("~=", 3),
+    ("~", 1),
+    ("&&", 2),
+    ("||", 2),
+    ("#", 1),
+    ("..", 2),
+    ("@", 2),
+    ("@@", 2),
+    ("@:", 2),
+    ("?:", 2),
+    ("=:", 2),
+    (">:", 2),
+    ("<:", 2),
+    ("+:", 2),
+    ("&:", 2),
+    ("*:", 2),
+    ("=.", 1),
+    (".:", 2),
+    ("[:", 2),
+    ("/:", 3),
+    ("\\:", 3),
+    ("+/", 1),
+    ("*/", 1),
+    ("&&/", 1),
+    ("||/", 1),
+    (">/", 1),
+    ("</", 1),
+    ("avg", 1),
+    ("pct", 2),
+    ("sd", 1),
+    ("cor", 2),
+    ("?0", 0),
+    ("?1", 1),
+    ("?+", 1),
+    ("??", 2),
+    ("?!", 1),
+    ("#:", 1),
+    (":#", 1),
+    ("*=", 4),
+    ("*?", 4),
+];
+
+pub fn parse(source: &str) -> PResult<Program> {
+    Parser {
+        toks: lex(source)?,
+        pos: 0,
+        eof: source.len(),
+        scopes: Vec::new(),
+        aliases: HashMap::new(),
+        depth: 0,
+    }
+    .program()
+}
+struct Parser {
+    toks: Vec<Token>,
+    pos: usize,
+    eof: usize,
+    scopes: Vec<HashMap<String, Binding>>,
+    aliases: HashMap<String, String>,
+    depth: usize,
+}
+fn is_ident(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+fn close(s: &str) -> Option<&'static str> {
+    match s {
+        "(" => Some(")"),
+        "[" | "#[" => Some("]"),
+        "{" | "!{" | "#{" | "{." => Some("}"),
+        _ => None,
+    }
+}
+impl Parser {
+    fn at(&self, i: usize) -> &str {
+        self.toks.get(i).map_or("", |t| t.text.as_str())
+    }
+    fn peek(&self) -> &str {
+        self.at(self.pos)
+    }
+    fn offset(&self) -> usize {
+        self.toks.get(self.pos).map_or(self.eof, |t| t.start)
+    }
+    fn err<T>(&self, m: impl Into<String>) -> PResult<T> {
+        Err(Error::new(self.offset(), m.into()))
+    }
+    fn eat(&mut self, s: &str) -> bool {
+        if self.peek() == s {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+    fn expect(&mut self, s: &str) -> PResult<()> {
+        if self.eat(s) {
+            Ok(())
+        } else {
+            self.err(format!("expected `{s}`, found {}", self.found()))
+        }
+    }
+    fn found(&self) -> String {
+        if self.peek().is_empty() {
+            "end of input".into()
+        } else {
+            format!("`{}`", self.peek())
+        }
+    }
+    fn next(&mut self) -> PResult<Token> {
+        let t = self
+            .toks
+            .get(self.pos)
+            .cloned()
+            .ok_or_else(|| Error::new(self.eof, "expected token, found end of input"))?;
+        self.pos += 1;
+        Ok(t)
+    }
+    fn ident(&mut self) -> PResult<String> {
+        if is_ident(self.peek()) {
+            Ok(self.next()?.text)
+        } else {
+            self.err(format!("expected identifier, found {}", self.found()))
+        }
+    }
+    fn lookup(&self, n: &str) -> Option<Binding> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.get(n).copied())
+            .or_else(|| {
+                if n.starts_with('.') && n.len() > 1 && !matches!(n, ".:" | "..") {
+                    Some(Binding::Callable(1))
+                } else {
+                    PRELUDE
+                        .iter()
+                        .find_map(|&(x, k)| (x == n).then_some(Binding::Callable(k)))
+                }
+            })
+    }
+    fn canonical(&self, n: &str) -> String {
+        if let Some((alias, member)) = n.split_once('.') {
+            if let Some(path) = self.aliases.get(alias) {
+                return format!("{path}.{member}");
+            }
+        }
+        n.to_owned()
+    }
+    fn scope(&mut self) -> &mut HashMap<String, Binding> {
+        self.scopes.last_mut().expect("parser scope")
+    }
+    fn end_of_group(&self, from: usize) -> Option<usize> {
+        let mut ends = vec![close(self.at(from))?];
+        for i in from + 1..self.toks.len() {
+            let s = self.at(i);
+            if let Some(c) = close(s) {
+                ends.push(c);
+            } else if matches!(s, ")" | "]" | "}") {
+                if ends.pop() != Some(s) {
+                    return None;
+                }
+                if ends.is_empty() {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+    // Find a delimiter without looking through nested parenthesis, sequence or brace groups.
+    fn find(&self, mut i: usize, wanted: &[&str], stops: &[&str]) -> Option<usize> {
+        while i < self.toks.len() {
+            let s = self.at(i);
+            if wanted.contains(&s) {
+                return Some(i);
+            }
+            if stops.contains(&s) || matches!(s, ")" | "]" | "}") {
+                return None;
+            }
+            if close(s).is_some() {
+                i = self.end_of_group(i)? + 1;
+            } else {
+                i += 1;
+            }
+        }
+        None
+    }
+    fn def_at(&self, i: usize) -> bool {
+        if !is_ident(self.at(i)) {
+            return false;
+        }
+        match self.at(i + 1) {
+            ":=" | "::" => true,
+            ":" | ":#" => self.find(i + 2, &[":="], &[";"]).is_some(),
+            "(" => self.end_of_group(i + 1).is_some_and(|j| {
+                self.at(j + 1) == ":="
+                    || (matches!(self.at(j + 1), ":" | ":#")
+                        && self.find(j + 2, &[":="], &[";"]).is_some())
+            }),
+            _ => false,
+        }
+    }
+    fn prepass(&self, mut i: usize, root: bool) -> PResult<HashMap<String, Binding>> {
+        let mut names = HashSet::new();
+        let mut hoisted = HashMap::new();
+        loop {
+            let n = self.at(i).to_owned();
+            if matches!(n.as_str(), "" | "}") {
+                break;
+            }
+            if self.def_at(i) {
+                let b = match self.at(i + 1) {
+                    "::" => Some(Binding::Record),
+                    "(" => {
+                        let end = self.end_of_group(i + 1).ok_or_else(|| {
+                            Error::new(self.toks[i].start, "unclosed parameter list")
+                        })?;
+                        let mut j = i + 2;
+                        let mut count = usize::from(j < end);
+                        while j < end {
+                            if self.at(j) == "," {
+                                count += 1;
+                            }
+                            if close(self.at(j)).is_some() {
+                                j = self.end_of_group(j).unwrap_or(j);
+                            }
+                            j += 1;
+                        }
+                        Some(Binding::Callable(count))
+                    }
+                    _ if root => Some(Binding::Value),
+                    _ => None,
+                };
+                if !names.insert(n.clone()) {
+                    return Err(Error::new(
+                        self.toks[i].start,
+                        format!("duplicate binding `{n}`"),
+                    ));
+                }
+                if let Some(b) = b {
+                    hoisted.insert(n, b);
+                }
+            }
+            let Some(end) = self.find(i, &[";"], &[]) else {
+                break;
+            };
+            i = end + 1;
+        }
+        Ok(hoisted)
+    }
+    fn program(mut self) -> PResult<Program> {
+        let hoisted = self.prepass(0, true)?;
+        self.scopes.push(hoisted);
+        let mut p = Program {
+            defs: Vec::new(),
+            imports: Vec::new(),
+            entry: None,
+        };
+        let mut exports = Vec::new();
+        // Resolve top-level interfaces before any expression is parsed;
+        // qualified callable arity is part of the interface, not the inferred type.
+        let mut i = 0;
+        while !self.at(i).is_empty() {
+            let Some(end) = self.find(i, &[";"], &[]) else {
+                break;
+            };
+            if self.at(i) == "<<" {
+                self.pos = i + 1;
+                let t = self.next()?;
+                if !t.text.starts_with('"') {
+                    return Err(Error::new(t.start, "expected quoted module path"));
+                }
+                let path = decode(&t)?;
+                self.expect(":")?;
+                let alias = self.ident()?;
+                self.expect(";")?;
+                if self.aliases.insert(alias.clone(), path.clone()).is_some() {
+                    return self.err(format!("duplicate module alias `{alias}`"));
+                }
+                for &(name, arity) in module_items(&path)
+                    .ok_or_else(|| Error::new(t.start, format!("unknown module `{path}`")))?
+                {
+                    self.scope()
+                        .insert(format!("{alias}.{name}"), Binding::Callable(arity));
+                }
+                p.imports.push(path);
+            }
+            i = end + 1;
+        }
+        self.pos = 0;
+        while !self.peek().is_empty() {
+            if self.eat("<<") {
+                self.next()?;
+                self.expect(":")?;
+                self.ident()?;
+                self.expect(";")?;
+            } else if self.eat(">>") {
+                self.expect("(")?;
+                loop {
+                    exports.push(self.ident()?);
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                self.expect(")")?;
+                self.expect(";")?;
+            } else if matches!(self.peek(), "!" | "!{") {
+                let start = self.offset();
+                let e = self.expr(false)?;
+                if !matches!(e, Expr::Action(..)) {
+                    return Err(Error::new(start, "expected an anonymous entry action"));
+                }
+                self.expect(";")?;
+                if !self.peek().is_empty() {
+                    return self.err("anonymous entry action must be last and unique");
+                }
+                p.entry = Some(e);
+            } else if self.def_at(self.pos) {
+                p.defs.push(self.definition(false)?);
+            } else {
+                return self.err(format!(
+                    "expected declaration or anonymous entry action, found {}",
+                    self.found()
+                ));
+            }
+        }
+        let mut seen = HashSet::new();
+        for n in exports {
+            if !seen.insert(n.clone()) {
+                return self.err(format!("duplicate export `{n}`"));
+            }
+            let d = p
+                .defs
+                .iter()
+                .find(|d| matches!(d,Stmt::Def{name,..}|Stmt::Schema{name,..} if *name==n));
+            match d {
+                Some(Stmt::Def {
+                    result_type: Some(_),
+                    param_types,
+                    ..
+                }) if param_types.iter().all(Option::is_some) => {}
+                Some(Stmt::Schema { .. }) => {}
+                Some(_) => return self.err(format!("export `{n}` requires a complete signature")),
+                None => return self.err(format!("unknown export `{n}`")),
+            }
+        }
+        Ok(p)
+    }
+    fn ty_until(&mut self, ends: &[&str]) -> PResult<String> {
+        let start = self.pos;
+        if let Some(j) = self.find(start, ends, &[";", "|", ":="]) {
+            if start == j {
+                return self.err("expected a type");
+            }
+            self.pos = j;
+        } else {
+            return self.err("expected a type followed by its delimiter");
+        }
+        Ok(self.toks[start..self.pos]
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+    // A declaration delimiter directly followed by a table marker shares spelling
+    // with expression operator :#. Resolve it only in grammatical annotation position.
+    fn annotation(&mut self, ends: &[&str]) -> PResult<Option<String>> {
+        if self.eat(":") {
+            return self.ty_until(ends).map(Some);
+        }
+        if self.eat(":#") {
+            let positional =
+                self.peek() == "[" && self.toks[self.pos - 1].end == self.toks[self.pos].start;
+            let ty = self.ty_until(ends)?;
+            return Ok(Some(if positional {
+                format!("#{}", ty)
+            } else {
+                format!("# {ty}")
+            }));
+        }
+        Ok(None)
+    }
+    fn parameters(&mut self) -> PResult<(Vec<String>, Vec<Option<String>>)> {
+        self.expect("(")?;
+        let mut names = Vec::new();
+        let mut types = Vec::new();
+        let mut seen = HashSet::new();
+        loop {
+            let n = self.ident()?;
+            if !seen.insert(n.clone()) {
+                return self.err(format!("duplicate parameter `{n}`"));
+            }
+            names.push(n);
+            if let Some(ty) = self.annotation(&[",", ")"])? {
+                types.resize(names.len(), Some(ty));
+            }
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect(")")?;
+        if !types.is_empty() && types.len() != names.len() {
+            return self.err("parameter annotations must cover every parameter");
+        }
+        types.resize(names.len(), None);
+        Ok((names, types))
+    }
+    fn definition(&mut self, effect: bool) -> PResult<Stmt> {
+        let start = self.offset();
+        let name = self.ident()?;
+        if self.eat("::") {
+            if !self.eat("{") || self.peek() == "|" {
+                return self.err("only record schema declarations are implemented");
+            }
+            let mut fields = Vec::new();
+            let mut seen = HashSet::new();
+            while !self.eat("}") {
+                let n = self.ident()?;
+                if !seen.insert(n.clone()) {
+                    return self.err(format!("duplicate schema field `{n}`"));
+                }
+                let ty = self
+                    .annotation(&[";"])?
+                    .ok_or_else(|| Error::new(self.offset(), "expected record field type"))?;
+                fields.push((n, ty));
+                self.expect(";")?;
+            }
+            self.expect(";")?;
+            return Ok(Stmt::Schema {
+                name,
+                fields,
+                start,
+            });
+        }
+        let (params, param_types) = if self.peek() == "(" {
+            self.parameters()?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let result_type = self.annotation(&[":=", "|"])?;
+        if self.peek() == "|" {
+            return self.err("explicit type constraints are not implemented");
+        }
+        if result_type.is_some() && param_types.iter().any(Option::is_none) {
+            return self.err("annotated function result requires annotated parameters");
+        }
+        self.expect(":=")?;
+        let body = if params.is_empty() {
+            self.expr(effect)?
+        } else {
+            self.scopes
+                .push(params.iter().map(|p| (p.clone(), Binding::Value)).collect());
+            let r = self.expr(false);
+            self.scopes.pop();
+            r?
+        };
+        self.expect(";")?;
+        if params.is_empty() {
+            self.scope().insert(name.clone(), Binding::Value);
+        }
+        Ok(Stmt::Def {
+            name,
+            params,
+            param_types,
+            result_type,
+            body,
+            start,
+        })
+    }
+    fn expr(&mut self, effect: bool) -> PResult<Expr> {
+        if self.depth >= 256 {
+            return self.err("expression depth limit exceeded");
+        }
+        self.depth += 1;
+        let r = self.atom(effect);
+        self.depth -= 1;
+        r
+    }
+    fn atom(&mut self, effect: bool) -> PResult<Expr> {
+        let t = self.next()?;
+        match t.text.as_str() {
+            "(" => {
+                if self.eat(")") {
+                    return Ok(Expr::Unit);
+                }
+                let first = self.expr(effect)?;
+                if self.eat(",") {
+                    let mut row = vec![first];
+                    loop {
+                        row.push(self.expr(effect)?);
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                    self.expect(")")?;
+                    Ok(Expr::Tuple(row))
+                } else {
+                    self.expect(")")?;
+                    Ok(first)
+                }
+            }
+            "[" | "#[" => {
+                let mut xs = Vec::new();
+                while !self.eat("]") {
+                    xs.push(self.expr(effect)?);
+                }
+                if t.text == "#[" {
+                    Ok(Expr::Call(t.text, vec![Expr::Array(xs)]))
+                } else {
+                    Ok(Expr::Array(xs))
+                }
+            }
+            "{" => self.block(false),
+            "{." => Err(Error::new(
+                t.start,
+                "anonymous records are a provisional, unimplemented form",
+            )),
+            "!{" => self.block(true),
+            "!" if self.eat("{") => self.block(true),
+            "!" if effect => self.call(t.text, 1, effect),
+            "!" => Err(Error::new(
+                t.start,
+                "action execution is only legal inside an action block",
+            )),
+            "\\" => {
+                let (params, types) = self.parameters()?;
+                if types.iter().any(Option::is_some) {
+                    return self.err("typed lambda parameters are not implemented");
+                }
+                self.expect("->")?;
+                self.scopes
+                    .push(params.iter().map(|p| (p.clone(), Binding::Value)).collect());
+                let out = self.expr(false);
+                self.scopes.pop();
+                Ok(Expr::Lambda(params, Box::new(out?)))
+            }
+            "?" => {
+                let mut pairs = Vec::new();
+                if self.eat("{") {
+                    while !self.eat("_") {
+                        let c = self.expr(effect)?;
+                        self.expect(":")?;
+                        let v = self.expr(effect)?;
+                        self.expect(";")?;
+                        pairs.push((c, v));
+                    }
+                    self.expect(":")?;
+                    let default = self.expr(effect)?;
+                    self.expect(";")?;
+                    self.expect("}")?;
+                    Ok(Expr::Cases(pairs, Box::new(default)))
+                } else {
+                    let c = self.expr(effect)?;
+                    let v = self.expr(effect)?;
+                    let default = self.expr(effect)?;
+                    Ok(Expr::Cases(vec![(c, v)], Box::new(default)))
+                }
+            }
+            "<@" | "@>" | "!>" => Err(Error::new(
+                t.start,
+                "retired I/O operator; use a qualified module action",
+            )),
+            "<-" => Err(Error::new(
+                t.start,
+                "mutation with `<-` is reserved, not implemented",
+            )),
+            "?=" => Err(Error::new(t.start, "pattern matching is not implemented")),
+            "#{" => Err(Error::new(
+                t.start,
+                "dictionary literals are not implemented",
+            )),
+            "&" => {
+                let n = self.next()?;
+                if matches!(self.lookup(&n.text),Some(Binding::Callable(k)) if k>0) {
+                    Ok(Expr::Ref(self.canonical(&n.text)))
+                } else {
+                    Err(Error::new(
+                        n.start,
+                        format!("not a referenceable callable: `{}`", n.text),
+                    ))
+                }
+            }
+            ":" => {
+                let s = self.next()?;
+                if !matches!(s.text.as_str(), "n" | "z" | "q" | "d" | "r") {
+                    return Err(Error::new(
+                        s.start,
+                        "expected numeric conversion target n, z, q, d, or r",
+                    ));
+                }
+                self.call(format!(":{}", s.text), 1, effect)
+            }
+            "0b" => Ok(Expr::Bool(false)),
+            "1b" => Ok(Expr::Bool(true)),
+            s if s.starts_with('"') => Ok(Expr::Str(decode(&t)?)),
+            s if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 3 => {
+                let d = decode(&t)?;
+                let mut c = d.chars();
+                let ch = c
+                    .next()
+                    .ok_or_else(|| Error::new(t.start, "empty character literal"))?;
+                if c.next().is_some() {
+                    return Err(Error::new(
+                        t.start,
+                        "character literal contains multiple scalars",
+                    ));
+                }
+                Ok(Expr::Char(ch))
+            }
+            s if s
+                .trim_start_matches('-')
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_digit) =>
+            {
+                if let Ok(n) = s.parse() {
+                    Ok(Expr::Int(n))
+                } else if s.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+                    Err(Error::new(
+                        t.start,
+                        "integer literal exceeds this implementation's i128 range",
+                    ))
+                } else {
+                    Ok(Expr::Num(t.text))
+                }
+            }
+            _ => match self.lookup(&t.text) {
+                Some(Binding::Value) => Ok(Expr::Name(t.text)),
+                Some(Binding::Callable(n)) => self.call(self.canonical(&t.text), n, effect),
+                Some(Binding::Record) => self.record(t.text, effect),
+                None => Err(Error::new(
+                    t.start,
+                    format!("unknown name or invalid expression token `{}`", t.text),
+                )),
+            },
+        }
+    }
+    fn record(&mut self, name: String, effect: bool) -> PResult<Expr> {
+        self.expect("{")?;
+        let mut fields = Vec::new();
+        let mut seen = HashSet::new();
+        while !self.eat("}") {
+            let n = self.ident()?;
+            if !seen.insert(n.clone()) {
+                return self.err(format!("duplicate record field `{n}`"));
+            }
+            self.expect(":=")?;
+            fields.push((n, self.expr(effect)?));
+            self.expect(";")?;
+        }
+        Ok(Expr::NamedRecord(name, fields))
+    }
+    fn call(&mut self, n: String, arity: usize, effect: bool) -> PResult<Expr> {
+        let mut args = Vec::with_capacity(arity);
+        for i in 0..arity {
+            if matches!(self.peek(), "" | ";" | "}" | ")" | "]" | ",") {
+                return self.err(format!("missing operand {} of {arity} for `{n}`", i + 1));
+            }
+            args.push(self.expr(effect)?);
+        }
+        Ok(Expr::Call(n, args))
+    }
+    fn block(&mut self, effect: bool) -> PResult<Expr> {
+        let h = self.prepass(self.pos, false)?;
+        self.scopes.push(h);
+        let r = self.block_contents(effect);
+        self.scopes.pop();
+        let (stmts, last) = r?;
+        Ok(if effect {
+            Expr::Action(stmts, last)
+        } else {
+            Expr::Block(stmts, last)
+        })
+    }
+    fn block_contents(&mut self, effect: bool) -> PResult<(Vec<Stmt>, Option<Box<Expr>>)> {
+        let mut stmts = Vec::new();
+        loop {
+            if self.eat("}") {
+                if !effect {
+                    return self.err("pure block requires a final expression (write () for unit)");
+                }
+                return Ok((stmts, None));
+            }
+            if self.def_at(self.pos) {
+                stmts.push(self.definition(effect)?);
+                continue;
+            }
+            let start = self.offset();
+            let body = self.expr(effect)?;
+            if effect && self.eat(";") {
+                stmts.push(Stmt::Effect {
+                    name: None,
+                    body,
+                    start,
+                });
+                continue;
+            }
+            self.expect("}")?;
+            return Ok((stmts, Some(Box::new(body))));
+        }
+    }
+}
+
+fn module_items(path: &str) -> Option<&'static [(&'static str, usize)]> {
+    match path {
+        "io" => Some(&[
+            ("print", 1),
+            ("println", 1),
+            ("read", 1),
+            ("write", 2),
+            ("read_csv", 1),
+            ("write_csv", 2),
+        ]),
+        "csv" => Some(&[("read", 1), ("write", 2)]),
+        "table" => Some(&[("agg", 3)]),
+        "statistics" | "stats" => {
+            Some(&[("avg", 1), ("mean", 1), ("pct", 2), ("sd", 1), ("cor", 2)])
+        }
+        _ => None,
+    }
+}
+fn decode(t: &Token) -> PResult<String> {
+    if t.text.len() < 2 {
+        return Err(Error::new(t.start, "invalid literal"));
+    }
+    let mut ch = t.text[1..t.text.len() - 1].chars();
+    let mut out = String::new();
+    while let Some(c) = ch.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let err = || Error::new(t.start, "invalid literal escape");
+        out.push(match ch.next().ok_or_else(err)? {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            '0' => '\0',
+            '\\' => '\\',
+            '"' => '"',
+            '\'' => '\'',
+            'u' => {
+                if ch.next() != Some('{') {
+                    return Err(err());
+                }
+                let mut hex = String::new();
+                loop {
+                    let d = ch.next().ok_or_else(err)?;
+                    if d == '}' {
+                        break;
+                    }
+                    hex.push(d);
+                }
+                u32::from_str_radix(&hex, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .ok_or_else(err)?
+            }
+            _ => return Err(err()),
+        })
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arity_missing_surplus_and_strict_prefix() {
+        assert!(parse("p(x,y:n):n := + x y; n := p 2 3;").is_ok());
+        for bad in [
+            "n := + 2;",
+            "n := + 2 3 4;",
+            "n := 2 + 3;",
+            "p(x,y:n):n := + x y; n := p(2,3);",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn callable_hoisting_and_lexical_shadowing() {
+        let p = parse("a(x:n):n := b x; b(x:n):n := x; k(avg:n):n := avg;                        y := { a := 4; f(x:n):n := + a x; f 3 };").unwrap();
+        assert!(matches!(&p.defs[2], Stmt::Def { body: Expr::Name(n), .. } if n == "avg"));
+        assert!(parse("n := { f(x:n):n := + x k; k := 2; f 1 };").is_err());
+        assert!(parse("n := { k := 1; k := 2; k };").is_err());
+    }
+
+    #[test]
+    fn module_arity_and_terminal_anonymous_effect() {
+        let p = parse("x := &say.print; << \"io\" : say; !{ ! @ x 1; };").unwrap();
+        assert_eq!(p.imports, vec!["io"]);
+        assert!(matches!(&p.defs[0], Stmt::Def { body: Expr::Ref(n), .. } if n == "io.print"));
+        assert!(matches!(p.entry, Some(Expr::Action(_, None))));
+        assert!(parse("!{ (); }; x := 1;").is_err());
+        assert!(parse("!{ (); }; !{ (); };").is_err());
+        assert!(parse("x := ! 1;").is_err());
+        assert!(parse("!{ ! !> 1; };").is_err());
+    }
+
+    #[test]
+    fn declaration_types_and_guards() {
+        assert!(parse("pt :: { x:q; y:q; }; x := pt { x:=2; y:=3; };                        n:#[s n] := #[ (\"x\",1) ];                        f(x,y:(n,n),k:n):n := ? { > k 1 : .1 x; _ : .2 y; };").is_ok());
+        assert!(parse(
+            "pt :: { x:q; }; identity(t:#pt):#pt := t; \
+                       !{ t:#pt := #[ pt { x:=2; } ]; # (:# identity t) };"
+        )
+        .is_ok());
+        assert!(parse("f(x:q,y):q := + x y;").is_err());
+        assert!(parse(">> (f); f(x:q) := * x x;").is_err());
+        assert!(parse("x := ? { 1b : 1; };").is_err());
+        assert!(parse("x := {. x:=3; };").is_err());
+    }
+}

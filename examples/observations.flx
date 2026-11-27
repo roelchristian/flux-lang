@@ -1,0 +1,19 @@
+<< "io" : io;
+
+obs :: {
+    station:s;
+    value:q;
+    valid:b;
+};
+
+!{
+    t:#obs := #[
+        obs { station := "north"; value := 12q; valid := 1b; }
+        obs { station := "south"; value := -3q; valid := 1b; }
+        obs { station := "north"; value := 18q; valid := 1b; }
+        obs { station := "west"; value := 40q; valid := 0b; }
+    ];
+    u := ?: (&& (.valid t) (> (.value t) 0q)) t;
+    ! io.print (# u);
+    ! io.print (avg (.value u));
+};

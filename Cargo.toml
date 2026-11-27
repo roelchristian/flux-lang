@@ -1,0 +1,14 @@
+[package]
+name = "flux-lang"
+version = "0.1.0-alpha.1"
+edition = "2021"
+rust-version = "1.85"
+description = "Reference prototype for the Flux programming language"
+publish = false
+
+[lib]
+name = "flux_lang"
+
+[[bin]]
+name = "flux"
+path = "src/main.rs"

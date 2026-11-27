@@ -1,0 +1,8 @@
+<< "csv" : csv;
+<< "io" : io;
+
+!{
+    rows:[[s]] := ! csv.read "examples/observations.csv";
+    ! io.print (# rows);
+    ! io.print rows;
+};
