@@ -1,0 +1,11 @@
+-- The dot is identity. Composition applies the right function first.
+bump(x:z):z := + x 1z;
+double(x:z):z := * x 2z;
+bump_then_double := &{ @. double bump };
+sum_transforms := &{ @* + bump double };
+self_plus_double := &{ @? + double };
+
+!{
+    ^= ! print (@ bump_then_double 4z,@ sum_transforms 4z,
+                @ self_plus_double 4z,@ &. "identity") { _ : (); };
+};
