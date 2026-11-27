@@ -1,5 +1,10 @@
 --- Horner's rule folds descending coefficients into a value at x.
-horner(x:q, cs:[q]):q := /: (\(a,c:q) -> + (* a x) c) 0q cs;
+horner(x: q, cs: [q]): q := /: (\ (a, c: q) -> + * a x c) 0q cs;
 cs := [2q -3q 0q 5q];
 
-!{ ^{ ^? ! print (horner 3q cs,horner 1.5q cs); () } };
+!{
+    ^{
+        ^? ! print (horner 3q cs, horner 1.5q cs);
+        ()
+    }
+};

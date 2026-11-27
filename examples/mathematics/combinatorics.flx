@@ -1,13 +1,28 @@
 --- Empty products are one; guard against underflow when k > n.
-fact(n:n):n := */ (.. 1n n);
-perm(n,k:n):n := ? (> k n) 0 (*/ (.. (+ (- n k) 1) n));
+fact(n: n): n := */ .. 1n n;
+perm(n, k: n): n :=
+?
+> k n
+0
+*/
+    ..
+        + - n k 1
+        n;
 
-choose(n,k:n):n :=
-    ? (> k n) 0 (/: (\(a,i:n) -> // (* a (+ (- n k) i)) i) 1n (.. 1n k));
+choose(n, k: n): n :=
+?
+> k n
+0
+/:
+    (\ (a, i: n) -> // * a + - n k i i)
+    1n
+    .. 1n k;
 
-!{ ^{
-    ^? ! print (fact 0,fact 5,fact 50);
-    ^? ! print (perm 5 3,perm 5 0,perm 0 0,perm 5 5,perm 5 6);
-    ^? ! print (choose 10 3,choose 150 75);
-    ()
-} };
+!{
+    ^{
+        ^? ! print (fact 0, fact 5, fact 50);
+        ^? ! print (perm 5 3, perm 5 0, perm 0 0, perm 5 5, perm 5 6);
+        ^? ! print (choose 10 3, choose 150 75);
+        ()
+    }
+};
