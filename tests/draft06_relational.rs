@@ -365,7 +365,7 @@ fn calibration_audit_distinguishes_unmatched_missing_duplicate_and_zero() {
         let report = fs::read(&findings).unwrap();
         assert_eq!(
             String::from_utf8_lossy(&report).replace("\r\n", "\n"),
-            calibration!("expected.csv"),
+            calibration!("expected.csv").replace("\r\n", "\n"),
         );
 
         let rerun = f.run(mode);
