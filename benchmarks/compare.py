@@ -9,8 +9,10 @@ import subprocess
 from tempfile import TemporaryDirectory
 from time import perf_counter_ns
 
+from migration import fallible_io
 
-def prepare(directory):
+
+def prepare(directory, *, modern):
     files = {}
     source = directory / "arithmetic.flx"
     source.write_text('<< "io";\n!{ ! io.print |{ .. 1 100000; ^ $ 2; +/ $ }; };\n')
@@ -37,6 +39,10 @@ summ(k:s,t:#obs) := .{{ bucket := k; total := +/ .value t; }};
 ''')
         files[f"typed CSV + aggregate (6,000 rows, {groups:,d} keys)"] = (
             [source.name], f"{groups}\n17997000\n")
+    if modern:
+        for (args, _expected) in files.values():
+            path = directory / args[-1]
+            path.write_text(fallible_io(path.read_text()))
     return files
 
 
@@ -54,15 +60,21 @@ def main():
     parser.add_argument("before", type=Path)
     parser.add_argument("after", type=Path, nargs="?")
     parser.add_argument("--runs", type=int, default=7)
+    parser.add_argument("--legacy-before", action="store_true",
+                        help="use pre-0.4.1 I/O source for the first binary")
     options = parser.parse_args()
     if options.runs < 3:
         parser.error("--runs must be at least 3")
     bins = [p.resolve(strict=True) for p in (options.before, options.after) if p]
     with TemporaryDirectory(prefix="flux-bench-") as temp:
-        cwd = Path(temp)
+        directories = [Path(temp) / str(i) for i in range(len(bins))]
+        samples_by_binary = []
+        for i, cwd in enumerate(directories):
+            cwd.mkdir()
+            samples_by_binary.append(prepare(cwd, modern=not (options.legacy_before and i == 0)))
         results = {}
-        for name, (args, expected) in prepare(cwd).items():
-            for binary in bins:
+        for name, (args, expected) in samples_by_binary[0].items():
+            for binary, cwd in zip(bins, directories):
                 invoke(binary, args, expected, cwd)
             samples = [[] for _ in bins]
             for i in range(options.runs):
@@ -70,7 +82,7 @@ def main():
                 if i % 2:
                     order.reverse()
                 for j in order:
-                    samples[j].append(invoke(bins[j], args, expected, cwd))
+                    samples[j].append(invoke(bins[j], args, expected, directories[j]))
             results[name] = [
                 {"median_ms": round(median(sample), 3), "samples_ms": [round(x, 3) for x in sample]}
                 for sample in samples

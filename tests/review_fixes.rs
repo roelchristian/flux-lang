@@ -103,8 +103,8 @@ fn local_forward_call_and_unforced_capture_are_legal() {
     a := &read;
     held := 23;
     read(x:()):z := held;
-    ! io.print early;
-    ! io.print @ a ();
+    ^= ! io.print early { _ : (); };
+    ^= ! io.print @ a () { _ : (); };
 };"#,
         "2\n23\n",
     );
@@ -118,8 +118,8 @@ rr :: { a:z; };
 outer(x:rr) := .a x;
 !{
     inner := { rr :: { b:s; }; .b rr { b := "inside"; } };
-    ! io.print inner;
-    ! io.print outer rr { a := 3; };
+    ^= ! io.print inner { _ : (); };
+    ^= ! io.print outer rr { a := 3; } { _ : (); };
 };"#,
         "inside\n3\n",
     );
@@ -141,7 +141,7 @@ fn explicit_variables_cannot_specialize_or_escape_into_capture() {
     accepts(
         r#"<< "io";
 outer(x) := { identity(y:'a):'a := y; (identity 7, identity "s", x) };
-!{ ! io.print outer 42; };"#,
+!{ ^= ! io.print outer 42 { _ : (); }; };"#,
         "(7, s, 42)\n",
     );
 }
@@ -154,7 +154,7 @@ fn unconstrained_empty_occurrences_have_no_implicit_element_type() {
         r#"<< "io";
 f(xs:[z]) := == xs [];
 empty(x:'a):['a] := [];
-!{ ! io.print f []; ! io.print f [1]; ! io.print empty "x"; ! io.print empty 2; };"#,
+!{ ^= ! io.print f [] { _ : (); }; ^= ! io.print f [1] { _ : (); }; ^= ! io.print empty "x" { _ : (); }; ^= ! io.print empty 2 { _ : (); }; };"#,
         "1b\n0b\n[]\n[]\n",
     );
 }
@@ -168,7 +168,7 @@ row :: { key:s; n:z; };
 summary(k:s,t:#row) := .{ key := k; count := # t; };
 group(t:#row) := { summarizer := &summary; df.agg &.key (summarizer) t };
 input:#row := #[];
-!{ ! csv.write "out.csv" (group input); };"#,
+!{ ^{ ^? ! csv.write "out.csv" (group input); () } };"#,
         "",
     );
     assert_eq!(
@@ -185,7 +185,7 @@ fn constrained_numeric_evidence_survives_escaping_closures() {
         r#"<< "io";
 sq(x:'a):'a | num 'a := * x x;
 factory(x) := { g(y) := sq y; &g };
-!{ ! io.print @ (factory ()) 2; ! io.print @ (factory ()) 0.5; };"#,
+!{ ^= ! io.print @ (factory ()) 2 { _ : (); }; ^= ! io.print @ (factory ()) 0.5 { _ : (); }; };"#,
         "4\n1/4\n",
     );
 }
@@ -195,7 +195,7 @@ fn indirect_numeric_operator_survives_partial_application() {
     accepts(
         r#"<< "io";
 op := &+;
-!{ addone := @ op 1; ! io.print @ addone 2; };"#,
+!{ addone := @ op 1; ^= ! io.print @ addone 2 { _ : (); }; };"#,
         "3\n",
     );
 }

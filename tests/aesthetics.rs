@@ -71,8 +71,8 @@ fn column_construction_validates_shape_and_preserves_order() {
 !{
     t := #: .{ value := [10 20]; city := ["north" "south"]; };
     u := df.extend .{ amount := + .value t 2; } t;
-    ! io.print .amount u;
-    ! io.print .city u;
+    ^= ! io.print .amount u { _ : (); };
+    ^= ! io.print .city u { _ : (); };
 };
 "#;
     let output = files.run(base);

@@ -20,6 +20,11 @@ pub enum Category {
     Type,
     InvalidHir,
     MigrationBoundary,
+    IncompatibleError,
+    ResultNeedsHandling,
+    RuntimeDomain,
+    RuntimeInvariant,
+    RuntimeOperational,
 }
 impl Category {
     pub const fn code(self) -> &'static str {
@@ -28,6 +33,11 @@ impl Category {
             Self::Type => "E0200",
             Self::InvalidHir => "E0300",
             Self::MigrationBoundary => "E0400",
+            Self::IncompatibleError => "E0402",
+            Self::ResultNeedsHandling => "E0401",
+            Self::RuntimeDomain => "R0001",
+            Self::RuntimeInvariant => "R0002",
+            Self::RuntimeOperational => "R0101",
         }
     }
 }
@@ -38,9 +48,15 @@ pub struct Related {
     pub label: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Severity {
+    Error,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Diagnostic {
     pub category: Category,
+    pub severity: Severity,
     pub primary: Span,
     pub related: Vec<Related>,
     pub message: String,
@@ -53,6 +69,7 @@ impl Diagnostic {
     pub fn new(category: Category, primary: Span, message: impl Into<String>) -> Self {
         Self {
             category,
+            severity: Severity::Error,
             primary,
             related: Vec::new(),
             message: message.into(),

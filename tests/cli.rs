@@ -52,8 +52,8 @@ fn anonymous_entry_runs_once_instead_of_main() {
     let file = Script::new(
         r#"
 << "io" : io;
-main:!() := !{ ! io.print "do not run"; };
-!{ ! io.print "run once"; };
+main:!() := !{ ^= ! io.print "do not run" { _ : (); }; };
+!{ ^= ! io.print "run once" { _ : (); }; };
 "#,
     );
     let checked = file.invoke(&["check"]);
@@ -85,8 +85,8 @@ add(x,y:q):q := + x y;
 one(x:(q,q)):q := + .1 x .2 x;
 !{
     args := (2q,3q);
-    ! io.print @@ &add args;
-    ! io.print @ &one (7q,8q);
+    ^= ! io.print @@ &add args { _ : (); };
+    ^= ! io.print @ &one (7q,8q) { _ : (); };
 };
 "#,
     );
@@ -130,7 +130,7 @@ fn repl_does_not_automatically_execute_suspended_action() {
         .stdin
         .take()
         .unwrap()
-        .write_all(b"a := !{ ! io.print \"marker-effect\"; };\na\n! a\n:q\n")
+        .write_all(b"a := !{ ^= ! io.print \"marker-effect\" { _ : (); }; };\na\n! a\n:q\n")
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "{}", text(&output.stderr));
@@ -149,7 +149,7 @@ fn floor_quotient_is_not_a_comment_and_calls_stay_prefix() {
         r#"
 << "io" : io;
 -- floor quotient with a separate adjacent-sign literal
-!{ ! io.print // -7 2; };
+!{ ^= ! io.print // -7 2 { _ : (); }; };
 "#,
     );
     let output = file.invoke(&[]);

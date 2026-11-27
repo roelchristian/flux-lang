@@ -3,7 +3,7 @@ use crate::{
     check,
     diagnostic::{Category, Diagnostic, Span},
     eval, hir, hir_eval, infer,
-    parser::{Expr, Program},
+    parser::{Expr, Program, Stmt},
     resolve,
     types::{Prim, Type},
     Error,
@@ -62,6 +62,53 @@ impl Prepared<'_> {
         }
     }
 
+    /// Execute with ordered writes. Unlike collected output, writes remain visible on failure.
+    pub fn run_with_output(&self, sink: &mut dyn std::io::Write) -> Result<eval::Output, Error> {
+        match &self.backend {
+            Backend::Typed(program) => hir_eval::run_with_output(program, sink),
+            Backend::Draft03 { program, .. } => {
+                let mut result = eval::run(program)?;
+                sink.write_all(result.stdout.as_bytes())
+                    .map_err(|e| issue(Category::RuntimeDomain, 0, e.to_string()))?;
+                result.stdout.clear();
+                Ok(result)
+            }
+        }
+    }
+
+    /// Execute typed HIR with an injectable file reader and ordered output writer.
+    /// Filesystem operations other than reading use the host filesystem.
+    pub fn run_with_io(
+        &self,
+        input: &mut dyn crate::RuntimeInput,
+        output: &mut dyn std::io::Write,
+    ) -> Result<eval::Output, Error> {
+        match &self.backend {
+            Backend::Typed(program) => hir_eval::run_with_io(program, input, output),
+            Backend::Draft03 { .. } => Err(issue(
+                Category::MigrationBoundary,
+                0,
+                "injected runtime input requires typed HIR",
+            )),
+        }
+    }
+
+    pub fn view_with_output(
+        &self,
+        sink: &mut dyn std::io::Write,
+    ) -> Result<eval::ReplOutput, Error> {
+        match &self.backend {
+            Backend::Typed(program) => hir_eval::view_with_output(program, sink),
+            Backend::Draft03 { program, .. } => {
+                let mut result = eval::view_entry(program)?;
+                sink.write_all(result.stdout.as_bytes())
+                    .map_err(|e| issue(Category::RuntimeDomain, 0, e.to_string()))?;
+                result.stdout.clear();
+                Ok(result)
+            }
+        }
+    }
+
     pub fn view(&self) -> Result<eval::ReplOutput, Error> {
         match &self.backend {
             Backend::Typed(program) => hir_eval::view_entry(program),
@@ -74,6 +121,64 @@ fn issue(category: Category, offset: usize, message: impl Into<String>) -> Error
     Diagnostic::new(category, Span::at(offset), message).into_error()
 }
 
+fn requires_error_hir(program: &Program) -> bool {
+    fn builtin(name: &str) -> bool {
+        matches!(
+            crate::builtins::canonical(name),
+            "io.read"
+                | "io.write"
+                | "io.exists"
+                | "io.print"
+                | "csv.read"
+                | "csv.write"
+                | "math.div"
+        )
+    }
+    fn stmt(s: &Stmt) -> bool {
+        match s {
+            Stmt::Sum { .. } => true,
+            Stmt::Def {
+                param_types,
+                result_type,
+                body,
+                ..
+            } => {
+                param_types
+                    .iter()
+                    .flatten()
+                    .chain(result_type)
+                    .any(|t| t.contains('^'))
+                    || expr(body)
+            }
+            Stmt::Schema { fields, .. } => fields.iter().any(|(_, t)| t.contains('^')),
+            Stmt::Effect { body, .. } => expr(body),
+        }
+    }
+    fn expr(e: &Expr) -> bool {
+        match e {
+            Expr::Fallible(..) | Expr::Raise(..) | Expr::Propagate(..) | Expr::Recover(..) => true,
+            Expr::Ref(name) => builtin(name),
+            Expr::Call(name, xs) => builtin(name) || xs.iter().any(expr),
+            Expr::Array(xs) | Expr::Tuple(xs) | Expr::Pipeline(xs) => xs.iter().any(expr),
+            Expr::Cases(cases, tail) => {
+                cases.iter().any(|(cond, value)| expr(cond) || expr(value)) || expr(tail)
+            }
+            Expr::Record(fields) | Expr::NamedRecord(_, fields) => {
+                fields.iter().any(|(_, v)| expr(v))
+            }
+            Expr::Lambda(_, body) => expr(body),
+            Expr::TypedLambda(_, ts, body) => {
+                ts.iter().flatten().any(|t| t.contains('^')) || expr(body)
+            }
+            Expr::Block(xs, tail) | Expr::Action(xs, tail) => {
+                xs.iter().any(stmt) || tail.as_deref().is_some_and(expr)
+            }
+            _ => false,
+        }
+    }
+    program.defs.iter().any(stmt) || program.entry.as_ref().is_some_and(expr)
+}
+
 fn legacy(
     program: &Program,
     mode: Mode,
@@ -81,7 +186,8 @@ fn legacy(
     start: usize,
     reason: String,
 ) -> Result<Prepared<'_>, Error> {
-    if policy == Policy::TypedOnly || !program.constraints.is_empty() {
+    if policy == Policy::TypedOnly || !program.constraints.is_empty() || requires_error_hir(program)
+    {
         return Err(issue(Category::MigrationBoundary, start, reason));
     }
     let inspection = match mode {
@@ -129,12 +235,28 @@ pub fn prepare_timed<'a>(
             return legacy(program, mode, policy, failure.start, failure.message);
         }
         Err(failure) => {
-            return Err(Diagnostic::new(
-                Category::Type,
+            let category = match failure.kind {
+                infer::InferErrorKind::IncompatibleError => Category::IncompatibleError,
+                infer::InferErrorKind::ResultNeedsHandling => Category::ResultNeedsHandling,
+                _ => Category::Type,
+            };
+            let mut diagnostic = Diagnostic::new(
+                category,
                 Span::new(failure.start, failure.end),
                 failure.message,
-            )
-            .into_error())
+            );
+            diagnostic.expected = failure.expected;
+            diagnostic.actual = failure.actual;
+            diagnostic.suggestion = match category {
+                Category::IncompatibleError => {
+                    Some("recover and convert the error explicitly before propagating".into())
+                }
+                Category::ResultNeedsHandling => {
+                    Some("use ^= to recover or ^? inside a fallible boundary".into())
+                }
+                _ => None,
+            };
+            return Err(diagnostic.into_error());
         }
     };
     let entry_type = program.entry.as_ref().and_then(|e| inferred.type_of(e));
@@ -149,11 +271,12 @@ pub fn prepare_timed<'a>(
             (Some(Expr::Action(_, Some(tail))), Type::Prim(Prim::Z))
                 if matches!(tail.as_ref(), Expr::Int(value) if *value >= 0)
         );
-        if !matches!(t, Type::Prim(Prim::Unit | Prim::N)) && !contextual_status {
+        let valid_result = matches!(t, Type::Result(ok, _) if matches!(ok.as_ref(), Type::Prim(Prim::Unit | Prim::N)));
+        if !matches!(t, Type::Prim(Prim::Unit | Prim::N)) && !contextual_status && !valid_result {
             return Err(issue(
                 Category::Type,
                 entry_start,
-                format!("entry must yield () or n, found {t}"),
+                format!("entry must yield (), n, ()^e or n^e, found {t}"),
             ));
         }
     }

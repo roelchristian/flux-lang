@@ -23,6 +23,9 @@ pub enum Type {
     Tuple(Vec<Type>),
     Dict(Box<Type>, Box<Type>),
     Optional(Box<Type>),
+    Result(Box<Type>, Box<Type>),
+    /// Internal type for an expression that does not return normally.
+    Never,
     Action(Box<Type>),
     Fun(Box<Type>, Box<Type>),
     Table(Box<Type>),
@@ -108,6 +111,13 @@ impl fmt::Display for Type {
                 write!(f, "{t}")
             }
         }
+        fn result_operand(t: &Type, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            if matches!(t, Type::Fun(..) | Type::Result(..)) {
+                write!(f, "({t})")
+            } else {
+                write!(f, "{t}")
+            }
+        }
         match self {
             Self::Var(v) => write!(f, "'t{v}"),
             Self::Prim(p) => write!(f, "{p}"),
@@ -134,11 +144,17 @@ impl fmt::Display for Type {
             }
             Self::Optional(t) => {
                 f.write_str("?")?;
-                operand(t, f)
+                result_operand(t, f)
             }
+            Self::Result(ok, err) => {
+                result_operand(ok, f)?;
+                f.write_str("^")?;
+                result_operand(err, f)
+            }
+            Self::Never => f.write_str("<never>"),
             Self::Action(t) => {
                 f.write_str("!")?;
-                operand(t, f)
+                result_operand(t, f)
             }
             Self::Fun(a, b) => {
                 operand(a, f)?;
@@ -146,7 +162,7 @@ impl fmt::Display for Type {
             }
             Self::Table(t) => {
                 f.write_str("#")?;
-                operand(t, f)
+                result_operand(t, f)
             }
             Self::Nominal(n) => f.write_str(&n.name),
             Self::Record(row) => write!(f, "{row}"),
@@ -209,7 +225,7 @@ fn free(t: &Type, out: &mut BTreeSet<u32>) {
             out.insert(*v);
         }
         Type::Seq(x) | Type::Optional(x) | Type::Action(x) | Type::Table(x) => free(x, out),
-        Type::Dict(a, b) | Type::Fun(a, b) => {
+        Type::Dict(a, b) | Type::Fun(a, b) | Type::Result(a, b) => {
             free(a, out);
             free(b, out);
         }
@@ -226,7 +242,7 @@ fn free(t: &Type, out: &mut BTreeSet<u32>) {
                 free(ty, out);
             }
         }
-        Type::Prim(_) | Type::Nominal(_) => {}
+        Type::Prim(_) | Type::Nominal(_) | Type::Never => {}
     }
 }
 fn remap(t: &Type, ids: &BTreeMap<u32, u32>) -> Type {
@@ -250,9 +266,10 @@ fn map_type(t: &Type, var: &impl Fn(u32) -> Type, row: &impl Fn(&Row) -> Type) -
     match t {
         Type::Var(v) => var(*v),
         Type::Record(r) => row(r),
-        Type::Prim(_) | Type::Nominal(_) => t.clone(),
+        Type::Prim(_) | Type::Nominal(_) | Type::Never => t.clone(),
         Type::Seq(x) => Type::Seq(inner(x)),
         Type::Optional(x) => Type::Optional(inner(x)),
+        Type::Result(x, y) => Type::Result(inner(x), inner(y)),
         Type::Action(x) => Type::Action(inner(x)),
         Type::Table(x) => Type::Table(inner(x)),
         Type::Dict(a, b) => Type::Dict(inner(a), inner(b)),
@@ -360,7 +377,7 @@ impl InferCtx {
 
     fn register(&mut self, t: &Type) -> R<()> {
         match t {
-            Type::Prim(_) | Type::Nominal(_) => return Ok(()),
+            Type::Prim(_) | Type::Nominal(_) | Type::Never => return Ok(()),
             Type::Var(id) if !self.types.contains_key(id) => {
                 // Public callers may construct Var IDs without calling fresh.
                 if *id >= self.next {
@@ -387,7 +404,7 @@ impl InferCtx {
             Type::Seq(x) | Type::Optional(x) | Type::Action(x) | Type::Table(x) => {
                 self.register(x)?
             }
-            Type::Dict(a, b) | Type::Fun(a, b) => {
+            Type::Dict(a, b) | Type::Fun(a, b) | Type::Result(a, b) => {
                 self.register(a)?;
                 self.register(b)?;
             }
@@ -443,7 +460,7 @@ impl InferCtx {
             | (Optional(x), Optional(y))
             | (Action(x), Action(y))
             | (Table(x), Table(y)) => self.unify_inner(x, y),
-            (Dict(a, b), Dict(c, d)) | (Fun(a, b), Fun(c, d)) => {
+            (Dict(a, b), Dict(c, d)) | (Fun(a, b), Fun(c, d)) | (Result(a, b), Result(c, d)) => {
                 self.unify_inner(a, c)?;
                 self.unify_inner(b, d)
             }
@@ -650,6 +667,10 @@ impl InferCtx {
             Prim(_) => return fail(),
             _ if matches!(class, Num | Ord) => return fail(),
             Optional(x) => Self::class_obligations(class, x, out)?,
+            Result(ok, err) if class == Eq => {
+                Self::class_obligations(class, ok, out)?;
+                Self::class_obligations(class, err, out)?;
+            }
             Tuple(xs) => {
                 for x in xs {
                     Self::class_obligations(class, x, out)?;
@@ -1051,5 +1072,27 @@ mod tests {
         assert_eq!(fields.to_string(), ".{z:r; a:d; | 'r7}");
         let fn_ty = Type::Fun(Box::new(t(Prim::N)), Box::new(t(Prim::Q)));
         assert_eq!(Type::Action(Box::new(fn_ty)).to_string(), "!(n->q)");
+    }
+    #[test]
+    fn result_types_substitute_and_preserve_precedence() {
+        let mut cx = InferCtx::new();
+        let ok = cx.fresh();
+        let err = cx.fresh();
+        let ty = Type::Result(Box::new(ok.clone()), Box::new(err.clone()));
+        assert_eq!(cx.free_vars(&ty).len(), 2);
+        cx.unify(&ok, &t(Prim::Q)).unwrap();
+        cx.unify(&err, &t(Prim::S)).unwrap();
+        assert_eq!(cx.resolve(&ty).to_string(), "q^s");
+        assert_eq!(
+            Type::Action(Box::new(cx.resolve(&ty))).to_string(),
+            "!(q^s)"
+        );
+        let inverse = Type::Result(
+            Box::new(Type::Action(Box::new(t(Prim::Q)))),
+            Box::new(t(Prim::S)),
+        );
+        assert_eq!(inverse.to_string(), "!q^s");
+        let chained = Type::Fun(Box::new(cx.resolve(&ty)), Box::new(inverse));
+        assert_eq!(chained.to_string(), "q^s->!q^s");
     }
 }

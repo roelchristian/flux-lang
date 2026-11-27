@@ -9,5 +9,8 @@ squares := |{
 };
 
 !{
-    ! io.print squares;
+    ^{
+        ^? ! io.print squares;
+        ()
+    }
 };

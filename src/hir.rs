@@ -1,11 +1,11 @@
 //! Typed, owned execution IR. Surface AST addresses are used only during lowering.
 use crate::{
     infer::{InferResult, Operation},
-    parser::{Expr, Program, Stmt},
+    parser::{Expr, Program, RecoveryPattern as SyntaxPattern, Stmt},
     resolve::{Resolution, SymbolId},
-    types::{Prim, Scheme, Type},
+    types::{NominalId, Prim, Scheme, Type},
 };
-use std::{fmt, rc::Rc};
+use std::{collections::HashMap, fmt, rc::Rc};
 
 // AST currently retains nearest declaration/entry offsets, not token end spans.
 pub use crate::diagnostic::Span;
@@ -55,6 +55,12 @@ pub enum CoreOp {
     ApplyTuple,
     Map,
     Execute,
+    IoRead,
+    IoWrite,
+    IoExists,
+    IoPrint,
+    CheckedDiv,
+    Sqrt,
     Print,
     Present,
     Absent,
@@ -99,7 +105,7 @@ impl CoreOp {
     }
     fn from_name(name: &str) -> Option<Self> {
         use CoreOp::*;
-        Some(match name {
+        Some(match crate::builtins::canonical(name) {
             "+" => Add,
             "-" => Sub,
             "*" => Mul,
@@ -130,18 +136,23 @@ impl CoreOp {
             ":#" => Rows,
             "?:" => Filter,
             "=:" => Group,
-            "df.agg" | "table.agg" => Aggregate,
-            "df.extend" | "table.extend" => Extend,
+            "df.agg" => Aggregate,
+            "df.extend" => Extend,
             ">:" => SortAsc,
             "<:" => SortDesc,
             "csv.read" => CsvRead,
             "csv.write" => CsvWrite,
-            "avg" | "statistics.avg" | "statistics.mean" | "stats.avg" | "stats.mean" => Mean,
+            "avg" => Mean,
             "med" => Median,
-            "sd" | "statistics.sd" | "stats.sd" => StdDev,
+            "sd" => StdDev,
             "@:" => Map,
             "!" => Execute,
-            "io.print" | "io.println" => Print,
+            "io.print" => IoPrint,
+            "io.read" => IoRead,
+            "io.write" => IoWrite,
+            "io.exists" => IoExists,
+            "math.div" => CheckedDiv,
+            "^/" => Sqrt,
             "?1" => Present,
             "?0" => Absent,
             "?+" => Has,
@@ -188,6 +199,7 @@ pub struct ExprNode {
 pub enum Target {
     Symbol(SymbolId),
     Builtin(CoreOp),
+    Constructor(SymbolId),
     Projection(Box<str>),
 }
 
@@ -215,6 +227,33 @@ pub struct PipelineStage {
     pub input: Option<SymbolId>,
     pub expr: ExprId,
 }
+/// A checker's lexical escape target, renumbered deterministically in the
+/// owned HIR; no source-tree address is retained at execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct BoundaryId(pub usize);
+#[derive(Clone, Debug)]
+pub struct ConstructorDef {
+    pub owner: NominalId,
+    pub id: SymbolId,
+    pub name: Rc<str>,
+    pub payload: Vec<Type>,
+}
+#[derive(Clone, Debug)]
+pub enum Pattern {
+    Wildcard,
+    Bind(SymbolId),
+    Constructor {
+        id: SymbolId,
+        fields: Vec<Option<SymbolId>>,
+    },
+}
+#[derive(Clone, Debug)]
+pub struct RecoveryArm {
+    pub pattern: Pattern,
+    pub body: ExprId,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     Literal(Literal),
@@ -233,6 +272,23 @@ pub enum ExprKind {
         body: ExprId,
     },
     Pipeline(Vec<PipelineStage>),
+    Fallible {
+        boundary: BoundaryId,
+        steps: Vec<Step>,
+        tail: Option<ExprId>,
+    },
+    Raise {
+        boundary: BoundaryId,
+        payload: ExprId,
+    },
+    Propagate {
+        boundary: BoundaryId,
+        result: ExprId,
+    },
+    Recover {
+        result: ExprId,
+        arms: Vec<RecoveryArm>,
+    },
     Block {
         steps: Vec<Step>,
         tail: Option<ExprId>,
@@ -243,11 +299,18 @@ pub enum ExprKind {
 #[derive(Clone, Debug)]
 pub struct HirProgram {
     pub arena: Vec<ExprNode>,
+    pub constructors: HashMap<SymbolId, ConstructorDef>,
+    standard_constructors: HashMap<(String, String), SymbolId>,
     /// Dependency order. All function symbols in a group are introduced before any initializer.
     pub groups: Vec<Vec<Definition>>,
     pub entry: Option<ExprId>,
 }
 impl HirProgram {
+    pub fn standard_constructor(&self, owner: &str, name: &str) -> Option<SymbolId> {
+        self.standard_constructors
+            .get(&(owner.to_owned(), name.to_owned()))
+            .copied()
+    }
     pub fn node(&self, id: ExprId) -> &ExprNode {
         &self.arena[id.0]
     }
@@ -301,8 +364,8 @@ impl Boundary {
 
 fn csv_returns_table(ty: &Type) -> bool {
     match ty {
-        Type::Fun(_, out) => csv_returns_table(out),
-        Type::Action(out) => matches!(out.as_ref(), Type::Table(_)),
+        Type::Fun(_, out) | Type::Action(out) | Type::Result(out, _) => csv_returns_table(out),
+        Type::Table(_) => true,
         _ => false,
     }
 }
@@ -311,7 +374,9 @@ fn uses_decimal(ty: &Type) -> bool {
         Type::Prim(Prim::D) => true,
         Type::Seq(x) | Type::Optional(x) | Type::Action(x) | Type::Table(x) => uses_decimal(x),
         Type::Tuple(xs) => xs.iter().any(uses_decimal),
-        Type::Fun(a, b) | Type::Dict(a, b) => uses_decimal(a) || uses_decimal(b),
+        Type::Fun(a, b) | Type::Dict(a, b) | Type::Result(a, b) => {
+            uses_decimal(a) || uses_decimal(b)
+        }
         Type::Record(row) => row.fields.iter().any(|(_, ty)| uses_decimal(ty)),
         _ => false,
     }
@@ -321,6 +386,7 @@ struct Lower<'a> {
     inference: &'a InferResult,
     resolution: &'a Resolution,
     arena: Vec<ExprNode>,
+    boundaries: HashMap<usize, BoundaryId>,
 }
 
 pub fn lower(
@@ -332,6 +398,7 @@ pub fn lower(
         inference,
         resolution,
         arena: Vec::new(),
+        boundaries: HashMap::new(),
     };
     let mut groups = Vec::new();
     for group in &resolution.groups {
@@ -342,7 +409,7 @@ pub fn lower(
             })?;
             match d {
                 Stmt::Def { .. } => definitions.push(lower.definition(d)?),
-                Stmt::Schema { .. } => {}
+                Stmt::Schema { .. } | Stmt::Sum { .. } => {}
                 Stmt::Effect { start, .. } => {
                     return Err(Boundary::unsupported(
                         Span::at(*start),
@@ -358,17 +425,72 @@ pub fn lower(
         .as_ref()
         .map(|e| lower.expr(e, Span::at(program.entry_start.unwrap_or(0))))
         .transpose()?;
+    let constructors = inference
+        .constructors
+        .iter()
+        .map(|(&id, c)| {
+            let name = resolution.symbol(id).name.as_str();
+            (
+                id,
+                ConstructorDef {
+                    owner: c.owner.clone(),
+                    id: c.id,
+                    name: Rc::from(name),
+                    payload: c.payload.clone(),
+                },
+            )
+        })
+        .collect();
     Ok(HirProgram {
         arena: lower.arena,
+        constructors,
+        standard_constructors: resolution
+            .standard_constructors()
+            .map(|(owner, name, id)| ((owner.to_owned(), name.to_owned()), id))
+            .collect(),
         groups,
         entry,
     })
 }
 
 impl Lower<'_> {
+    fn boundary(&mut self, e: &Expr, span: Span) -> Result<BoundaryId, Boundary> {
+        let checked = self
+            .inference
+            .boundary_of(e)
+            .ok_or_else(|| Boundary::missing(span, "checked caret boundary"))?;
+        let next = BoundaryId(self.boundaries.len());
+        Ok(*self.boundaries.entry(checked).or_insert(next))
+    }
+    fn steps(&mut self, stmts: &[Stmt]) -> Result<Vec<Step>, Boundary> {
+        let mut steps = Vec::new();
+        for s in stmts {
+            match s {
+                Stmt::Def { .. } => steps.push(Step::Define(self.definition(s)?)),
+                Stmt::Effect { name, body, start } => {
+                    let span = Span::at(*start);
+                    let binding = if name.is_some() {
+                        Some(
+                            self.resolution
+                                .declaration(s)
+                                .ok_or_else(|| Boundary::missing(span, "effect binding symbol"))?,
+                        )
+                    } else {
+                        None
+                    };
+                    steps.push(Step::Evaluate {
+                        binding,
+                        body: self.expr(body, span)?,
+                    });
+                }
+                Stmt::Schema { .. } | Stmt::Sum { .. } => {}
+            }
+        }
+        Ok(steps)
+    }
     fn table_schema(&self, ty: &Type) -> Option<Rc<TableSchema>> {
         match ty {
-            Type::Action(out) | Type::Fun(_, out) => self.table_schema(out),
+            Type::Action(out) | Type::Fun(_, out) | Type::Result(out, _) => self.table_schema(out),
             Type::Table(row) => Some(Rc::new(match row.as_ref() {
                 Type::Record(row) if row.tail.is_none() => TableSchema::Named(row.fields.clone()),
                 Type::Tuple(fields) => TableSchema::Positional(fields.clone()),
@@ -405,6 +527,9 @@ impl Lower<'_> {
     }
     fn target(&self, e: &Expr, name: &str, span: Span) -> Result<Target, Boundary> {
         if let Some(id) = self.resolution.reference(e) {
+            if self.inference.constructor(id).is_some() {
+                return Ok(Target::Constructor(id));
+            }
             if !matches!(
                 self.resolution.symbol(id).kind,
                 crate::resolve::SymbolKind::External
@@ -441,11 +566,17 @@ impl Lower<'_> {
             Expr::Char(c) => Literal(self::Literal::Char(*c)),
             Expr::Unit => Literal(self::Literal::Unit),
             Expr::Name(s) if s == "?0" => Call(Target::Builtin(CoreOp::Absent), Vec::new()),
-            Expr::Name(_) => Load(
-                self.resolution
+            Expr::Name(_) => {
+                let id = self
+                    .resolution
                     .reference(e)
-                    .ok_or_else(|| Boundary::missing(span, "value reference"))?,
-            ),
+                    .ok_or_else(|| Boundary::missing(span, "value reference"))?;
+                if self.inference.constructor(id).is_some() {
+                    Call(Target::Constructor(id), Vec::new())
+                } else {
+                    Load(id)
+                }
+            }
             Expr::Ref(s) => {
                 let target = self.target(e, s, span)?;
                 if matches!(
@@ -503,33 +634,60 @@ impl Lower<'_> {
                 }
                 Pipeline(stages)
             }
-            Expr::Block(stmts, tail) | Expr::Action(stmts, tail) => {
-                let mut steps = Vec::new();
-                for s in stmts {
-                    match s {
-                        Stmt::Def { .. } => steps.push(Step::Define(self.definition(s)?)),
-                        Stmt::Effect { name, body, start } => {
-                            let span = Span::at(*start);
-                            let binding = if name.is_some() {
-                                Some(self.resolution.declaration(s).ok_or_else(|| {
-                                    Boundary::missing(span, "effect binding symbol")
-                                })?)
-                            } else {
-                                None
-                            };
-                            steps.push(Step::Evaluate {
-                                binding,
-                                body: self.expr(body, span)?,
-                            });
+            Expr::Block(stmts, tail) | Expr::Action(stmts, tail) => Block {
+                steps: self.steps(stmts)?,
+                tail: tail.as_deref().map(|v| self.expr(v, span)).transpose()?,
+                suspended: matches!(e, Expr::Action(..)),
+            },
+            Expr::Fallible(stmts, tail) => Fallible {
+                boundary: self.boundary(e, span)?,
+                steps: self.steps(stmts)?,
+                tail: tail.as_deref().map(|v| self.expr(v, span)).transpose()?,
+            },
+            Expr::Raise(payload) => Raise {
+                boundary: self.boundary(e, span)?,
+                payload: self.expr(payload, span)?,
+            },
+            Expr::Propagate(result) => Propagate {
+                boundary: self.boundary(e, span)?,
+                result: self.expr(result, span)?,
+            },
+            Expr::Recover(result, cases) => {
+                let result = self.expr(result, span)?;
+                let mut arms = Vec::new();
+                for case in cases {
+                    let span = Span::at(case.start);
+                    let mut ids = self.resolution.recovery_bindings(case).iter().copied();
+                    let missing = || Boundary::missing(span, "recovery binder");
+                    let pattern = match &case.pattern {
+                        SyntaxPattern::Wildcard => Pattern::Wildcard,
+                        SyntaxPattern::Bind(_) => Pattern::Bind(ids.next().ok_or_else(missing)?),
+                        SyntaxPattern::Constructor(_, names) => {
+                            let id =
+                                self.resolution.recovery_constructor(case).ok_or_else(|| {
+                                    Boundary::missing(span, "recovery constructor identity")
+                                })?;
+                            let mut fields = Vec::new();
+                            for n in names {
+                                fields.push(if n == "_" {
+                                    None
+                                } else {
+                                    Some(ids.next().ok_or_else(missing)?)
+                                });
+                            }
+                            Pattern::Constructor { id, fields }
                         }
-                        Stmt::Schema { .. } => {}
+                    };
+                    if ids.next().is_some() {
+                        return Err(Boundary::missing(span, "surplus recovery binder"));
                     }
+                    arms.push(RecoveryArm {
+                        pattern,
+                        body: self.expr(&case.body, span)?,
+                        span,
+                    });
                 }
-                Block {
-                    steps,
-                    tail: tail.as_deref().map(|v| self.expr(v, span)).transpose()?,
-                    suspended: matches!(e, Expr::Action(..)),
-                }
+                Recover { result, arms }
             }
             Expr::Record(fields) | Expr::NamedRecord(_, fields) => Record(
                 fields

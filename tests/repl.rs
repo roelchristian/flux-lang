@@ -29,7 +29,7 @@ fn repl(input: &str) -> (String, String) {
 fn type_does_not_run_effects_and_conversion_is_not_quit() {
     let (out, err) = repl(":type ! io.print \"not executed\"\n:q 5\n- 5n 2n\n:q\n+ 10 20\n");
     assert!(err.is_empty(), "{err}");
-    assert_eq!(out, "()\n5 : q\n3 : n\n");
+    assert_eq!(out, "()^ioerr\n5 : q\n3 : n\n");
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn file(src: &str) -> Temporary {
 #[test]
 fn load_is_atomic_and_does_not_dispatch_a_script_entry() {
     let declarations = file("seed:n := 8;\n");
-    let script = file("poison:n := 2;\n!{ ! io.print \"not executed\"; };\n");
+    let script = file("poison:n := 2;\n!{ ^= ! io.print \"not executed\" { _ : (); }; };\n");
     let (out, err) = repl(&format!(
         ":load \"{}\"\nseed\n:load {}\npoison\nseed\n:quit\n",
         declarations.0.display(),

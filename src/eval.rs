@@ -785,6 +785,9 @@ impl Engine {
             })),
             Expr::Block(ss, tail) => self.block(ss, tail.as_deref(), env, expected, false),
             Expr::Call(s, es) => self.call(s, es, env, expected),
+            Expr::Fallible(..) | Expr::Raise(..) | Expr::Propagate(..) | Expr::Recover(..) => {
+                Err("typed error handling requires typed HIR".into())
+            }
         }
     }
     fn eval_list(&mut self, es: &[Expr], env: usize) -> Rt<Vec<V>> {
@@ -1800,6 +1803,9 @@ fn evaluate_program(program: &Program) -> Result<(String, V), Error> {
             Stmt::Def { .. } => {
                 let (n, v) = e.available_fun(s, 0).expect("nonempty formal list");
                 e.put(0, n, Binding::Ready(v));
+            }
+            Stmt::Sum { start, .. } => {
+                return Err(Error::new(*start, "sum declarations require typed HIR"))
             }
             Stmt::Schema { name, fields, .. } => {
                 e.frames[0].schemas.insert(name.clone(), fields.clone());

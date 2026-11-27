@@ -22,7 +22,19 @@ def workloads():
         yield f"depth-{n}", "x := " + "+ 1 " * n + "0;\n"
     for n in [10, 50, 150]:
         yield f"width-{n}", "r := .{ " + "".join(f"f{i} := {i}; " for i in range(n)) + "};\n"
-    yield "evaluation-range", '<< "io"; !{ ! io.print +/ (.. 1 10000); };\n'
+    yield "evaluation-range", '<< "io"; !{ ^{ ^? ! io.print +/ (.. 1 10000); () } };\n'
+    yield "caret-recovery-10000", """
+err :: { | odd; };
+classify(x:z):z^err := ^{
+    ?{ = (% x 2) 1 : ^: odd; _ : x; }
+};
+retain(x:z):z := ^= classify x { odd : 0; };
+!{
+    total := +/ (@: &retain (.. 1 10000));
+    ?{ = total 25005000 : 0n; _ : 1n; }
+};
+"""
+
 
 
 def arithmetic_workloads():

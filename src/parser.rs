@@ -1,6 +1,6 @@
-use crate::builtins;
 use crate::lexer::{lex, Token};
 pub use crate::Error;
+use crate::{builtins, errors041};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
@@ -29,6 +29,11 @@ pub enum Stmt {
         body: Expr,
         start: usize,
     },
+    Sum {
+        name: String,
+        variants: Vec<Variant>,
+        start: usize,
+    },
     Schema {
         name: String,
         fields: Vec<(String, String)>,
@@ -39,6 +44,24 @@ pub enum Stmt {
         body: Expr,
         start: usize,
     },
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct Variant {
+    pub name: String,
+    pub payload: Vec<String>,
+    pub start: usize,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveryCase {
+    pub pattern: RecoveryPattern,
+    pub body: Expr,
+    pub start: usize,
+}
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub enum RecoveryPattern {
+    Wildcard,
+    Bind(String),
+    Constructor(String, Vec<String>),
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -58,6 +81,10 @@ pub enum Expr {
     Record(Vec<(String, Expr)>),
     Block(Vec<Stmt>, Option<Box<Expr>>),
     Action(Vec<Stmt>, Option<Box<Expr>>),
+    Fallible(Vec<Stmt>, Option<Box<Expr>>),
+    Raise(Box<Expr>),
+    Propagate(Box<Expr>),
+    Recover(Box<Expr>, Vec<RecoveryCase>),
     Num(String),
     Char(char),
     NamedRecord(String, Vec<(String, Expr)>),
@@ -95,6 +122,14 @@ fn expression_signature(expr: &Expr) -> u64 {
         }
         Expr::Tuple(es) | Expr::Array(es) | Expr::Pipeline(es) => es.len().hash(&mut hash),
         Expr::Cases(arms, _) => arms.len().hash(&mut hash),
+        Expr::Raise(_) | Expr::Propagate(_) => {}
+        Expr::Recover(_, arms) => {
+            for arm in arms {
+                arm.pattern.hash(&mut hash);
+                arm.start.hash(&mut hash);
+            }
+        }
+
         Expr::Lambda(ps, _) => ps.hash(&mut hash),
         Expr::TypedLambda(ps, ts, _) => {
             ps.hash(&mut hash);
@@ -111,13 +146,15 @@ fn expression_signature(expr: &Expr) -> u64 {
                 n.hash(&mut hash);
             }
         }
-        Expr::Block(stmts, last) | Expr::Action(stmts, last) => {
+        Expr::Block(stmts, last) | Expr::Action(stmts, last) | Expr::Fallible(stmts, last) => {
             stmts.len().hash(&mut hash);
             last.is_some().hash(&mut hash);
             for stmt in stmts {
                 std::mem::discriminant(stmt).hash(&mut hash);
                 match stmt {
-                    Stmt::Def { name, start, .. } | Stmt::Schema { name, start, .. } => {
+                    Stmt::Def { name, start, .. }
+                    | Stmt::Schema { name, start, .. }
+                    | Stmt::Sum { name, start, .. } => {
                         name.hash(&mut hash);
                         start.hash(&mut hash);
                     }
@@ -136,7 +173,7 @@ impl Program {
         fn stmt<'p>(s: &'p Stmt, nodes: &mut Vec<&'p Expr>) {
             match s {
                 Stmt::Def { body, .. } | Stmt::Effect { body, .. } => expr(body, nodes),
-                Stmt::Schema { .. } => {}
+                Stmt::Schema { .. } | Stmt::Sum { .. } => {}
             }
         }
         fn expr<'p>(e: &'p Expr, nodes: &mut Vec<&'p Expr>) {
@@ -159,7 +196,14 @@ impl Program {
                         expr(x, nodes);
                     }
                 }
-                Expr::Action(ss, last) | Expr::Block(ss, last) => {
+                Expr::Raise(body) | Expr::Propagate(body) => expr(body, nodes),
+                Expr::Recover(body, arms) => {
+                    expr(body, nodes);
+                    for a in arms {
+                        expr(&a.body, nodes);
+                    }
+                }
+                Expr::Action(ss, last) | Expr::Block(ss, last) | Expr::Fallible(ss, last) => {
                     for s in ss {
                         stmt(s, nodes);
                     }
@@ -206,6 +250,7 @@ type PResult<T> = Result<T, Error>;
 #[derive(Copy, Clone, Debug)]
 enum Binding {
     Callable(usize),
+    Constructor(usize),
     Value,
     Record,
 }
@@ -215,6 +260,7 @@ pub fn parse(source: &str) -> PResult<Program> {
         pos: 0,
         eof: source.len(),
         scopes: Vec::new(),
+        standard: HashMap::new(),
         aliases: HashMap::new(),
         depth: 0,
         constraints: BTreeMap::new(),
@@ -227,6 +273,7 @@ struct Parser {
     pos: usize,
     eof: usize,
     scopes: Vec<HashMap<String, Binding>>,
+    standard: HashMap<String, Binding>,
     aliases: HashMap<String, String>,
     depth: usize,
     constraints: BTreeMap<usize, Vec<(String, String)>>,
@@ -241,7 +288,7 @@ fn close(s: &str) -> Option<&'static str> {
     match s {
         "(" => Some(")"),
         "[" | "#[" => Some("]"),
-        "{" | "!{" | "#{" | "{." | "?{" | ".{" | "|{" => Some("}"),
+        "{" | "!{" | "#{" | "{." | "?{" | ".{" | "|{" | "^{" => Some("}"),
         _ => None,
     }
 }
@@ -301,6 +348,7 @@ impl Parser {
             .iter()
             .rev()
             .find_map(|s| s.get(n).copied())
+            .or_else(|| self.standard.get(n).copied())
             .or_else(|| {
                 if n.strip_prefix('.').is_some_and(|x| {
                     is_ident(x) || (!x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()))
@@ -375,6 +423,7 @@ impl Parser {
     }
     fn prepass(&self, mut i: usize, root: bool) -> PResult<HashMap<String, Binding>> {
         let mut names = HashSet::new();
+        let mut type_names = HashSet::new();
         let mut hoisted = HashMap::new();
         loop {
             let n = self.at(i).to_owned();
@@ -382,7 +431,30 @@ impl Parser {
                 break;
             }
             if self.def_at(i) {
+                let is_type = self.at(i + 1) == "::";
+                let is_sum = is_type && self.at(i + 2) == "{" && self.at(i + 3) == "|";
+                if is_type && !type_names.insert(n.clone()) {
+                    return Err(Error::new(
+                        self.toks[i].start,
+                        format!("duplicate type `{n}`"),
+                    ));
+                }
                 let b = match self.at(i + 1) {
+                    "::" if is_sum => {
+                        let mut j = i + 3;
+                        while self.at(j) == "|" {
+                            let (v, next) = self.variant_at(j)?;
+                            if !names.insert(v.name.clone()) {
+                                return Err(Error::new(
+                                    v.start,
+                                    format!("duplicate binding `{}`", v.name),
+                                ));
+                            }
+                            hoisted.insert(v.name, Binding::Constructor(v.payload.len()));
+                            j = next;
+                        }
+                        None
+                    }
                     "::" => Some(Binding::Record),
                     "(" => {
                         let end = self.end_of_group(i + 1).ok_or_else(|| {
@@ -404,7 +476,7 @@ impl Parser {
                     _ if root => Some(Binding::Value),
                     _ => None,
                 };
-                if !names.insert(n.clone()) {
+                if !is_sum && !names.insert(n.clone()) {
                     return Err(Error::new(
                         self.toks[i].start,
                         format!("duplicate binding `{n}`"),
@@ -453,6 +525,12 @@ impl Parser {
                     self.scope()
                         .insert(format!("{alias}.{name}"), Binding::Callable(arity));
                 }
+                for owner in standard_owners(&path) {
+                    for v in errors041::variants(owner) {
+                        self.standard
+                            .insert(v.name.to_owned(), Binding::Constructor(v.payload.len()));
+                    }
+                }
                 p.imports.push(path);
             }
             i = end + 1;
@@ -500,14 +578,14 @@ impl Parser {
             let d = p
                 .defs
                 .iter()
-                .find(|d| matches!(d,Stmt::Def{name,..}|Stmt::Schema{name,..} if name==n));
+                .find(|d| matches!(d,Stmt::Def{name,..}|Stmt::Schema{name,..}|Stmt::Sum{name,..} if name==n));
             match d {
                 Some(Stmt::Def {
                     result_type: Some(_),
                     param_types,
                     ..
                 }) if param_types.iter().all(Option::is_some) => {}
-                Some(Stmt::Schema { .. }) => {}
+                Some(Stmt::Schema { .. } | Stmt::Sum { .. }) => {}
                 Some(_) => return self.err(format!("export `{n}` requires a complete signature")),
                 None => return self.err(format!("unknown export `{n}`")),
             }
@@ -560,7 +638,11 @@ impl Parser {
         }
         Ok(self.toks[start..self.pos]
             .iter()
-            .map(|t| t.text.as_str())
+            .map(|t| match t.text.as_str() {
+                "^?" => "^ ?",
+                "^{" => "^ {",
+                x => x,
+            })
             .collect::<Vec<_>>()
             .join(" "))
     }
@@ -607,12 +689,75 @@ impl Parser {
         types.resize(names.len(), None);
         Ok((names, types))
     }
+    // One variant member's whitespace-separated type atoms carry the
+    // constructor's prefix arity. Group composite types with parentheses.
+    fn variant_at(&self, i: usize) -> PResult<(Variant, usize)> {
+        let start = self.toks.get(i + 1).map_or(self.eof, |t| t.start);
+        let name = self.at(i + 1);
+        if !is_ident(name) {
+            return Err(Error::new(start, "expected constructor name after `|`"));
+        }
+        let mut j = i + 2;
+        let mut payload = Vec::new();
+        while self.at(j) != ";" {
+            let a = j;
+            while matches!(self.at(j), "?" | "!" | "#") {
+                j += 1;
+            }
+            if close(self.at(j)).is_some() {
+                j = self
+                    .end_of_group(j)
+                    .map(|k| k + 1)
+                    .ok_or_else(|| Error::new(start, "malformed constructor payload type"))?;
+            } else if is_ident(self.at(j)) {
+                j += 1;
+            } else {
+                return Err(Error::new(
+                    self.toks.get(j).map_or(self.eof, |t| t.start),
+                    "expected a constructor payload type or `;`",
+                ));
+            }
+            payload.push(
+                self.toks[a..j]
+                    .iter()
+                    .map(|t| match t.text.as_str() {
+                        "^?" => "^ ?",
+                        "^{" => "^ {",
+                        x => x,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        Ok((
+            Variant {
+                name: name.to_owned(),
+                payload,
+                start,
+            },
+            j + 1,
+        ))
+    }
+
     fn definition(&mut self, effect: bool) -> PResult<Stmt> {
         let start = self.offset();
         let name = self.ident()?;
         if self.eat("::") {
-            if !self.eat("{") || self.peek() == "|" {
-                return self.err("only record schema declarations are implemented");
+            self.expect("{")?;
+            if self.peek() == "|" {
+                let mut variants = Vec::new();
+                while self.peek() == "|" {
+                    let (v, next) = self.variant_at(self.pos)?;
+                    self.pos = next;
+                    variants.push(v);
+                }
+                self.expect("}")?;
+                self.expect(";")?;
+                return Ok(Stmt::Sum {
+                    name,
+                    variants,
+                    start,
+                });
             }
             let mut fields = Vec::new();
             let mut seen = HashSet::new();
@@ -759,6 +904,10 @@ impl Parser {
                 t.start,
                 "`$` is only bound in pipeline stages after the source",
             )),
+            "^{" => self.fallible(effect),
+            "^:" => Ok(Expr::Raise(Box::new(self.expr(effect)?))),
+            "^?" => Ok(Expr::Propagate(Box::new(self.expr(effect)?))),
+            "^=" => self.recover(effect),
             "!{" => self.block(true),
             "!" if self.eat("{") => self.block(true),
             "!" if effect => self.call(t.text, 1, effect),
@@ -821,7 +970,8 @@ impl Parser {
             )),
             "&" => {
                 let n = self.next()?;
-                if matches!(self.lookup(&n.text),Some(Binding::Callable(k)) if k>0) {
+                if matches!(self.lookup(&n.text),Some(Binding::Callable(k)|Binding::Constructor(k)) if k>0)
+                {
                     Ok(Expr::Ref(self.canonical(&n.text)))
                 } else {
                     Err(Error::new(
@@ -875,7 +1025,8 @@ impl Parser {
                 }
             }
             _ => match self.lookup(&t.text) {
-                Some(Binding::Value) => Ok(Expr::Name(t.text)),
+                Some(Binding::Value | Binding::Constructor(0)) => Ok(Expr::Name(t.text)),
+                Some(Binding::Constructor(n)) => self.call(t.text, n, effect),
                 Some(Binding::Callable(n)) => self.call(self.canonical(&t.text), n, effect),
                 Some(Binding::Record) => self.record(t.text, effect),
                 None => Err(Error::new(
@@ -944,13 +1095,80 @@ impl Parser {
             Expr::Block(stmts, last)
         })
     }
+    fn fallible(&mut self, effect: bool) -> PResult<Expr> {
+        let h = self.prepass(self.pos, false)?;
+        self.scopes.push(h);
+        let r = self.block_sequence(effect, true, false);
+        self.scopes.pop();
+        let (ss, last) = r?;
+        Ok(Expr::Fallible(ss, last))
+    }
+    fn recover(&mut self, effect: bool) -> PResult<Expr> {
+        let subject = Box::new(self.expr(effect)?);
+        self.expect("{")?;
+        let mut cases = Vec::new();
+        while !self.eat("}") {
+            let start = self.offset();
+            let (pattern, names) = if self.eat("_") {
+                (RecoveryPattern::Wildcard, Vec::new())
+            } else {
+                let name = self.ident()?;
+                match self.lookup(&name) {
+                    Some(Binding::Constructor(n)) => {
+                        let mut slots = Vec::new();
+                        let mut names = Vec::new();
+                        for _ in 0..n {
+                            if self.eat("_") {
+                                slots.push("_".to_owned());
+                            } else {
+                                let binder = self.ident()?;
+                                if names.contains(&binder) {
+                                    return self
+                                        .err(format!("duplicate recovery binder `{binder}`"));
+                                }
+                                names.push(binder.clone());
+                                slots.push(binder);
+                            }
+                        }
+                        (RecoveryPattern::Constructor(name, slots), names)
+                    }
+                    _ => (RecoveryPattern::Bind(name.clone()), vec![name]),
+                }
+            };
+            self.expect(":")?;
+            self.scopes
+                .push(names.into_iter().map(|n| (n, Binding::Value)).collect());
+            let body = self.expr(effect);
+            self.scopes.pop();
+            let body = body?;
+            self.expect(";")?;
+            cases.push(RecoveryCase {
+                pattern,
+                body,
+                start,
+            });
+        }
+        if cases.is_empty() {
+            return self.err("recovery requires at least one case");
+        }
+        Ok(Expr::Recover(subject, cases))
+    }
     fn block_contents(&mut self, effect: bool) -> PResult<(Vec<Stmt>, Option<Box<Expr>>)> {
+        self.block_sequence(effect, effect, effect)
+    }
+    fn block_sequence(
+        &mut self,
+        effect: bool,
+        sequence: bool,
+        implicit_unit: bool,
+    ) -> PResult<(Vec<Stmt>, Option<Box<Expr>>)> {
         let mut stmts = Vec::new();
         loop {
-            if self.eat("}") {
-                if !effect {
-                    return self.err("pure block requires a final expression (write () for unit)");
+            if self.peek() == "}" {
+                if !implicit_unit {
+                    return self.err("block requires a final expression (write () for unit)");
                 }
+                self.pos += 1;
                 return Ok((stmts, None));
             }
             if self.def_at(self.pos) {
@@ -959,7 +1177,7 @@ impl Parser {
             }
             let start = self.offset();
             let body = self.expr(effect)?;
-            if effect && self.eat(";") {
+            if sequence && self.eat(";") {
                 stmts.push(Stmt::Effect {
                     name: None,
                     body,
@@ -970,6 +1188,15 @@ impl Parser {
             self.expect("}")?;
             return Ok((stmts, Some(Box::new(body))));
         }
+    }
+}
+
+pub(crate) fn standard_owners(module: &str) -> &'static [&'static str] {
+    match module {
+        "io" => &["ioerr", "csverr"],
+        "csv" => &["ioerr", "csverr"],
+        "math" => &["numerr"],
+        _ => &[],
     }
 }
 
@@ -1138,5 +1365,12 @@ mod tests {
             assert!(parse(s).is_err(), "unexpected acceptance: {s}");
         }
         assert!(parse("take(n:n):n := n; y := take 2;").is_ok());
+    }
+    #[test]
+    fn fallible_block_requires_tail_but_allows_statements() {
+        assert!(parse("x := ^{ 1; () };").is_ok());
+        assert!(parse("x := ^{ 1; };").is_err());
+        assert!(parse("x := ^{};").is_err());
+        assert!(parse("!{ (); };").is_ok());
     }
 }
