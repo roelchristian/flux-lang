@@ -1,7 +1,12 @@
 --- An inclusive range, explicit map, Boolean mask, and sum.
 nums := .. 1z 8z;
-square(x:z):z := * x x;
+square(x: z): z := * x x;
 squares := @: &square nums;
 large := ?: (> squares 20z) squares;
 
-!{ ^{ ^? ! print (large,# large,+/ large); () } };
+!{
+    ^{
+        ^? ! print (large, # large, +/ large);
+        ()
+    }
+};

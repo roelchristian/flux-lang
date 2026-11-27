@@ -1,8 +1,13 @@
 --- The first true guard wins; _ is the fallback.
-band(n:z):s := ?{
+band(n: z): s := ?{
     < n 0z : "negative";
     = n 0z : "zero";
-    _ : "positive";
+    _      : "positive";
 };
 
-!{ ^{ ^? ! print (@: &band [-3z 0z 7z]); () } };
+!{
+    ^{
+        ^? ! print (@: &band [-3z 0z 7z]);
+        ()
+    }
+};
