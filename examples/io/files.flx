@@ -1,0 +1,15 @@
+<< "io";
+<< "fs";
+
+dir := "corpus_files";
+path := fs.join dir "note.txt";
+!{ ^{
+    ^? ! fs.mkdir dir;
+    ^? ! io.write path "Flux keeps files explicit.";
+    contents := ^? ! io.read path;
+    entries := ^? ! fs.ls dir;
+    exists := ^? ! fs.exists path;
+    ^? ! print (?? "missing" (fs.base path),exists,entries);
+    ^? ! print contents;
+    ()
+} };
