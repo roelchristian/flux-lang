@@ -199,6 +199,7 @@ pub fn prepare_modules_timed<'a>(
             (&program.entry, t),
             (Some(Expr::Action(_, Some(tail))), Type::Prim(Prim::Z))
                 if matches!(tail.as_ref(), Expr::Int(value) if *value >= 0)
+                   || matches!(tail.as_ref(), Expr::Num(raw) if raw.bytes().all(|b| b.is_ascii_digit()))
         );
         let valid_result = matches!(t, Type::Result(ok, _) if matches!(ok.as_ref(), Type::Prim(Prim::Unit | Prim::N)));
         if !matches!(t, Type::Prim(Prim::Unit | Prim::N)) && !contextual_status && !valid_result {

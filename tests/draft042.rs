@@ -76,6 +76,8 @@ const ARITHMETIC: &[Case] = &[
     (":n", ":n 4z", "4"),
     (":z", ":z 4n", "4"),
     (":q", ":q 0.5r", "1/2"),
+    (":d", ":d 1z", "1"),
+    ("math.quantize", "math.quantize 2n (/ 1z 3z)", "0.33"),
     (":r", ":r 0.5q", "0.5"),
 ];
 
@@ -408,7 +410,6 @@ fn recognized_unsupported_operations_do_not_execute_or_fall_back() {
         ("~=", "~= 0.1r 1r 2r"),
         ("*=", "*= &k &k #[(1z,2z)] #[(1z,3z)]"),
         ("*?", "*? &k &k #[(1z,2z)] #[(1z,3z)]"),
-        (":d", ":d 1z"),
         ("cor", "cor [1q 2q] [1q 2q]"),
     ];
     let exercised: BTreeSet<_> = cases.iter().map(|(op, _)| *op).collect();

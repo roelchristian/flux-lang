@@ -10,8 +10,15 @@ use crate::{
     types::{Prim, Type},
     Error,
 };
+use num_bigint::BigInt;
+use num_integer::Integer;
+use num_rational::BigRational;
+use num_traits::{Signed, ToPrimitive, Zero};
 use std::{cmp::Ordering, collections::HashMap, io::Write, rc::Rc};
 mod collections042;
+mod decimal05;
+mod wide05;
+use wide05::Wide;
 mod operations041;
 pub use crate::csv::{FsInput, OpenedInput, RuntimeInput};
 
@@ -56,6 +63,7 @@ enum Domain {
     Natural,
     Integer,
     Rational,
+    Decimal,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Exact {
@@ -322,11 +330,12 @@ fn domain(ty: &Type) -> Option<Domain> {
         Type::Prim(Prim::N) => Some(Domain::Natural),
         Type::Prim(Prim::Z) => Some(Domain::Integer),
         Type::Prim(Prim::Q) => Some(Domain::Rational),
+        Type::Prim(Prim::D) => Some(Domain::Decimal),
         Type::Seq(inner) => domain(inner),
         _ => None,
     }
 }
-fn parse_exact(s: &str, ty: &Type) -> NumericResult<Exact> {
+fn parse_inline_exact(s: &str, ty: &Type) -> NumericResult<Exact> {
     let (raw, chosen) = match s.as_bytes().last() {
         Some(b'n') => (&s[..s.len() - 1], Domain::Natural),
         Some(b'z') => (&s[..s.len() - 1], Domain::Integer),
@@ -360,9 +369,172 @@ fn parse_exact(s: &str, ty: &Type) -> NumericResult<Exact> {
     value.as_domain(chosen)
 }
 
+fn exact_i128(n: i128, d: Domain) -> V {
+    V::Exact(Exact::integer(n, d))
+}
+
+fn rational(n: BigInt, d: BigInt) -> NumericResult<V> {
+    if d.is_zero() {
+        return Err(DIV_BY_ZERO);
+    }
+    wide05::ratio_value(BigRational::new(n, d), Domain::Rational)
+}
+fn as_ratio(v: &V) -> NumericResult<(BigInt, BigInt)> {
+    Ok(wide05::ratio(v)?.into_raw())
+}
+fn parse_exact_value(raw: &str, d: Domain) -> NumericResult<V> {
+    if d == Domain::Decimal {
+        return decimal05::decimal_literal(raw);
+    }
+    let ty = Type::Prim(match d {
+        Domain::Natural => Prim::N,
+        Domain::Integer => Prim::Z,
+        _ => Prim::Q,
+    });
+    match parse_inline_exact(raw, &ty) {
+        Ok(n) => return Ok(V::Exact(n)),
+        Err(e) if e != OVERFLOW => return Err(e),
+        Err(_) => {}
+    }
+    let value = if let Some((a, b)) = raw.split_once('.') {
+        if d != Domain::Rational {
+            return Err("fractional literal requires q");
+        }
+        let b = b.trim_end_matches('0');
+        let decimal_digits = u32::try_from(b.len()).map_err(|_| wide05::RESOURCE)?;
+        if decimal_digits > 315_652 {
+            return Err(wide05::RESOURCE);
+        }
+        let num = wide05::parse_int(&format!("{a}{b}"))?;
+        let den = BigInt::from(10u8).pow(decimal_digits);
+        BigRational::new(num, den)
+    } else {
+        BigRational::from_integer(wide05::parse_int(raw)?)
+    };
+    wide05::ratio_value(value, d)
+}
+fn parse_exact(s: &str, ty: &Type) -> NumericResult<V> {
+    let (raw, d) = match s.as_bytes().last() {
+        Some(b'n') => (&s[..s.len() - 1], Domain::Natural),
+        Some(b'z') => (&s[..s.len() - 1], Domain::Integer),
+        Some(b'q') => (&s[..s.len() - 1], Domain::Rational),
+        Some(b'd') => (&s[..s.len() - 1], Domain::Decimal),
+        _ => (
+            s,
+            domain(ty).ok_or("numeric literal has no checked domain")?,
+        ),
+    };
+    parse_exact_value(raw, d)
+}
+
+fn exact_binary(op: CoreOp, a: &V, b: &V, d: Domain) -> NumericResult<V> {
+    if d == Domain::Decimal {
+        return decimal05::decimal_binary(op, a, b);
+    }
+    if let (V::Exact(a), V::Exact(b)) = (a, b) {
+        match a.compute(op, *b, d) {
+            Ok(v) => return Ok(V::Exact(v)),
+            Err(e) if e != OVERFLOW => return Err(e),
+            Err(_) => {}
+        }
+    }
+    wide05::binary(op, a, b, d)
+}
+fn real_of(v: &V) -> NumericResult<f64> {
+    match v {
+        V::Real(x) => Ok(*x),
+        V::Exact(x) => Ok(x.real()),
+        v => wide05::to_real(&wide05::ratio(v)?),
+    }
+}
+fn to_exact(v: &V) -> NumericResult<V> {
+    match v {
+        V::Real(x) => match Exact::from_real(*x) {
+            Ok(v) => Ok(V::Exact(v)),
+            Err(e) if e != OVERFLOW => Err(e),
+            Err(_) => wide05::ratio_value(wide05::from_real(*x)?, Domain::Rational),
+        },
+        _ => Ok(v.clone()),
+    }
+}
+fn exact_index(v: &V) -> NumericResult<usize> {
+    if let V::Exact(n) = v {
+        let n = n.integral()?;
+        if n < 0 {
+            return Err("expected a nonnegative integer");
+        }
+        return Ok(usize::try_from(n).unwrap_or(usize::MAX));
+    }
+    let n = wide05::integral(v)?;
+    if n.is_negative() {
+        return Err("expected a nonnegative integer");
+    }
+    Ok(n.to_usize().unwrap_or(usize::MAX))
+}
+fn exact_unary(op: CoreOp, v: &V, d: Domain) -> NumericResult<V> {
+    if d == Domain::Decimal {
+        return decimal05::decimal_unary(op, v);
+    }
+    if let V::Exact(n) = v {
+        let num = if op == CoreOp::Abs {
+            n.n.checked_abs()
+        } else {
+            n.n.checked_neg()
+        };
+        if let Some(i) = num {
+            return Ok(V::Exact(Exact {
+                n: i,
+                d: n.d,
+                domain: d,
+            }));
+        }
+    }
+    let v = wide05::ratio(v)?;
+    wide05::ratio_value(if op == CoreOp::Abs { v.abs() } else { -v }, d)
+}
+fn range(lo: &V, hi: &V, d: Domain) -> NumericResult<V> {
+    let too_big = "prototype range limit (100000 items) exceeded";
+    let out: Vec<V> = if let (V::Exact(lo), V::Exact(hi)) = (lo, hi) {
+        let (lo, hi) = (lo.integral()?, hi.integral()?);
+        if hi >= lo
+            && hi
+                .checked_sub(lo)
+                .is_none_or(|n| n >= COLLECTION_LIMIT as i128)
+        {
+            return Err(too_big);
+        }
+        (lo..=hi).map(|i| exact_i128(i, d)).collect()
+    } else {
+        let (mut lo, hi) = (wide05::integral(lo)?, wide05::integral(hi)?);
+        if lo > hi {
+            return Ok(V::Sequence(Rc::from([])));
+        }
+        let n = (&hi - &lo)
+            .to_usize()
+            .filter(|x| *x < COLLECTION_LIMIT)
+            .ok_or(too_big)?;
+        // Repeating a large endpoint up to the ordinary item cap could
+        // allocate gigabytes without growing any individual integer.
+        if lo.bits().max(hi.bits()).saturating_mul((n + 1) as u64) > 64 * 1024 * 1024 * 8 {
+            return Err("wide range resource limit exceeded (64 MiB of integer data)");
+        }
+        let mut out = Vec::with_capacity(n + 1);
+        for _ in 0..=n {
+            out.push(wide05::ratio_value(
+                BigRational::from_integer(lo.clone()),
+                d,
+            )?);
+            lo += 1u8;
+        }
+        out
+    };
+    Ok(V::Sequence(out.into()))
+}
+
 #[derive(Clone)]
 enum V {
     Exact(Exact),
+    Wide(Rc<Wide>),
     Real(f64),
     Bool(bool),
     String(Rc<str>),
@@ -474,6 +646,7 @@ fn repr(v: &V) -> String {
     match v {
         V::Exact(n) if n.d == 1 => n.n.to_string(),
         V::Exact(n) => format!("{}/{}", n.n, n.d),
+        V::Wide(n) => format!("{n}"),
         V::Real(n) => n.to_string(),
         V::Bool(b) => if *b { "1b" } else { "0b" }.into(),
         V::String(s) => s.to_string(),
@@ -518,6 +691,9 @@ fn repr(v: &V) -> String {
 fn equal(a: &V, b: &V) -> bool {
     match (a, b) {
         (V::Exact(a), V::Exact(b)) => a.n == b.n && a.d == b.d,
+        (V::Exact(_) | V::Wide(_), V::Exact(_) | V::Wide(_)) => {
+            order(a, b).is_ok_and(|v| v.is_eq())
+        }
         (V::Real(a), V::Real(b)) => a == b,
         (V::Bool(a), V::Bool(b)) => a == b,
         (V::String(a), V::String(b)) => a == b,
@@ -634,6 +810,7 @@ fn column_rows(v: &V, span: Span) -> R<Vec<RowCells>> {
 #[derive(PartialEq, Eq, Hash)]
 enum Key {
     Num(i128, i128),
+    WideNum(Box<BigRational>),
     Real(u64),
     Bool(bool),
     Str(Rc<str>),
@@ -644,6 +821,14 @@ enum Key {
 fn key(v: &V) -> Option<Key> {
     Some(match v {
         V::Exact(x) => Key::Num(x.n, x.d),
+        V::Wide(_) => {
+            let q = wide05::ratio(v).ok()?;
+            if let (Some(n), Some(d)) = (q.numer().to_i128(), q.denom().to_i128()) {
+                Key::Num(n, d)
+            } else {
+                Key::WideNum(Box::new(q))
+            }
+        }
         V::Real(r) => Key::Real(if *r == 0.0 { 0 } else { r.to_bits() }),
         V::Bool(b) => Key::Bool(*b),
         V::String(s) => Key::Str(s.clone()),
@@ -656,6 +841,9 @@ fn key(v: &V) -> Option<Key> {
 fn order(a: &V, b: &V) -> NumericResult<Ordering> {
     match (a, b) {
         (V::Exact(a), V::Exact(b)) => Ok(a.order(*b)),
+        (V::Exact(_) | V::Wide(_), V::Exact(_) | V::Wide(_)) => {
+            Ok(wide05::ratio(a)?.cmp(&wide05::ratio(b)?))
+        }
         (V::Real(a), V::Real(b)) => a.partial_cmp(b).ok_or("nonfinite real result"),
         (V::String(a), V::String(b)) => Ok(a.cmp(b)),
         (V::Char(a), V::Char(b)) => Ok(a.cmp(b)),
@@ -667,13 +855,6 @@ fn as_bool(v: &V) -> NumericResult<bool> {
         Ok(*b)
     } else {
         Err("expected scalar Boolean")
-    }
-}
-fn as_exact(v: &V) -> NumericResult<Exact> {
-    if let V::Exact(n) = v {
-        Ok(*n)
-    } else {
-        Err("expected an exact number")
     }
 }
 fn as_seq(v: &V) -> NumericResult<&[V]> {
@@ -843,19 +1024,39 @@ fn scalar_binary(op: CoreOp, a: V, b: V, ty: &Type) -> NumericResult<V> {
     Ok(match op {
         Add | Sub | Mul | Div | Quotient | Remainder | Pow => {
             if matches!(ty, Type::Prim(Prim::R)) {
-                let r = |v| match v {
-                    V::Real(n) => Ok(n),
-                    V::Exact(n) => Ok(n.real()),
-                    _ => Err("expected a number"),
+                let r = |v| {
+                    if let V::Real(x) = v {
+                        Ok(x)
+                    } else {
+                        Err("expected a checked real operand")
+                    }
                 };
                 if op == Pow {
                     let mut a = r(a)?;
-                    let b = as_exact(&b)?;
-                    let mut exponent = u128::try_from(b.integral()?)
-                        .map_err(|_| "power requires a natural exponent")?;
-                    if b.domain != Domain::Natural {
-                        return Err("power requires a natural exponent");
-                    }
+                    let e = if let V::Exact(n) = &b {
+                        u128::try_from(n.integral()?)
+                            .ok()
+                            .filter(|_| n.domain == Domain::Natural)
+                            .ok_or("power requires a natural exponent")?
+                    } else {
+                        let e = wide05::exponent(&b)?;
+                        match a {
+                            1.0 => return finite(1.0),
+                            -1.0 => return finite(if e.is_odd() { -1.0 } else { 1.0 }),
+                            x if x == 0.0 => {
+                                return finite(if e.is_zero() {
+                                    1.0
+                                } else if e.is_odd() {
+                                    x
+                                } else {
+                                    0.0
+                                })
+                            }
+                            _ => {}
+                        }
+                        e.to_u128().ok_or(wide05::RESOURCE)?
+                    };
+                    let mut exponent = e;
                     let mut value = 1.0;
                     while exponent > 0 {
                         if exponent & 1 == 1 {
@@ -879,7 +1080,7 @@ fn scalar_binary(op: CoreOp, a: V, b: V, ty: &Type) -> NumericResult<V> {
                 });
             }
             let k = domain(ty).ok_or("numeric domain is unresolved at typed execution")?;
-            V::Exact(as_exact(&a)?.compute(op, as_exact(&b)?, k)?)
+            exact_binary(op, &a, &b, k)?
         }
         Equal => V::Bool(equal(&a, &b)),
         NotEqual => V::Bool(!equal(&a, &b)),
@@ -1054,7 +1255,11 @@ impl Eval<'_> {
                         let d = domain(&ty).ok_or_else(|| {
                             error(s, "integer literal has no checked numeric domain")
                         })?;
-                        V::Exact(Exact::integer(*i, d).as_domain(d).map_err(convert)?)
+                        if d == Domain::Decimal {
+                            decimal05::decimal_literal(&i.to_string()).map_err(convert)?
+                        } else {
+                            V::Exact(Exact::integer(*i, d).as_domain(d).map_err(convert)?)
+                        }
                     }
                 }
                 Literal::Numeric(text) => {
@@ -1064,7 +1269,7 @@ impl Eval<'_> {
                         finite(raw.parse().map_err(|_| error(s, "invalid real literal"))?)
                             .map_err(convert)?
                     } else {
-                        V::Exact(parse_exact(text, &ty).map_err(convert)?)
+                        parse_exact(text, &ty).map_err(convert)?
                     }
                 }
                 Literal::Bool(b) => V::Bool(*b),
@@ -1537,11 +1742,7 @@ impl Eval<'_> {
                 scalar_binary(op, x, y, inner_type(ty))
             }),
             Sqrt => lift_one(a(), mode, &|v| {
-                let x = match v {
-                    V::Real(r) => r,
-                    V::Exact(n) => n.real(),
-                    _ => return Err("checked square root expects a number"),
-                };
+                let x = real_of(&v)?;
                 if x < 0.0 {
                     Err("square root of a negative number")
                 } else {
@@ -1569,15 +1770,9 @@ impl Eval<'_> {
                     };
                     return finite(if op == Abs { n.abs() } else { -n });
                 }
-                let n = as_exact(&v)?;
-                let num = if op == Abs {
-                    n.n.checked_abs()
-                } else {
-                    n.n.checked_neg()
-                };
                 let k = domain(inner_type(ty))
                     .ok_or("numeric domain is unresolved at typed execution")?;
-                Ok(V::Exact(Exact::new(num.ok_or(OVERFLOW)?, n.d, k)?))
+                exact_unary(op, &v, k)
             }),
             Count => {
                 let count = match a() {
@@ -1594,25 +1789,9 @@ impl Eval<'_> {
                 Ok(V::Exact(Exact::integer(count as i128, Domain::Natural)))
             }
             Range => {
-                let lo = as_exact(&a()).map_err(fail)?;
-                let hi = as_exact(&a()).map_err(fail)?;
-                let type_domain =
+                let d =
                     domain(ty).ok_or_else(|| error(span, "range has no checked numeric domain"))?;
-                let lo = lo.integral().map_err(fail)?;
-                let hi = hi.integral().map_err(fail)?;
-                if hi < lo {
-                    return Ok(V::Sequence(Rc::from([])));
-                }
-                let n = hi.checked_sub(lo).ok_or_else(|| error(span, OVERFLOW))?;
-                if n >= COLLECTION_LIMIT as i128 {
-                    return Err(error(span, "prototype range limit (100000 items) exceeded"));
-                }
-                Ok(V::Sequence(
-                    (lo..=hi)
-                        .map(|i| V::Exact(Exact::integer(i, type_domain)))
-                        .collect::<Vec<_>>()
-                        .into(),
-                ))
+                range(&a(), &a(), d)
             }
             Sum | Product => {
                 let xs = a();
@@ -1622,12 +1801,14 @@ impl Eval<'_> {
                 let mut n = if *ty == Type::Prim(Prim::R) {
                     V::Real(identity as f64)
                 } else {
-                    V::Exact(Exact::integer(
-                        identity,
-                        domain(ty).ok_or_else(|| {
-                            error(span, "reduction has no checked numeric domain")
-                        })?,
-                    ))
+                    let d = domain(ty)
+                        .ok_or_else(|| error(span, "reduction has no checked numeric domain"))?;
+                    if d == Domain::Decimal {
+                        decimal05::decimal_literal(if identity == 0 { "0" } else { "1" })
+                            .map_err(fail)?
+                    } else {
+                        exact_i128(identity, d)
+                    }
                 };
                 for v in xs {
                     n = scalar_binary(choice, n, v.clone(), ty).map_err(fail)?;
@@ -1823,23 +2004,28 @@ impl Eval<'_> {
                 (fallback, V::Optional(None)) => Ok(fallback),
                 _ => Err("fallback requires an optional"),
             },
-            ToNatural | ToInteger | ToRational | ToReal => lift_one(a(), mode, &|v| {
+            Quantize => {
+                let scale = exact_index(&a()).map_err(fail)?;
+                decimal05::quantize(&a(), scale)
+            }
+            ToNatural | ToInteger | ToRational | ToDecimal | ToReal => lift_one(a(), mode, &|v| {
                 if op == ToReal {
-                    return match v {
-                        V::Real(x) => Ok(V::Real(x)),
-                        v => finite(as_exact(&v)?.real()),
-                    };
+                    return finite(real_of(&v)?);
                 }
+                let v = to_exact(&v)?;
                 let d = match op {
                     ToNatural => Domain::Natural,
                     ToInteger => Domain::Integer,
+                    ToDecimal => Domain::Decimal,
                     _ => Domain::Rational,
                 };
-                let exact = match v {
-                    V::Real(x) => Exact::from_real(x)?,
-                    other => as_exact(&other)?,
-                };
-                Ok(V::Exact(exact.as_domain(d)?))
+                if d == Domain::Decimal {
+                    return decimal05::decimal_from_exact(&v);
+                }
+                if let V::Exact(n) = v {
+                    return Ok(V::Exact(n.as_domain(d)?));
+                }
+                wide05::ratio_value(wide05::ratio(&v)?, d)
             }),
         };
         result.map_err(fail)
@@ -1856,11 +2042,7 @@ fn stats(op: CoreOp, v: V, span: Span) -> R<V> {
         let mut mean = 0.0;
         let mut ss = 0.0;
         for (i, x) in xs.iter().enumerate() {
-            let x = match x {
-                V::Exact(x) => x.real(),
-                V::Real(r) => *r,
-                _ => return Err(error(span, "sd expects numbers")),
-            };
+            let x = real_of(x).map_err(fail)?;
             let d = x - mean;
             mean += d / (i + 1) as f64;
             ss += d * (x - mean);
@@ -1870,41 +2052,36 @@ fn stats(op: CoreOp, v: V, span: Span) -> R<V> {
         }
         finite((ss.max(0.0) / xs.len() as f64).sqrt()).map_err(fail)?
     } else {
-        let mut xs = xs
-            .iter()
-            .map(as_exact)
-            .collect::<NumericResult<Vec<_>>>()
-            .map_err(fail)?;
         let (sum, div) = if op == CoreOp::Median {
-            xs.sort_by(|a, b| a.order(*b));
+            let mut xs = xs.to_vec();
+            if xs.iter().any(|v| wide05::kind(v).is_none()) {
+                return Err(error(span, "med expects exact numeric values"));
+            }
+            xs.sort_by(|a, b| order(a, b).unwrap_or(Ordering::Equal));
             let mid = xs.len() / 2;
             if xs.len() % 2 == 1 {
-                (xs[mid], 1)
+                (xs[mid].clone(), 1)
             } else {
                 (
-                    xs[mid - 1]
-                        .compute(CoreOp::Add, xs[mid], Domain::Rational)
+                    exact_binary(CoreOp::Add, &xs[mid - 1], &xs[mid], Domain::Rational)
                         .map_err(fail)?,
                     2,
                 )
             }
         } else {
-            let mut sum = Exact::integer(0, Domain::Rational);
-            for v in &xs {
-                sum = sum
-                    .compute(CoreOp::Add, *v, Domain::Rational)
-                    .map_err(fail)?;
+            let mut sum = exact_i128(0, Domain::Rational);
+            for v in xs {
+                sum = exact_binary(CoreOp::Add, &sum, v, Domain::Rational).map_err(fail)?;
             }
             (sum, xs.len() as i128)
         };
-        V::Exact(
-            sum.compute(
-                CoreOp::Div,
-                Exact::integer(div, Domain::Natural),
-                Domain::Rational,
-            )
-            .map_err(fail)?,
+        exact_binary(
+            CoreOp::Div,
+            &sum,
+            &exact_i128(div, Domain::Natural),
+            Domain::Rational,
         )
+        .map_err(fail)?
     };
     Ok(V::Optional(Some(Rc::new(value))))
 }
@@ -1917,7 +2094,6 @@ fn read_cell(s: &str, ty: &Type) -> NumericResult<V> {
             Ok(V::Optional(Some(Rc::new(read_cell(s, inner)?))))
         };
     }
-    let parse_num = |s: &str| s.parse().map_err(|_| "expected a bounded integer");
     Ok(match ty {
         Type::Prim(Prim::S) => V::String(Rc::from(s)),
         Type::Prim(Prim::C) => {
@@ -1932,13 +2108,18 @@ fn read_cell(s: &str, ty: &Type) -> NumericResult<V> {
             "false" | "0b" => V::Bool(false),
             _ => return Err("expected true, false, 1b, or 0b"),
         },
-        Type::Prim(Prim::N | Prim::Z) => V::Exact(
-            Exact::integer(parse_num(s)?, Domain::Integer)
-                .as_domain(domain(ty).expect("known domain"))?,
-        ),
+        Type::Prim(Prim::N | Prim::Z) => parse_exact_value(s, domain(ty).expect("known domain"))?,
         Type::Prim(Prim::Q) => {
-            let n = if let Some((a, b)) = s.split_once('/') {
-                Exact::new(parse_num(a)?, parse_num(b)?, Domain::Rational)?
+            if let Some((a, b)) = s.split_once('/') {
+                // Use the fast bounded parser when possible.
+                match (a.parse::<i128>(), b.parse::<i128>()) {
+                    (Ok(a), Ok(b)) => match Exact::new(a, b, Domain::Rational) {
+                        Ok(v) => V::Exact(v),
+                        Err(e) if e == OVERFLOW => rational(BigInt::from(a), BigInt::from(b))?,
+                        Err(e) => return Err(e),
+                    },
+                    _ => rational(wide05::parse_int(a)?, wide05::parse_int(b)?)?,
+                }
             } else {
                 if s.is_empty()
                     || s.bytes()
@@ -1946,10 +2127,10 @@ fn read_cell(s: &str, ty: &Type) -> NumericResult<V> {
                 {
                     return Err("expected a decimal or rational");
                 }
-                parse_exact(s, ty)?
-            };
-            V::Exact(n)
+                parse_exact_value(s, Domain::Rational)?
+            }
         }
+        Type::Prim(Prim::D) => decimal05::decimal_literal(s)?,
         Type::Prim(Prim::R) => finite(s.parse().map_err(|_| "expected a finite real")?)?,
         _ => return Err("CSV schema contains an unsupported column type"),
     })
@@ -1959,7 +2140,7 @@ fn write_cell(v: &V) -> NumericResult<String> {
         V::String(s) => s.to_string(),
         V::Char(c) => c.to_string(),
         V::Bool(b) => b.to_string(),
-        V::Exact(_) | V::Real(_) => repr(v),
+        V::Exact(_) | V::Wide(_) | V::Real(_) => repr(v),
         V::Optional(None) => String::new(),
         V::Optional(Some(v)) => {
             let s = write_cell(v)?;
@@ -2020,6 +2201,10 @@ pub fn run_with_io(
     }
     let status = match value {
         V::Unit => 0,
+        V::Wide(_) => wide05::integral(&value)
+            .ok()
+            .and_then(|n| n.to_u8())
+            .ok_or_else(|| error(span, "entry exit status must be from 0 to 255").into_error())?,
         V::Exact(n) if n.d == 1 => u8::try_from(n.n)
             .map_err(|_| error(span, "entry exit status must be from 0 to 255").into_error())?,
         _ => {
@@ -2476,6 +2661,52 @@ second(x:z):z^z := ^{ ^? first x };
         assert_eq!(
             run(&ir).unwrap().stdout,
             "(6, [0 1 3 6])\n[1 2]\n?1 2\n?1 2/3\n3\n"
+        );
+    }
+    #[test]
+    fn exact_small_values_stay_inline_and_wide_results_demote() {
+        #[cfg(target_pointer_width = "64")]
+        assert!(std::mem::size_of::<V>() <= 48);
+        let big = exact_binary(
+            CoreOp::Add,
+            &exact_i128(i128::MAX, Domain::Integer),
+            &exact_i128(1, Domain::Integer),
+            Domain::Integer,
+        )
+        .unwrap();
+        assert!(matches!(big, V::Wide(_)));
+        let small = exact_binary(
+            CoreOp::Sub,
+            &big,
+            &exact_i128(1, Domain::Integer),
+            Domain::Integer,
+        )
+        .unwrap();
+        assert!(matches!(small,V::Exact(n) if n.n==i128::MAX));
+        let odd = wide05::ratio_value(
+            BigRational::from_integer((BigInt::from(1u8) << 160usize) + 1u8),
+            Domain::Natural,
+        )
+        .unwrap();
+        let ans = exact_binary(
+            CoreOp::Pow,
+            &exact_i128(-1, Domain::Integer),
+            &odd,
+            Domain::Integer,
+        )
+        .unwrap();
+        assert!(matches!(ans,V::Exact(n) if n.n == -1));
+    }
+
+    #[test]
+    fn a_wide_range_obeys_a_distinct_aggregate_resource_limit() {
+        let lo = BigInt::from(1u8) << 700_000usize;
+        let hi = &lo + 999u16;
+        let lo = wide05::ratio_value(BigRational::from_integer(lo), Domain::Natural).unwrap();
+        let hi = wide05::ratio_value(BigRational::from_integer(hi), Domain::Natural).unwrap();
+        assert_eq!(
+            range(&lo, &hi, Domain::Natural).err(),
+            Some("wide range resource limit exceeded (64 MiB of integer data)")
         );
     }
 }

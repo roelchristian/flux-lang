@@ -240,7 +240,7 @@ struct Engine<'r> {
     raise_payload: Option<usize>,
     saw_result: bool,
     start: usize,
-    literals: Vec<(Type, i128, usize, usize)>,
+    literals: Vec<(Type, bool, usize, usize)>,
     active: Option<std::ops::Range<usize>>,
     empty_sequences: Vec<(Type, usize, usize)>,
     explicit_variables: HashSet<u32>,
@@ -789,8 +789,11 @@ impl Engine<'_> {
         Ok(())
     }
     fn int(&mut self, n: i128, want: Option<&Type>) -> R<Type> {
+        self.int_signed(n < 0, want)
+    }
+    fn int_signed(&mut self, negative: bool, want: Option<&Type>) -> R<Type> {
         match want.map(|w| self.cx.resolve(w)) {
-            Some(Type::Prim(Prim::N)) if n < 0 => {
+            Some(Type::Prim(Prim::N)) if negative => {
                 Err(self.err("negative integer literal cannot have type n"))
             }
             Some(Type::Prim(t)) if num(t) => Ok(p(t)),
@@ -802,17 +805,17 @@ impl Engine<'_> {
                     .as_ref()
                     .filter(|s| s.start == self.start)
                     .map_or(self.start, |s| s.end);
-                self.literals.push((t.clone(), n, self.start, end));
+                self.literals.push((t.clone(), negative, self.start, end));
                 Ok(t)
             }
         }
     }
     fn default_literals(&mut self, from: usize) -> R<()> {
         let entries = self.literals[from..].to_vec();
-        for (t, n, start, end) in entries {
+        for (t, negative, start, end) in entries {
             match self.cx.resolve(&t) {
                 Type::Var(_) => self.unify(&t, &p(Prim::Z))?,
-                Type::Prim(Prim::N) if n < 0 => {
+                Type::Prim(Prim::N) if negative => {
                     return Err(InferError {
                         kind: InferErrorKind::TypeError,
                         start,
@@ -892,6 +895,17 @@ impl Engine<'_> {
                 self.int(*n, Some(&p(N)))?
             }
             Expr::Int(n) => self.int(*n, want)?,
+            Expr::Num(_) if self.entry_natural_tail == Some(address(e)) => {
+                self.int_signed(false, Some(&p(N)))?
+            }
+            Expr::Num(raw)
+                if raw
+                    .trim_start_matches('-')
+                    .bytes()
+                    .all(|b| b.is_ascii_digit()) =>
+            {
+                self.int_signed(raw.starts_with('-'), want)?
+            }
             Expr::Num(raw) => {
                 let k = match raw.as_bytes().last() {
                     Some(b'n') => N,
@@ -1822,7 +1836,9 @@ impl Engine<'_> {
                     .enumerate()
                     .map(|(i, x)| {
                         let context = match (n, i) {
-                            ("^", 1) | ("take" | "[:" | "drop", 0) | ("slice", 0 | 1) => Some(p(N)),
+                            ("^", 1)
+                            | ("take" | "[:" | "drop" | "math.quantize", 0)
+                            | ("slice", 0 | 1) => Some(p(N)),
                             ("take" | "drop" | "[:", 1)
                             | ("slice", 2)
                             | ("rev" | "=." | "tr", 0)
@@ -1897,7 +1913,9 @@ impl Engine<'_> {
             let t = if let Type::Optional(t) = t { *t } else { t };
             if !matches!(
                 t,
-                Type::Prim(Prim::N | Prim::Z | Prim::Q | Prim::R | Prim::B | Prim::S | Prim::C)
+                Type::Prim(
+                    Prim::N | Prim::Z | Prim::Q | Prim::D | Prim::R | Prim::B | Prim::S | Prim::C
+                )
             ) {
                 return Err(self.err(format!("unsupported CSV column type for {name}: {t}")));
             }
@@ -2060,11 +2078,6 @@ impl Engine<'_> {
             }
             ":n" | ":z" | ":q" | ":d" | ":r" => {
                 self.req(Class::Num, &xs[0])?;
-                if n == ":d" {
-                    return Err(
-                        self.err("decimal conversion is not executable in the reference subset")
-                    );
-                }
                 p(match n {
                     ":n" => N,
                     ":z" => Z,
@@ -2173,6 +2186,11 @@ impl Engine<'_> {
                     _ => p(Unit),
                 };
                 a(result(ok, Self::standard_type("ioerr")))
+            }
+            "math.quantize" => {
+                self.unify(&xs[0], &p(N))?;
+                self.require_exact_numeric(&xs[1], n)?;
+                p(D)
             }
             "math.div" => {
                 for x in xs {
@@ -2738,7 +2756,12 @@ fn find_entry_natural_tail(p: &Program) -> Option<usize> {
     let Expr::Fallible(_, Some(final_)) = tail.as_ref() else {
         return None;
     };
-    matches!(final_.as_ref(),Expr::Int(x) if *x>=0).then(|| address(final_))
+    let nonnegative = match final_.as_ref() {
+        Expr::Int(x) => *x >= 0,
+        Expr::Num(raw) => !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()),
+        _ => false,
+    };
+    nonnegative.then(|| address(final_))
 }
 pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
     let mut e = Engine {
@@ -3119,5 +3142,51 @@ mod tests {
         let err = check(src).unwrap_err();
         assert_eq!(&src[err.start..err.end], "absent");
         assert!(err.message.contains("unknown type"));
+    }
+    #[test]
+    fn exact_decimal_promotions_quantize_and_wide_literal_context() {
+        check(
+            r#"
+            << "math";
+            identity(x:'a):'a := x;
+            magnitude:n := 12345678901234567890123456789012345678901234567890;
+            fractional:q := 12345678901234567890123456789012345678901234567890;
+            amount:d := identity 12.340d;
+            sum:d := + 2z amount;
+            quotient:q := / 1.20d 3n;
+            checked:q^numerr := math.div 1.20d 3n;
+            round:n->q->d := &math.quantize;
+            result:d := @ (@ round 3) (/ 11q 4q);
+            finite:d := :d 0.125q;
+            batches:[d] := + [1.00d 2.00d] 3n;
+        "#,
+        )
+        .unwrap();
+        for failure in [
+            "bad:n := -12345678901234567890123456789012345678901234567890;",
+            "bad := + 1.0d 1.0r;",
+            "bad := // 1.0d 1z;",
+            "bad := % 1.0d 1z;",
+            r#"<< "math"; bad := math.quantize -1 2.0d;"#,
+            r#"<< "math"; bad := math.quantize 2 0.125r;"#,
+        ] {
+            assert_eq!(
+                check(failure).unwrap_err().kind,
+                InferErrorKind::TypeError,
+                "{failure}"
+            );
+        }
+    }
+    #[test]
+    fn decimal_schema_supported_in_checked_csv_actions() {
+        check(
+            r#"
+            << "csv";
+            row :: { amount:d; discount:?d; };
+            reader(path:s):!(#row^csverr) := csv.read path;
+            writer(path:s,t:#row):!(()^csverr) := csv.write path t;
+        "#,
+        )
+        .unwrap();
     }
 }

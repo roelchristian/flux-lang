@@ -58,6 +58,7 @@ propagate them explicitly.
 
 ## Specification
 
+- [Draft 0.5 exact numerical foundations](docs/draft-0.5-numerics.md) and [independent review](docs/review-0.5-numerics.md)
 - [Draft 0.4.3 local source modules](docs/draft-0.4.3.md) and [independent review](docs/review-0.4.3.md)
 - [Draft 0.4.2 semantic consolidation](docs/plan-0.4.2.md) and [independent review](docs/review-0.4.2.md)
 - [Draft 0.4.1 typed errors and migration](docs/draft-0.4.1.md)

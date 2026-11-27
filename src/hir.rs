@@ -3,7 +3,7 @@ use crate::{
     infer::{InferResult, Operation},
     parser::{Expr, Program, RecoveryPattern as SyntaxPattern, Stmt},
     resolve::{Resolution, SymbolId},
-    types::{NominalId, Prim, Scheme, Type},
+    types::{NominalId, Scheme, Type},
 };
 use std::{collections::HashMap, fmt, rc::Rc};
 
@@ -80,6 +80,7 @@ pub enum CoreOp {
     IoExists,
     IoPrint,
     CheckedDiv,
+    Quantize,
     Sqrt,
     Present,
     Absent,
@@ -89,6 +90,7 @@ pub enum CoreOp {
     ToNatural,
     ToInteger,
     ToRational,
+    ToDecimal,
     ToReal,
 }
 
@@ -343,19 +345,6 @@ fn csv_returns_table(ty: &Type) -> bool {
         _ => false,
     }
 }
-fn uses_decimal(ty: &Type) -> bool {
-    match ty {
-        Type::Prim(Prim::D) => true,
-        Type::Seq(x) | Type::Optional(x) | Type::Action(x) | Type::Table(x) => uses_decimal(x),
-        Type::Tuple(xs) => xs.iter().any(uses_decimal),
-        Type::Fun(a, b) | Type::Dict(a, b) | Type::Result(a, b) => {
-            uses_decimal(a) || uses_decimal(b)
-        }
-        Type::Record(row) => row.fields.iter().any(|(_, ty)| uses_decimal(ty)),
-        _ => false,
-    }
-}
-
 struct Lower<'a> {
     inference: &'a InferResult,
     resolution: &'a Resolution,
@@ -680,9 +669,6 @@ impl Lower<'_> {
             .type_of(e)
             .cloned()
             .ok_or_else(|| Boundary::missing(span, "inferred expression type"))?;
-        if uses_decimal(&ty) {
-            return Err(Boundary::unsupported(span, "decimal d execution"));
-        }
         let table_schema = self.table_schema(&ty);
         if matches!(
             &kind,

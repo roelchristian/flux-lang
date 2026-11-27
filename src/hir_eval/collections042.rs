@@ -2,12 +2,14 @@
 //! admissible collection kinds and result types; this layer checks runtime
 //! bounds and shapes, and carries the typed table layout into empty results.
 use super::*;
+use num_integer::Integer;
+use num_traits::{Signed, ToPrimitive, Zero};
 use std::collections::HashSet;
 
 const DISTINCT_LIMIT: usize = 8192;
 
-fn exact(n: i128) -> Exact {
-    Exact::integer(n, Domain::Rational)
+fn exact(n: i128) -> V {
+    exact_i128(n, Domain::Rational)
 }
 
 fn some(v: V) -> V {
@@ -15,14 +17,7 @@ fn some(v: V) -> V {
 }
 
 fn index(v: &V, span: Span) -> R<usize> {
-    let n = as_exact(v)
-        .and_then(Exact::integral)
-        .map_err(|e| error(span, e))?;
-    if n < 0 {
-        return Err(error(span, "expected a nonnegative integer"));
-    }
-    // Any natural wider than usize is past the end of a representable collection.
-    Ok(usize::try_from(n).unwrap_or(usize::MAX))
+    exact_index(v).map_err(|e| error(span, e))
 }
 
 fn fold_scan(eval: &mut Eval<'_>, args: &[V], scan: bool, span: Span) -> R<V> {
@@ -255,55 +250,57 @@ fn variance(v: &V) -> NumericResult<V> {
     let count = exact(seq.len() as i128);
     let mut sum = exact(0);
     for v in seq {
-        sum = sum.compute(Add, as_exact(v)?, Domain::Rational)?;
+        sum = exact_binary(Add, &sum, v, Domain::Rational)?;
     }
-    let mean = sum.compute(Div, count, Domain::Rational)?;
+    let mean = exact_binary(Div, &sum, &count, Domain::Rational)?;
     let mut squares = exact(0);
     for v in seq {
-        let t = as_exact(v)?.compute(Sub, mean, Domain::Rational)?;
-        squares = squares.compute(Add, t.compute(Mul, t, Domain::Rational)?, Domain::Rational)?;
+        let t = exact_binary(Sub, v, &mean, Domain::Rational)?;
+        let square = exact_binary(Mul, &t, &t, Domain::Rational)?;
+        squares = exact_binary(Add, &squares, &square, Domain::Rational)?;
     }
-    Ok(some(V::Exact(squares.compute(
-        Div,
-        count,
-        Domain::Rational,
-    )?)))
+    Ok(some(exact_binary(Div, &squares, &count, Domain::Rational)?))
 }
 
 fn percentile(p: &V, v: &V) -> NumericResult<V> {
     use CoreOp::*;
-    let p = as_exact(p)?;
+    let zero = exact(0);
     let hundred = exact(100);
-    if p.n < 0 || p.order(hundred).is_gt() {
+    if order(p, &zero)?.is_lt() || order(p, &hundred)?.is_gt() {
         return Err("percentile must be between 0 and 100");
     }
-    let mut xs = as_seq(v)?
-        .iter()
-        .map(as_exact)
-        .collect::<NumericResult<Vec<_>>>()?;
+    let mut xs = as_seq(v)?.iter().collect::<Vec<_>>();
     if xs.is_empty() {
         return Ok(V::Optional(None));
     }
-    xs.sort_by(|a, b| a.order(*b));
-    let h = p
-        .compute(Mul, exact((xs.len() - 1) as i128), Domain::Rational)?
-        .compute(Div, hundred, Domain::Rational)?;
-    let i = (h.n / h.d) as usize;
-    let x = Exact::new(xs[i].n, xs[i].d, Domain::Rational)?;
-    let remainder = h.n % h.d;
-    let result = if remainder == 0 {
-        x
+    let mut failure = None;
+    xs.sort_by(|a, b| match order(a, b) {
+        Ok(comparison) => comparison,
+        Err(err) => {
+            failure = Some(err);
+            std::cmp::Ordering::Equal
+        }
+    });
+    if let Some(err) = failure {
+        return Err(err);
+    }
+    let h = exact_binary(Mul, p, &exact((xs.len() - 1) as i128), Domain::Rational)?;
+    let h = exact_binary(Div, &h, &hundred, Domain::Rational)?;
+    let (n, d) = as_ratio(&h)?;
+    let (i, remainder) = n.div_rem(&d);
+    debug_assert!(!i.is_negative() && !remainder.is_negative());
+    let i = i.to_usize().ok_or("percentile index out of range")?;
+    let x = xs[i];
+    let result = if remainder.is_zero() {
+        // Promote to the statically inferred q result even when the item is n/z/d.
+        exact_binary(Add, x, &zero, Domain::Rational)?
     } else {
-        let y = Exact::new(xs[i + 1].n, xs[i + 1].d, Domain::Rational)?;
-        let delta = y.compute(Sub, x, Domain::Rational)?;
-        let weight = Exact::new(remainder, h.d, Domain::Rational)?;
-        x.compute(
-            Add,
-            delta.compute(Mul, weight, Domain::Rational)?,
-            Domain::Rational,
-        )?
+        let delta = exact_binary(Sub, xs[i + 1], x, Domain::Rational)?;
+        let weight = rational(remainder, d)?;
+        let increment = exact_binary(Mul, &delta, &weight, Domain::Rational)?;
+        exact_binary(Add, x, &increment, Domain::Rational)?
     };
-    Ok(some(V::Exact(result)))
+    Ok(some(result))
 }
 
 pub(super) fn apply(
@@ -382,9 +379,6 @@ mod tests {
     fn enclosing_exact_statistics_are_deterministic() {
         let values = nums(&[0, 5, 10]);
         assert_eq!(repr(&variance(&values).unwrap()), "?1 50/3");
-        assert_eq!(
-            repr(&percentile(&V::Exact(exact(25)), &values).unwrap()),
-            "?1 5/2",
-        );
+        assert_eq!(repr(&percentile(&exact(25), &values).unwrap()), "?1 5/2",);
     }
 }

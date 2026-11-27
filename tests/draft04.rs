@@ -210,8 +210,8 @@ fn rejects_invalid_elaboration() {
         ("vector range bounds", "x := .. [1 2] [3 4];"),
         ("boolean scalar ordering", "x := < 0b 1b;"),
         (
-            "not executable decimal CSV",
-            r#"<< "csv"; row :: {val:d;}; !{ ^{ x:#row := ^? ! csv.read "data.csv"; () } };"#,
+            "non-scalar CSV field",
+            r#"<< "csv"; row :: {val:[d];}; !{ ^{ x:#row := ^? ! csv.read "data.csv"; () } };"#,
         ),
         ("undeclared nested Eq", ">> (f); f(x:['a]):b := == x x;"),
         (

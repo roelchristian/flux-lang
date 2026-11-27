@@ -1580,13 +1580,11 @@ impl Parser {
                 .first()
                 .is_some_and(u8::is_ascii_digit) =>
             {
-                if let Ok(n) = s.parse() {
+                // The lexer has already validated the whole numeric token.
+                // Preserve non-inline values and explicitly typed spellings
+                // verbatim for HIR, including a decimal's written scale.
+                if let Ok(n) = s.parse::<i128>() {
                     Ok(Expr::Int(n))
-                } else if s.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
-                    Err(Error::new(
-                        t.start,
-                        "integer literal exceeds this implementation's i128 range",
-                    ))
                 } else {
                     Ok(Expr::Num(t.text))
                 }
@@ -2141,5 +2139,59 @@ f(x:q^err^e):q := 0;";
         assert_eq!(imports[0].start, 500 + src.find(r#"<< "./folder"#).unwrap());
         assert_eq!(imports[1].path, "csv");
         assert_eq!(imports[1].alias, "csv");
+    }
+    #[test]
+    fn exact_numerals_keep_inline_threshold_and_raw_wide_spelling() {
+        let source = concat!(
+            "max := 170141183460469231731687303715884105727; ",
+            "min := -170141183460469231731687303715884105728; ",
+            "wide := 170141183460469231731687303715884105728; ",
+            "below := -170141183460469231731687303715884105729; ",
+            "deci := -001.23000d; ",
+            "typed := + 340282366920938463463374607431768211456n 0n;"
+        );
+        let p = parse(source).unwrap();
+        let body = |i: usize| match &p.defs[i] {
+            Stmt::Def { body, .. } => body,
+            _ => panic!(),
+        };
+        assert_eq!(body(0), &Expr::Int(i128::MAX));
+        assert_eq!(body(1), &Expr::Int(i128::MIN));
+        assert_eq!(
+            body(2),
+            &Expr::Num("170141183460469231731687303715884105728".into())
+        );
+        assert_eq!(
+            body(3),
+            &Expr::Num("-170141183460469231731687303715884105729".into())
+        );
+        assert_eq!(body(4), &Expr::Num("-001.23000d".into()));
+        let Expr::Call(name, args) = body(5) else {
+            panic!()
+        };
+        assert_eq!(name, "+");
+        assert_eq!(args.len(), 2);
+        assert!(matches!(&args[0],Expr::Num(raw) if raw.ends_with('n')));
+        let spans = p.expression_origins();
+        assert!(spans
+            .iter()
+            .any(|(e, s)| *e == body(4) && &source[s.clone()] == "-001.23000d"));
+    }
+
+    #[test]
+    fn wide_literals_do_not_change_prefix_arity_or_lexical_constraints() {
+        let wide = "170141183460469231731687303715884105728";
+        for bad in [
+            format!("x := + {wide};"),
+            format!("x := + {wide} 1 2;"),
+            format!("x := :d {wide} 2;"),
+            format!("x := -{wide}n;"),
+            format!("x := {wide}e4d;"),
+            format!("x := {wide}.0z;"),
+        ] {
+            assert!(parse(&bad).is_err(), "{bad}");
+        }
+        assert!(parse(&format!("x := :d (+ {wide} 2);")).is_ok());
+        assert!(parse(&format!("x := - {wide} 2;")).is_ok());
     }
 }

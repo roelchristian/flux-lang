@@ -11,7 +11,7 @@ fn string(s: impl AsRef<str>) -> V {
 }
 
 fn natural(n: usize) -> V {
-    V::Exact(Exact::integer(n as i128, Domain::Natural))
+    exact_i128(n as i128, Domain::Natural)
 }
 
 fn variant(program: &HirProgram, owner: &str, name: &str, fields: Vec<V>, span: Span) -> R<V> {
@@ -291,12 +291,10 @@ pub(super) fn apply_core(
             Ok(V::Action(Rc::new(Action::IoExists(path.clone()))))
         }
         (CoreOp::IoPrint, [value]) => Ok(V::Action(Rc::new(Action::IoPrint(value.clone())))),
-        (CoreOp::CheckedDiv, [V::Exact(a), V::Exact(b)]) => {
-            match a.compute(CoreOp::Div, *b, Domain::Rational) {
-                Ok(v) => Ok(success(V::Exact(v))),
-                Err(e) => numeric_failure(program, e, span),
-            }
-        }
+        (CoreOp::CheckedDiv, [a, b]) => match exact_binary(CoreOp::Div, a, b, Domain::Rational) {
+            Ok(v) => Ok(success(v)),
+            Err(e) => numeric_failure(program, e, span),
+        },
         (
             CoreOp::IoRead
             | CoreOp::IoWrite

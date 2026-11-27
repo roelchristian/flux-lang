@@ -159,6 +159,16 @@ pub static REGISTRY: &[Builtin] = &[
         Runtime,
         &[]
     ),
+    internal!(
+        Some(CoreOp::Quantize),
+        "math.quantize",
+        2,
+        Conversion,
+        Scalar,
+        Pure,
+        Runtime,
+        &[]
+    ),
     pure!(
         Some(CoreOp::Quotient),
         "//",
@@ -423,13 +433,13 @@ pub static REGISTRY: &[Builtin] = &[
         &[]
     ),
     internal!(
-        None,
+        Some(CoreOp::ToDecimal),
         ":d",
         1,
         Conversion,
         Elementwise,
         Pure,
-        Recognized,
+        Runtime,
         &[]
     ),
     internal!(
@@ -572,7 +582,7 @@ const IO: &[Member] = &[
     ("read_csv", "io.read_csv"),
     ("write_csv", "io.write_csv"),
 ];
-const MATH: &[Member] = &[("div", "math.div")];
+const MATH: &[Member] = &[("div", "math.div"), ("quantize", "math.quantize")];
 const CSV: &[Member] = &[("read", "csv.read"), ("write", "csv.write")];
 const TABLE: &[Member] = &[("agg", "df.agg"), ("extend", "df.extend")];
 const STATISTICS: &[Member] = &[
@@ -654,7 +664,8 @@ mod tests {
         assert_eq!(runtime_arity("*?"), None);
         assert_eq!(runtime_arity(".field"), Some(1));
         assert_eq!(runtime_arity("io.read"), Some(1));
-        assert_eq!(runtime_arity(":d"), None);
+        assert_eq!(runtime_arity(":d"), Some(1));
+        assert_eq!(runtime_arity("math.quantize"), Some(2));
         assert_eq!(runtime_arity(":q"), Some(1));
     }
     #[test]
