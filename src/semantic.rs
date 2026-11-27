@@ -1,9 +1,9 @@
-//! Draft 0.4 semantic entry point and checked migration boundary.
+//! Single production semantic frontend and typed HIR execution.
 use crate::{
     check,
     diagnostic::{Category, Diagnostic, Span},
     eval, hir, hir_eval, infer,
-    parser::{Expr, Program, Stmt},
+    parser::{Expr, Program},
     resolve,
     types::{Prim, Type},
     Error,
@@ -17,38 +17,26 @@ pub enum Mode {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Policy {
+    /// API alias retained for older callers. Does not enable a legacy backend.
     Compatible,
     TypedOnly,
 }
 
 #[derive(Debug)]
-enum Backend<'a> {
-    Typed(hir::HirProgram),
-    Draft03 {
-        program: &'a Program,
-        reason: String,
-    },
-}
-
-#[derive(Debug)]
 pub struct Prepared<'a> {
-    backend: Backend<'a>,
+    hir: hir::HirProgram,
     inspection: Option<check::Inspection>,
+    source: std::marker::PhantomData<&'a Program>,
 }
 
 impl Prepared<'_> {
     pub fn hir(&self) -> Option<&hir::HirProgram> {
-        match &self.backend {
-            Backend::Typed(program) => Some(program),
-            Backend::Draft03 { .. } => None,
-        }
+        Some(&self.hir)
     }
 
+    /// Retained for callers of the previous API. Production plans are always typed.
     pub fn migration_reason(&self) -> Option<&str> {
-        match &self.backend {
-            Backend::Typed(_) => None,
-            Backend::Draft03 { reason, .. } => Some(reason),
-        }
+        None
     }
 
     pub fn inspection(&self) -> Option<&check::Inspection> {
@@ -56,151 +44,35 @@ impl Prepared<'_> {
     }
 
     pub fn run(&self) -> Result<eval::Output, Error> {
-        match &self.backend {
-            Backend::Typed(program) => hir_eval::run(program),
-            Backend::Draft03 { program, .. } => eval::run(program),
-        }
+        hir_eval::run(&self.hir)
     }
 
-    /// Execute with ordered writes. Unlike collected output, writes remain visible on failure.
     pub fn run_with_output(&self, sink: &mut dyn std::io::Write) -> Result<eval::Output, Error> {
-        match &self.backend {
-            Backend::Typed(program) => hir_eval::run_with_output(program, sink),
-            Backend::Draft03 { program, .. } => {
-                let mut result = eval::run(program)?;
-                sink.write_all(result.stdout.as_bytes())
-                    .map_err(|e| issue(Category::RuntimeDomain, 0, e.to_string()))?;
-                result.stdout.clear();
-                Ok(result)
-            }
-        }
+        hir_eval::run_with_output(&self.hir, sink)
     }
 
-    /// Execute typed HIR with an injectable file reader and ordered output writer.
-    /// Filesystem operations other than reading use the host filesystem.
     pub fn run_with_io(
         &self,
         input: &mut dyn crate::RuntimeInput,
         output: &mut dyn std::io::Write,
     ) -> Result<eval::Output, Error> {
-        match &self.backend {
-            Backend::Typed(program) => hir_eval::run_with_io(program, input, output),
-            Backend::Draft03 { .. } => Err(issue(
-                Category::MigrationBoundary,
-                0,
-                "injected runtime input requires typed HIR",
-            )),
-        }
+        hir_eval::run_with_io(&self.hir, input, output)
     }
 
     pub fn view_with_output(
         &self,
         sink: &mut dyn std::io::Write,
     ) -> Result<eval::ReplOutput, Error> {
-        match &self.backend {
-            Backend::Typed(program) => hir_eval::view_with_output(program, sink),
-            Backend::Draft03 { program, .. } => {
-                let mut result = eval::view_entry(program)?;
-                sink.write_all(result.stdout.as_bytes())
-                    .map_err(|e| issue(Category::RuntimeDomain, 0, e.to_string()))?;
-                result.stdout.clear();
-                Ok(result)
-            }
-        }
+        hir_eval::view_with_output(&self.hir, sink)
     }
 
     pub fn view(&self) -> Result<eval::ReplOutput, Error> {
-        match &self.backend {
-            Backend::Typed(program) => hir_eval::view_entry(program),
-            Backend::Draft03 { program, .. } => eval::view_entry(program),
-        }
+        hir_eval::view_entry(&self.hir)
     }
 }
 
 fn issue(category: Category, offset: usize, message: impl Into<String>) -> Error {
     Diagnostic::new(category, Span::at(offset), message).into_error()
-}
-
-fn requires_error_hir(program: &Program) -> bool {
-    fn builtin(name: &str) -> bool {
-        matches!(
-            crate::builtins::canonical(name),
-            "io.read"
-                | "io.write"
-                | "io.exists"
-                | "io.print"
-                | "csv.read"
-                | "csv.write"
-                | "math.div"
-        )
-    }
-    fn stmt(s: &Stmt) -> bool {
-        match s {
-            Stmt::Sum { .. } => true,
-            Stmt::Def {
-                param_types,
-                result_type,
-                body,
-                ..
-            } => {
-                param_types
-                    .iter()
-                    .flatten()
-                    .chain(result_type)
-                    .any(|t| t.contains('^'))
-                    || expr(body)
-            }
-            Stmt::Schema { fields, .. } => fields.iter().any(|(_, t)| t.contains('^')),
-            Stmt::Effect { body, .. } => expr(body),
-        }
-    }
-    fn expr(e: &Expr) -> bool {
-        match e {
-            Expr::Fallible(..) | Expr::Raise(..) | Expr::Propagate(..) | Expr::Recover(..) => true,
-            Expr::Ref(name) => builtin(name),
-            Expr::Call(name, xs) => builtin(name) || xs.iter().any(expr),
-            Expr::Array(xs) | Expr::Tuple(xs) | Expr::Pipeline(xs) => xs.iter().any(expr),
-            Expr::Cases(cases, tail) => {
-                cases.iter().any(|(cond, value)| expr(cond) || expr(value)) || expr(tail)
-            }
-            Expr::Record(fields) | Expr::NamedRecord(_, fields) => {
-                fields.iter().any(|(_, v)| expr(v))
-            }
-            Expr::Lambda(_, body) => expr(body),
-            Expr::TypedLambda(_, ts, body) => {
-                ts.iter().flatten().any(|t| t.contains('^')) || expr(body)
-            }
-            Expr::Block(xs, tail) | Expr::Action(xs, tail) => {
-                xs.iter().any(stmt) || tail.as_deref().is_some_and(expr)
-            }
-            _ => false,
-        }
-    }
-    program.defs.iter().any(stmt) || program.entry.as_ref().is_some_and(expr)
-}
-
-fn legacy(
-    program: &Program,
-    mode: Mode,
-    policy: Policy,
-    start: usize,
-    reason: String,
-) -> Result<Prepared<'_>, Error> {
-    if policy == Policy::TypedOnly || !program.constraints.is_empty() || requires_error_hir(program)
-    {
-        return Err(issue(Category::MigrationBoundary, start, reason));
-    }
-    let inspection = match mode {
-        Mode::Script => {
-            check::check(program)?;
-            None
-        }
-        Mode::Inspection => Some(check::inspect_entry(program)?),
-    };
-    Ok(Prepared {
-        backend: Backend::Draft03 { program, reason },
-        inspection,
-    })
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -214,12 +86,11 @@ pub fn prepare(program: &Program, mode: Mode, policy: Policy) -> Result<Prepared
     prepare_timed(program, mode, policy, &mut Timings::default())
 }
 
-/// Does not fall back on resolution errors, type errors, or invalid HIR.
-/// The Draft 0.3 compatibility engine is used only at named migration boundaries.
+/// Resolves, checks and lowers exactly once. Unsupported operations are diagnostics.
 pub fn prepare_timed<'a>(
     program: &'a Program,
     mode: Mode,
-    policy: Policy,
+    _policy: Policy,
     timing: &mut Timings,
 ) -> Result<Prepared<'a>, Error> {
     let start = Instant::now();
@@ -231,11 +102,9 @@ pub fn prepare_timed<'a>(
     timing.inference = start.elapsed();
     let inferred = match inference {
         Ok(value) => value,
-        Err(failure) if failure.kind == infer::InferErrorKind::Unsupported => {
-            return legacy(program, mode, policy, failure.start, failure.message);
-        }
         Err(failure) => {
             let category = match failure.kind {
+                infer::InferErrorKind::Unsupported => Category::MigrationBoundary,
                 infer::InferErrorKind::IncompatibleError => Category::IncompatibleError,
                 infer::InferErrorKind::ResultNeedsHandling => Category::ResultNeedsHandling,
                 _ => Category::Type,
@@ -312,16 +181,19 @@ pub fn prepare_timed<'a>(
     timing.elaboration = start.elapsed();
     match lowered {
         Ok(hir) => Ok(Prepared {
-            backend: Backend::Typed(hir),
+            hir,
             inspection,
+            source: std::marker::PhantomData,
         }),
-        Err(boundary) if boundary.is_migration() => {
-            legacy(program, mode, policy, boundary.span.start, boundary.message)
-        }
-        Err(boundary) => Err(issue(
-            Category::InvalidHir,
-            boundary.span.start,
+        Err(boundary) => Err(Diagnostic::new(
+            if boundary.is_migration() {
+                Category::MigrationBoundary
+            } else {
+                Category::InvalidHir
+            },
+            boundary.span,
             boundary.message,
-        )),
+        )
+        .into_error()),
     }
 }

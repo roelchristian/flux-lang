@@ -12,7 +12,8 @@ pub use crate::diagnostic::Span;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ExprId(pub usize);
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum CoreOp {
     Add,
     Sub,
@@ -46,6 +47,25 @@ pub enum CoreOp {
     Extend,
     SortAsc,
     SortDesc,
+    Concat,
+    Distinct,
+    Lookup,
+    Zip,
+    Cartesian,
+    Take,
+    Drop,
+    Slice,
+    Reverse,
+    Flatten,
+    Transpose,
+    Variance,
+    Percentile,
+    Min,
+    Max,
+    All,
+    Any,
+    Fold,
+    Scan,
     CsvRead,
     CsvWrite,
     Mean,
@@ -61,7 +81,6 @@ pub enum CoreOp {
     IoPrint,
     CheckedDiv,
     Sqrt,
-    Print,
     Present,
     Absent,
     Has,
@@ -95,75 +114,12 @@ impl LiftMode {
 
 impl CoreOp {
     pub(crate) fn lift_arity(self) -> Option<usize> {
-        use CoreOp::*;
-        match self {
-            Add | Sub | Mul | Div | Quotient | Remainder | Pow | Equal | NotEqual | Lt | Le
-            | Gt | Ge | And | Or => Some(2),
-            Negate | Abs | Not | ToNatural | ToInteger | ToRational | ToReal => Some(1),
-            _ => None,
-        }
+        crate::builtins::for_operation(self)
+            .filter(|spec| spec.shape == crate::builtins::Shape::Elementwise)
+            .map(|spec| spec.arity)
     }
     fn from_name(name: &str) -> Option<Self> {
-        use CoreOp::*;
-        Some(match crate::builtins::canonical(name) {
-            "+" => Add,
-            "-" => Sub,
-            "*" => Mul,
-            "/" => Div,
-            "//" => Quotient,
-            "%" => Remainder,
-            "^" => Pow,
-            "-:" => Negate,
-            "|" => Abs,
-            "=" => Equal,
-            "/=" => NotEqual,
-            "==" => EqualWhole,
-            "<" => Lt,
-            "<=" => Le,
-            ">" => Gt,
-            ">=" => Ge,
-            "&&" => And,
-            "||" => Or,
-            "~" => Not,
-            ".." => Range,
-            "+/" => Sum,
-            "*/" => Product,
-            "#" => Count,
-            "@" => Apply,
-            "@@" => ApplyTuple,
-            "#[" => TableRows,
-            "#:" => TableFrom,
-            ":#" => Rows,
-            "?:" => Filter,
-            "=:" => Group,
-            "df.agg" => Aggregate,
-            "df.extend" => Extend,
-            ">:" => SortAsc,
-            "<:" => SortDesc,
-            "csv.read" => CsvRead,
-            "csv.write" => CsvWrite,
-            "avg" => Mean,
-            "med" => Median,
-            "sd" => StdDev,
-            "@:" => Map,
-            "!" => Execute,
-            "io.print" => IoPrint,
-            "io.read" => IoRead,
-            "io.write" => IoWrite,
-            "io.exists" => IoExists,
-            "math.div" => CheckedDiv,
-            "^/" => Sqrt,
-            "?1" => Present,
-            "?0" => Absent,
-            "?+" => Has,
-            "?!" => Unwrap,
-            "??" => Default,
-            ":n" => ToNatural,
-            ":z" => ToInteger,
-            ":q" => ToRational,
-            ":r" => ToReal,
-            _ => return None,
-        })
+        crate::builtins::lookup(name).and_then(|builtin| builtin.op)
     }
 }
 
@@ -187,7 +143,7 @@ pub struct ExprNode {
     pub span: Span,
     pub ty: Type,
     pub table_schema: Option<Rc<TableSchema>>,
-    /// Resolved pointwise plan for direct calls; indirect references are not specialized.
+    /// Resolved pointwise plan for direct calls; checked callable instances supply indirect plans.
     pub lift_mode: Option<LiftMode>,
     /// Zonked callable signature from the checker at a direct named use.
     pub callee_type: Option<Type>,
@@ -300,6 +256,7 @@ pub enum ExprKind {
 pub struct HirProgram {
     pub arena: Vec<ExprNode>,
     pub constructors: HashMap<SymbolId, ConstructorDef>,
+    nominal_schemas: HashMap<NominalId, Rc<TableSchema>>,
     standard_constructors: HashMap<(String, String), SymbolId>,
     /// Dependency order. All function symbols in a group are introduced before any initializer.
     pub groups: Vec<Vec<Definition>>,
@@ -310,6 +267,23 @@ impl HirProgram {
         self.standard_constructors
             .get(&(owner.to_owned(), name.to_owned()))
             .copied()
+    }
+    /// Layout witness for a checked callable instance, independent of row values.
+    pub(crate) fn instance_schema(&self, ty: &Type) -> Option<Rc<TableSchema>> {
+        match ty {
+            Type::Action(out) | Type::Result(out, _) | Type::Fun(_, out) => {
+                self.instance_schema(out)
+            }
+            Type::Table(row) => match row.as_ref() {
+                Type::Record(row) if row.tail.is_none() => {
+                    Some(Rc::new(TableSchema::Named(row.fields.clone())))
+                }
+                Type::Tuple(fields) => Some(Rc::new(TableSchema::Positional(fields.clone()))),
+                Type::Nominal(id) => self.nominal_schemas.get(id).cloned(),
+                _ => None,
+            },
+            _ => None,
+        }
     }
     pub fn node(&self, id: ExprId) -> &ExprNode {
         &self.arena[id.0]
@@ -444,6 +418,11 @@ pub fn lower(
     Ok(HirProgram {
         arena: lower.arena,
         constructors,
+        nominal_schemas: inference
+            .schemas
+            .iter()
+            .map(|(id, row)| (id.clone(), Rc::new(TableSchema::Named(row.fields.clone()))))
+            .collect(),
         standard_constructors: resolution
             .standard_constructors()
             .map(|(owner, name, id)| ((owner.to_owned(), name.to_owned()), id))

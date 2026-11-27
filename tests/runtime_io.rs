@@ -43,8 +43,7 @@ unused := io.read "must-not-read";
     let mut output = Vec::new();
     let failure = prepared
         .run_with_io(&mut input, &mut output)
-        .err()
-        .expect("execution should fail");
+        .expect_err("execution should fail");
     assert_eq!(input.paths, ["virtual/input"]);
     assert_eq!(output, b"hello\n");
     assert!(failure.message.contains("R0101") && failure.message.contains("finish"));
@@ -80,7 +79,6 @@ err :: { | sink s; };
     let prepared = prepare(&program, Mode::Script, Policy::TypedOnly).unwrap();
     let error = prepared
         .run_with_output(&mut ClosedOutput)
-        .err()
-        .expect("execution should fail");
+        .expect_err("execution should fail");
     assert!(error.message.contains("sink stdout"), "{}", error.message);
 }

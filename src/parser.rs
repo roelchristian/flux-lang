@@ -24,8 +24,8 @@ pub enum Stmt {
     Def {
         name: String,
         params: Vec<String>,
-        param_types: Vec<Option<String>>,
-        result_type: Option<String>,
+        param_types: Vec<Option<TypeAnnotation>>,
+        result_type: Option<TypeAnnotation>,
         body: Expr,
         start: usize,
     },
@@ -36,7 +36,7 @@ pub enum Stmt {
     },
     Schema {
         name: String,
-        fields: Vec<(String, String)>,
+        fields: Vec<(String, TypeAnnotation)>,
         start: usize,
     },
     Effect {
@@ -48,7 +48,7 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variant {
     pub name: String,
-    pub payload: Vec<String>,
+    pub payload: Vec<TypeAnnotation>,
     pub start: usize,
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -76,7 +76,7 @@ pub enum Expr {
     Array(Vec<Expr>),
     Cases(Vec<(Expr, Expr)>, Box<Expr>),
     Lambda(Vec<String>, Box<Expr>),
-    TypedLambda(Vec<String>, Vec<Option<String>>, Box<Expr>),
+    TypedLambda(Vec<String>, Vec<Option<TypeAnnotation>>, Box<Expr>),
     Pipeline(Vec<Expr>),
     Record(Vec<(String, Expr)>),
     Block(Vec<Stmt>, Option<Box<Expr>>),
@@ -88,6 +88,300 @@ pub enum Expr {
     Num(String),
     Char(char),
     NamedRecord(String, Vec<(String, Expr)>),
+}
+
+/// Canonical, syntax-only annotation with a half-open source byte range.
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct TypeAnnotation {
+    pub kind: TypeAnnotationKind,
+    pub span: Range<usize>,
+    source: String,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypePrimitive {
+    N,
+    Z,
+    Q,
+    D,
+    R,
+    S,
+    B,
+    C,
+    Unit,
+}
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub enum TypeAnnotationKind {
+    Primitive(TypePrimitive),
+    Named(String),
+    Variable(String),
+    Hole,
+    Optional(Box<TypeAnnotation>),
+    Action(Box<TypeAnnotation>),
+    Table(Box<TypeAnnotation>),
+    PositionalTable(Vec<TypeAnnotation>),
+    Sequence(Box<TypeAnnotation>),
+    Tuple(Vec<TypeAnnotation>),
+    Dictionary(Box<TypeAnnotation>, Box<TypeAnnotation>),
+    Record(Vec<(String, TypeAnnotation)>),
+    Result(Box<TypeAnnotation>, Box<TypeAnnotation>),
+    Function(Vec<TypeAnnotation>, Box<TypeAnnotation>),
+}
+impl TypeAnnotation {
+    /// Normalized token spelling for the legacy oracle only.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+impl std::ops::Deref for TypeAnnotation {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        self.source()
+    }
+}
+impl std::fmt::Display for TypeAnnotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.source())
+    }
+}
+
+/// Standalone type syntax for static library metadata. Program annotations
+/// consume their original tokens directly and retain program-relative spans.
+pub fn parse_type_annotation(source: &str) -> PResult<TypeAnnotation> {
+    let tokens = lex(source)?;
+    annotation_tokens(&tokens, source.len())
+}
+
+fn annotation_tokens(input: &[Token], end: usize) -> PResult<TypeAnnotation> {
+    let mut ts: Vec<Token> = Vec::with_capacity(input.len());
+    for token in input {
+        // Punctuation which is compound in expressions is separate in types.
+        let words: &[&str] = match token.text.as_str() {
+            "^?" => &["^", "?"],
+            "^{" => &["^", "{"],
+            "!{" => &["!", "{"],
+            "?{" => &["?", "{"],
+            ":#" => &[":", "#"],
+            _ => &[],
+        };
+        if words.is_empty() {
+            if token.text == "["
+                && ts
+                    .last()
+                    .is_some_and(|t| t.text == "#" && t.end == token.start)
+            {
+                let t = ts.last_mut().unwrap();
+                t.text.push('[');
+                t.end = token.end;
+            } else {
+                ts.push(token.clone());
+            }
+        } else {
+            let mut start = token.start;
+            for &word in words {
+                ts.push(Token {
+                    text: word.to_owned(),
+                    start,
+                    end: start + word.len(),
+                });
+                start += word.len();
+            }
+        }
+    }
+    let mut p = AnnotationParser {
+        t: &ts,
+        i: 0,
+        eof: end,
+        depth: 0,
+    };
+    let ty = p.arrow(&[])?;
+    if p.i != ts.len() {
+        return p.err("trailing type annotation tokens");
+    }
+    Ok(ty)
+}
+
+struct AnnotationParser<'a> {
+    t: &'a [Token],
+    i: usize,
+    eof: usize,
+    depth: usize,
+}
+impl AnnotationParser<'_> {
+    fn peek(&self) -> &str {
+        self.t.get(self.i).map_or("", |t| t.text.as_str())
+    }
+    fn err<T>(&self, m: impl Into<String>) -> PResult<T> {
+        Err(Error::new(
+            self.t.get(self.i).map_or(self.eof, |t| t.start),
+            m,
+        ))
+    }
+    fn eat(&mut self, s: &str) -> bool {
+        if self.peek() == s {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+    fn expect(&mut self, s: &str) -> PResult<()> {
+        if self.eat(s) {
+            Ok(())
+        } else {
+            self.err(format!("expected `{s}` in type annotation"))
+        }
+    }
+    fn node(&self, start: usize, kind: TypeAnnotationKind) -> TypeAnnotation {
+        let ts = &self.t[start..self.i];
+        TypeAnnotation {
+            kind,
+            span: ts[0].start..ts[ts.len() - 1].end,
+            source: ts
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        if self.depth >= 128 {
+            return self.err("type annotation depth limit exceeded");
+        }
+        self.depth += 1;
+        let r = f(self);
+        self.depth -= 1;
+        r
+    }
+    fn arrow(&mut self, ends: &[&str]) -> PResult<TypeAnnotation> {
+        self.nested(|p| {
+            let start = p.i;
+            let mut args = vec![p.result()?];
+            while !p.peek().is_empty() && !ends.contains(&p.peek()) {
+                if p.eat("->") {
+                    let rhs = p.arrow(ends)?;
+                    return Ok(p.node(start, TypeAnnotationKind::Function(args, Box::new(rhs))));
+                }
+                args.push(p.result()?);
+            }
+            if args.len() == 1 {
+                Ok(args.remove(0))
+            } else {
+                p.err("multiple type components need an arrow")
+            }
+        })
+    }
+    fn result(&mut self) -> PResult<TypeAnnotation> {
+        let start = self.i;
+        let lhs = self.atom()?;
+        if !self.eat("^") {
+            return Ok(lhs);
+        }
+        let rhs = self.atom()?;
+        if self.peek() == "^" {
+            return self.err("result caret chains need explicit parentheses");
+        }
+        Ok(self.node(
+            start,
+            TypeAnnotationKind::Result(Box::new(lhs), Box::new(rhs)),
+        ))
+    }
+    fn atom(&mut self) -> PResult<TypeAnnotation> {
+        self.nested(Self::atom_impl)
+    }
+    fn atom_impl(&mut self) -> PResult<TypeAnnotation> {
+        use TypeAnnotationKind::*;
+        let start = self.i;
+        let token = self.peek().to_owned();
+        if token.is_empty() {
+            return self.err("expected a type");
+        }
+        self.i += 1;
+        let kind = match token.as_str() {
+            "n" => Primitive(TypePrimitive::N),
+            "z" => Primitive(TypePrimitive::Z),
+            "q" => Primitive(TypePrimitive::Q),
+            "d" => Primitive(TypePrimitive::D),
+            "r" => Primitive(TypePrimitive::R),
+            "s" => Primitive(TypePrimitive::S),
+            "b" => Primitive(TypePrimitive::B),
+            "c" => Primitive(TypePrimitive::C),
+            "_" => Hole,
+            "?" => Optional(Box::new(self.atom()?)),
+            "!" => Action(Box::new(self.atom()?)),
+            "#" => Table(Box::new(self.atom()?)),
+            "[" => {
+                let v = self.arrow(&["]"])?;
+                self.expect("]")?;
+                Sequence(Box::new(v))
+            }
+            "#[" => {
+                let mut fields = Vec::new();
+                while !self.eat("]") {
+                    fields.push(self.result()?);
+                    self.eat(",");
+                }
+                PositionalTable(fields)
+            }
+            "(" => {
+                if self.eat(")") {
+                    Primitive(TypePrimitive::Unit)
+                } else {
+                    let first = self.arrow(&[",", ")"])?;
+                    if self.eat(")") {
+                        return Ok(self.node(start, first.kind));
+                    }
+                    self.expect(",")?;
+                    let mut fields = vec![first];
+                    loop {
+                        fields.push(self.arrow(&[",", ")"])?);
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                    self.expect(")")?;
+                    Tuple(fields)
+                }
+            }
+            "{" => {
+                let k = self.arrow(&[":"])?;
+                self.expect(":")?;
+                let v = self.arrow(&["}"])?;
+                self.expect("}")?;
+                Dictionary(Box::new(k), Box::new(v))
+            }
+            ".{" => {
+                let mut fields = Vec::new();
+                let mut seen = HashSet::new();
+                while !self.eat("}") {
+                    let name = self.peek().to_owned();
+                    if matches!(name.as_str(), "|" | "..") {
+                        return self.err("explicit open-row annotations are not supported; infer the row from field use");
+                    }
+                    if !is_ident(&name) {
+                        return self.err("expected field name in structural record type");
+                    }
+                    if !seen.insert(name.clone()) {
+                        return self.err(format!("duplicate field {name}"));
+                    }
+                    self.i += 1;
+                    self.expect(":")?;
+                    let value = self.arrow(&[";", "}", "|", ".."])?;
+                    fields.push((name, value));
+                    if !self.eat(";") && !matches!(self.peek(), "}" | "|" | "..") {
+                        return self.err("expected ; or } in record type");
+                    }
+                }
+                Record(fields)
+            }
+            name if name.strip_prefix('\'').is_some_and(is_ident) => Variable(name.to_owned()),
+            name if is_ident(name) => Named(name.to_owned()),
+            _ => {
+                self.i = start;
+                return self.err(format!("unexpected token `{token}` in type annotation"));
+            }
+        };
+        Ok(self.node(start, kind))
+    }
 }
 
 // Post-order traversal mirrors the parser's expression completion order.
@@ -626,7 +920,7 @@ impl Parser {
         // This prototype resolves only bundled interfaces, identified by their stem.
         Ok((stem.to_owned(), alias, t.start))
     }
-    fn ty_until(&mut self, ends: &[&str]) -> PResult<String> {
+    fn type_tokens_until(&mut self, ends: &[&str]) -> PResult<Vec<Token>> {
         let start = self.pos;
         if let Some(j) = self.find(start, ends, &[";", "|", ":="]) {
             if start == j {
@@ -636,35 +930,26 @@ impl Parser {
         } else {
             return self.err("expected a type followed by its delimiter");
         }
-        Ok(self.toks[start..self.pos]
-            .iter()
-            .map(|t| match t.text.as_str() {
-                "^?" => "^ ?",
-                "^{" => "^ {",
-                x => x,
-            })
-            .collect::<Vec<_>>()
-            .join(" "))
+        Ok(self.toks[start..self.pos].to_vec())
     }
-    // A declaration delimiter directly followed by a table marker shares spelling
-    // with expression operator :#. Resolve it only in grammatical annotation position.
-    fn annotation(&mut self, ends: &[&str]) -> PResult<Option<String>> {
+    fn annotation(&mut self, ends: &[&str]) -> PResult<Option<TypeAnnotation>> {
         if self.eat(":") {
-            return self.ty_until(ends).map(Some);
+            let tokens = self.type_tokens_until(ends)?;
+            return annotation_tokens(&tokens, self.offset()).map(Some);
         }
         if self.eat(":#") {
-            let positional =
-                self.peek() == "[" && self.toks[self.pos - 1].end == self.toks[self.pos].start;
-            let ty = self.ty_until(ends)?;
-            return Ok(Some(if positional {
-                format!("#{}", ty)
-            } else {
-                format!("# {ty}")
-            }));
+            let end = self.toks[self.pos - 1].end;
+            let mut tokens = vec![Token {
+                text: "#".into(),
+                start: end - 1,
+                end,
+            }];
+            tokens.extend(self.type_tokens_until(ends)?);
+            return annotation_tokens(&tokens, self.offset()).map(Some);
         }
         Ok(None)
     }
-    fn parameters(&mut self) -> PResult<(Vec<String>, Vec<Option<String>>)> {
+    fn parameters(&mut self) -> PResult<(Vec<String>, Vec<Option<TypeAnnotation>>)> {
         self.expect("(")?;
         let mut names = Vec::new();
         let mut types = Vec::new();
@@ -717,17 +1002,8 @@ impl Parser {
                     "expected a constructor payload type or `;`",
                 ));
             }
-            payload.push(
-                self.toks[a..j]
-                    .iter()
-                    .map(|t| match t.text.as_str() {
-                        "^?" => "^ ?",
-                        "^{" => "^ {",
-                        x => x,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
+            let end = self.toks.get(j).map_or(self.eof, |t| t.start);
+            payload.push(annotation_tokens(&self.toks[a..j], end)?);
         }
         Ok((
             Variant {
@@ -1372,5 +1648,83 @@ mod tests {
         assert!(parse("x := ^{ 1; };").is_err());
         assert!(parse("x := ^{};").is_err());
         assert!(parse("!{ (); };").is_ok());
+    }
+    #[test]
+    fn annotation_ast_preserves_caret_arrow_precedence() {
+        use TypeAnnotationKind::*;
+        let source = "?q^?err n -> !(q^err) -> [q^err]";
+        let t = parse_type_annotation(source).unwrap();
+        assert_eq!(t.span, 0..source.len());
+        let Function(args, tail) = t.kind else {
+            panic!()
+        };
+        assert_eq!(args.len(), 2);
+        let Result(ok, err) = &args[0].kind else {
+            panic!()
+        };
+        assert_eq!(&source[ok.span.clone()], "?q");
+        assert_eq!(&source[err.span.clone()], "?err");
+        assert!(matches!(ok.kind, Optional(_)));
+        assert!(matches!(err.kind, Optional(_)));
+        let Function(args, ret) = tail.kind else {
+            panic!()
+        };
+        let Action(inner) = &args[0].kind else {
+            panic!()
+        };
+        assert!(matches!(inner.kind, Result(..)));
+        assert_eq!(&source[inner.span.clone()], "(q^err)");
+        let Sequence(inner) = &ret.kind else { panic!() };
+        assert!(matches!(inner.kind, Result(..)));
+        let bad = parse_type_annotation("q^err^e").unwrap_err();
+        assert_eq!(bad.start, 5);
+        assert!(bad.message.contains("parentheses"));
+    }
+
+    #[test]
+    fn declarations_store_canonical_types_with_source_offsets() {
+        use TypeAnnotationKind::*;
+        let source = "row :: { x:q; }; err :: { | bad (q^err); }; f(x,y:'a,g:.[z]):z := 0;";
+        let source = source.replace(".[z]", ".{data:#[z q]; tag:?{s:z};}");
+        let p = parse(&source).unwrap();
+        let Stmt::Schema { fields, .. } = &p.defs[0] else {
+            panic!()
+        };
+        assert_eq!(&source[fields[0].1.span.clone()], "q");
+        let Stmt::Sum { variants, .. } = &p.defs[1] else {
+            panic!()
+        };
+        assert!(matches!(variants[0].payload[0].kind, Result(..)));
+        assert_eq!(&source[variants[0].payload[0].span.clone()], "(q^err)");
+        let Stmt::Def {
+            param_types: ts,
+            result_type: Some(out),
+            ..
+        } = &p.defs[2]
+        else {
+            panic!()
+        };
+        assert_eq!(&source[ts[0].as_ref().unwrap().span.clone()], "'a");
+        assert_eq!(ts[0], ts[1]);
+        let Record(fields) = &ts[2].as_ref().unwrap().kind else {
+            panic!()
+        };
+        assert!(matches!(fields[0].1.kind, PositionalTable(_)));
+        assert_eq!(&source[fields[0].1.span.clone()], "#[z q]");
+        let Optional(inner) = &fields[1].1.kind else {
+            panic!()
+        };
+        assert!(matches!(inner.kind, Dictionary(..)));
+        assert_eq!(&source[out.span.clone()], "z");
+        assert!(matches!(parse_type_annotation("_").unwrap().kind, Hole));
+    }
+
+    #[test]
+    fn malformed_annotation_reports_original_token() {
+        let source = "-- comment
+f(x:q^err^e):q := 0;";
+        let problem = parse(source).unwrap_err();
+        assert_eq!(problem.start, source.rfind('^').unwrap());
+        assert!(problem.message.contains("parentheses"));
     }
 }

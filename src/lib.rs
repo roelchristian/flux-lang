@@ -1,10 +1,74 @@
 //! Reference prototype for the Flux language.
 pub mod builtins;
-pub mod check;
+#[cfg(any(test, feature = "legacy-oracle"))]
+#[allow(dead_code)]
+#[path = "check.rs"]
+mod legacy_check;
+#[cfg(any(test, feature = "legacy-oracle"))]
+#[allow(dead_code)]
+#[path = "eval.rs"]
+mod legacy_eval;
+
+pub mod check {
+    use crate::{
+        parser::Program,
+        semantic::{prepare, Mode, Policy},
+        Error,
+    };
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct Inspection {
+        pub type_name: String,
+        pub schema: Option<String>,
+    }
+
+    pub fn check(program: &Program) -> Result<(), Error> {
+        prepare(program, Mode::Script, Policy::TypedOnly).map(|_| ())
+    }
+
+    pub fn inspect_entry(program: &Program) -> Result<Inspection, Error> {
+        prepare(program, Mode::Inspection, Policy::TypedOnly)?
+            .inspection()
+            .cloned()
+            .ok_or_else(|| Error::new(0, "no expression to inspect"))
+    }
+}
+
+#[cfg(feature = "legacy-oracle")]
+pub mod oracle {
+    pub use crate::legacy_check::check;
+    pub use crate::legacy_eval::{run, Output};
+}
 mod csv;
 pub mod diagnostic;
 mod errors041;
-pub mod eval;
+pub mod eval {
+    use crate::{
+        parser::Program,
+        semantic::{prepare, Mode, Policy},
+        Error,
+    };
+
+    #[derive(Debug)]
+    pub struct Output {
+        pub stdout: String,
+        pub status: u8,
+    }
+
+    #[derive(Debug)]
+    pub struct ReplOutput {
+        pub value: String,
+        pub stdout: String,
+    }
+
+    pub fn run(program: &Program) -> Result<Output, Error> {
+        prepare(program, Mode::Script, Policy::TypedOnly)?.run()
+    }
+
+    pub fn view_entry(program: &Program) -> Result<ReplOutput, Error> {
+        prepare(program, Mode::Inspection, Policy::TypedOnly)?.view()
+    }
+}
 pub mod hir;
 pub mod hir_eval;
 pub mod infer;
@@ -103,7 +167,7 @@ pub fn check_source(source: &str) -> Result<parser::Program, Error> {
     semantic::prepare(
         &program,
         semantic::Mode::Script,
-        semantic::Policy::Compatible,
+        semantic::Policy::TypedOnly,
     )?;
     Ok(program)
 }
@@ -113,7 +177,7 @@ pub fn run_source(source: &str) -> Result<eval::Output, Error> {
     semantic::prepare(
         &program,
         semantic::Mode::Script,
-        semantic::Policy::Compatible,
+        semantic::Policy::TypedOnly,
     )?
     .run()
 }

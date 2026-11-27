@@ -1,5 +1,8 @@
 //! Shared identities, visibility, arity and behavior classification for Flux primitives.
 //! Availability describes implemented runtime signatures, not just recognized spellings.
+use crate::hir::CoreOp;
+use std::sync::LazyLock;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Availability {
     Runtime,
@@ -87,6 +90,7 @@ pub const fn promote(a: Numeric, b: Numeric) -> Option<Numeric> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Builtin {
     pub canonical: &'static str,
+    pub op: Option<CoreOp>,
     pub aliases: &'static [&'static str],
     pub arity: usize,
     pub effect: Effect,
@@ -103,12 +107,13 @@ use Equality::{NotRequired, Tolerance};
 use Shape::{Collection, Dependent, Elementwise, Reduction, Scalar};
 
 macro_rules! pure {
-    ($name:literal, $arity:literal, $rule:ident, $shape:expr) => {
-        pure!($name, $arity, $rule, $shape, NotRequired, Runtime, &[])
+    ($op:expr, $name:literal, $arity:literal, $rule:ident, $shape:expr) => {
+        pure!($op, $name, $arity, $rule, $shape, NotRequired, Runtime, &[])
     };
-    ($name:literal, $arity:literal, $rule:ident, $shape:expr, $eq:expr, $avail:expr, $aliases:expr) => {
+    ($op:expr, $name:literal, $arity:literal, $rule:ident, $shape:expr, $eq:expr, $avail:expr, $aliases:expr) => {
         Builtin {
             canonical: $name,
+            op: $op,
             aliases: $aliases,
             arity: $arity,
             effect: Pure,
@@ -122,9 +127,10 @@ macro_rules! pure {
 }
 
 macro_rules! internal {
-    ($name:literal, $arity:literal, $rule:ident, $shape:expr, $effect:expr, $avail:expr, $aliases:expr) => {
+    ($op:expr, $name:literal, $arity:literal, $rule:ident, $shape:expr, $effect:expr, $avail:expr, $aliases:expr) => {
         Builtin {
             canonical: $name,
+            op: $op,
             aliases: $aliases,
             arity: $arity,
             effect: $effect,
@@ -139,22 +145,44 @@ macro_rules! internal {
 
 /// Registry of exact names; selectors such as .field are generated forms, not entries.
 pub static REGISTRY: &[Builtin] = &[
-    pure!("+", 2, Arithmetic, Elementwise),
-    pure!("-", 2, Arithmetic, Elementwise),
-    pure!("*", 2, Arithmetic, Elementwise),
-    pure!("/", 2, Division, Elementwise),
-    internal!("math.div", 2, Division, Scalar, Pure, Runtime, &[]),
-    pure!("//", 2, IntegralArithmetic, Elementwise),
-    pure!("%", 2, IntegralArithmetic, Elementwise),
-    pure!("^", 2, Power, Elementwise),
-    pure!("-:", 1, Negation, Elementwise),
-    pure!("^/", 1, SquareRoot, Elementwise),
-    pure!("|", 1, Arithmetic, Elementwise),
-    pure!("<", 2, Order, Elementwise),
-    pure!("<=", 2, Order, Elementwise),
-    pure!(">", 2, Order, Elementwise),
-    pure!(">=", 2, Order, Elementwise),
+    pure!(Some(CoreOp::Add), "+", 2, Arithmetic, Elementwise),
+    pure!(Some(CoreOp::Sub), "-", 2, Arithmetic, Elementwise),
+    pure!(Some(CoreOp::Mul), "*", 2, Arithmetic, Elementwise),
+    pure!(Some(CoreOp::Div), "/", 2, Division, Elementwise),
+    internal!(
+        Some(CoreOp::CheckedDiv),
+        "math.div",
+        2,
+        Division,
+        Scalar,
+        Pure,
+        Runtime,
+        &[]
+    ),
     pure!(
+        Some(CoreOp::Quotient),
+        "//",
+        2,
+        IntegralArithmetic,
+        Elementwise
+    ),
+    pure!(
+        Some(CoreOp::Remainder),
+        "%",
+        2,
+        IntegralArithmetic,
+        Elementwise
+    ),
+    pure!(Some(CoreOp::Pow), "^", 2, Power, Elementwise),
+    pure!(Some(CoreOp::Negate), "-:", 1, Negation, Elementwise),
+    pure!(Some(CoreOp::Sqrt), "^/", 1, SquareRoot, Elementwise),
+    pure!(Some(CoreOp::Abs), "|", 1, Arithmetic, Elementwise),
+    pure!(Some(CoreOp::Lt), "<", 2, Order, Elementwise),
+    pure!(Some(CoreOp::Le), "<=", 2, Order, Elementwise),
+    pure!(Some(CoreOp::Gt), ">", 2, Order, Elementwise),
+    pure!(Some(CoreOp::Ge), ">=", 2, Order, Elementwise),
+    pure!(
+        Some(CoreOp::Equal),
         "=",
         2,
         Equality,
@@ -164,6 +192,7 @@ pub static REGISTRY: &[Builtin] = &[
         &[]
     ),
     pure!(
+        Some(CoreOp::NotEqual),
         "/=",
         2,
         Equality,
@@ -173,6 +202,7 @@ pub static REGISTRY: &[Builtin] = &[
         &[]
     ),
     pure!(
+        Some(CoreOp::EqualWhole),
         "==",
         2,
         StructuralEquality,
@@ -182,6 +212,7 @@ pub static REGISTRY: &[Builtin] = &[
         &[]
     ),
     pure!(
+        None,
         "~=",
         3,
         ApproxEquality,
@@ -190,16 +221,17 @@ pub static REGISTRY: &[Builtin] = &[
         Recognized,
         &[]
     ),
-    pure!("~", 1, Boolean, Elementwise),
-    pure!("&&", 2, Boolean, Elementwise),
-    pure!("||", 2, Boolean, Elementwise),
-    pure!("#", 1, Cardinality, Reduction),
-    pure!("..", 2, Range, Collection),
-    pure!("@", 2, Apply, Dependent),
-    pure!("@@", 2, Apply, Dependent),
-    pure!("@:", 2, Map, Collection),
-    pure!("?:", 2, Filter, Collection),
+    pure!(Some(CoreOp::Not), "~", 1, Boolean, Elementwise),
+    pure!(Some(CoreOp::And), "&&", 2, Boolean, Elementwise),
+    pure!(Some(CoreOp::Or), "||", 2, Boolean, Elementwise),
+    pure!(Some(CoreOp::Count), "#", 1, Cardinality, Reduction),
+    pure!(Some(CoreOp::Range), "..", 2, Range, Collection),
+    pure!(Some(CoreOp::Apply), "@", 2, Apply, Dependent),
+    pure!(Some(CoreOp::ApplyTuple), "@@", 2, Apply, Dependent),
+    pure!(Some(CoreOp::Map), "@:", 2, Map, Collection),
+    pure!(Some(CoreOp::Filter), "?:", 2, Filter, Collection),
     pure!(
+        Some(CoreOp::Group),
         "=:",
         2,
         Group,
@@ -208,12 +240,13 @@ pub static REGISTRY: &[Builtin] = &[
         Runtime,
         &[]
     ),
-    pure!(">:", 2, Sort, Collection),
-    pure!("<:", 2, Sort, Collection),
-    pure!("+:", 2, Concat, Collection),
-    pure!("&:", 2, Household, Collection),
-    pure!("*:", 2, Household, Collection),
+    pure!(Some(CoreOp::SortAsc), ">:", 2, Sort, Collection),
+    pure!(Some(CoreOp::SortDesc), "<:", 2, Sort, Collection),
+    pure!(Some(CoreOp::Concat), "+:", 2, Concat, Collection),
+    pure!(Some(CoreOp::Zip), "&:", 2, Household, Collection),
+    pure!(Some(CoreOp::Cartesian), "*:", 2, Household, Collection),
     pure!(
+        Some(CoreOp::Distinct),
         "=.",
         1,
         Household,
@@ -223,6 +256,7 @@ pub static REGISTRY: &[Builtin] = &[
         &[]
     ),
     pure!(
+        Some(CoreOp::Lookup),
         ".:",
         2,
         Lookup,
@@ -231,16 +265,17 @@ pub static REGISTRY: &[Builtin] = &[
         Runtime,
         &[]
     ),
-    pure!("[:", 2, Household, Collection),
-    pure!("/:", 3, Fold, Reduction),
-    pure!("\\:", 3, Fold, Collection),
-    pure!("+/", 1, Reduction, Reduction),
-    pure!("*/", 1, Reduction, Reduction),
-    pure!("&&/", 1, Reduction, Reduction),
-    pure!("||/", 1, Reduction, Reduction),
-    pure!(">/", 1, Reduction, Reduction),
-    pure!("</", 1, Reduction, Reduction),
+    pure!(Some(CoreOp::Take), "[:", 2, Household, Collection),
+    pure!(Some(CoreOp::Fold), "/:", 3, Fold, Reduction),
+    pure!(Some(CoreOp::Scan), "\\:", 3, Fold, Collection),
+    pure!(Some(CoreOp::Sum), "+/", 1, Reduction, Reduction),
+    pure!(Some(CoreOp::Product), "*/", 1, Reduction, Reduction),
+    pure!(Some(CoreOp::All), "&&/", 1, Reduction, Reduction),
+    pure!(Some(CoreOp::Any), "||/", 1, Reduction, Reduction),
+    pure!(Some(CoreOp::Max), ">/", 1, Reduction, Reduction),
+    pure!(Some(CoreOp::Min), "</", 1, Reduction, Reduction),
     pure!(
+        Some(CoreOp::Mean),
         "avg",
         1,
         Statistics,
@@ -255,6 +290,7 @@ pub static REGISTRY: &[Builtin] = &[
         ]
     ),
     pure!(
+        Some(CoreOp::Percentile),
         "pct",
         2,
         Statistics,
@@ -264,6 +300,7 @@ pub static REGISTRY: &[Builtin] = &[
         &["statistics.pct", "stats.pct"]
     ),
     pure!(
+        Some(CoreOp::StdDev),
         "sd",
         1,
         Statistics,
@@ -273,6 +310,7 @@ pub static REGISTRY: &[Builtin] = &[
         &["statistics.sd", "stats.sd"]
     ),
     pure!(
+        None,
         "cor",
         2,
         Statistics,
@@ -281,13 +319,14 @@ pub static REGISTRY: &[Builtin] = &[
         Recognized,
         &["statistics.cor", "stats.cor"]
     ),
-    pure!("take", 2, Household, Collection),
-    pure!("drop", 2, Household, Collection),
-    pure!("slice", 3, Household, Collection),
-    pure!("rev", 1, Household, Collection),
-    pure!("flat", 1, Household, Collection),
-    pure!("tr", 1, Household, Collection),
+    pure!(Some(CoreOp::Take), "take", 2, Household, Collection),
+    pure!(Some(CoreOp::Drop), "drop", 2, Household, Collection),
+    pure!(Some(CoreOp::Slice), "slice", 3, Household, Collection),
+    pure!(Some(CoreOp::Reverse), "rev", 1, Household, Collection),
+    pure!(Some(CoreOp::Flatten), "flat", 1, Household, Collection),
+    pure!(Some(CoreOp::Transpose), "tr", 1, Household, Collection),
     pure!(
+        Some(CoreOp::Median),
         "med",
         1,
         Statistics,
@@ -297,6 +336,7 @@ pub static REGISTRY: &[Builtin] = &[
         &["statistics.med", "stats.med"]
     ),
     pure!(
+        Some(CoreOp::Variance),
         "var",
         1,
         Statistics,
@@ -305,14 +345,15 @@ pub static REGISTRY: &[Builtin] = &[
         Runtime,
         &["statistics.var", "stats.var"]
     ),
-    pure!("?0", 0, Optional, Scalar),
-    pure!("?1", 1, Optional, Dependent),
-    pure!("?+", 1, Optional, Scalar),
-    pure!("??", 2, Optional, Dependent),
-    pure!("?!", 1, Optional, Dependent),
-    pure!("#:", 1, Table, Collection),
-    pure!(":#", 1, Table, Collection),
+    pure!(Some(CoreOp::Absent), "?0", 0, Optional, Scalar),
+    pure!(Some(CoreOp::Present), "?1", 1, Optional, Dependent),
+    pure!(Some(CoreOp::Has), "?+", 1, Optional, Scalar),
+    pure!(Some(CoreOp::Default), "??", 2, Optional, Dependent),
+    pure!(Some(CoreOp::Unwrap), "?!", 1, Optional, Dependent),
+    pure!(Some(CoreOp::TableFrom), "#:", 1, Table, Collection),
+    pure!(Some(CoreOp::Rows), ":#", 1, Table, Collection),
     pure!(
+        None,
         "*=",
         4,
         Table,
@@ -322,6 +363,7 @@ pub static REGISTRY: &[Builtin] = &[
         &[]
     ),
     pure!(
+        None,
         "*?",
         4,
         Table,
@@ -330,14 +372,78 @@ pub static REGISTRY: &[Builtin] = &[
         Recognized,
         &[]
     ),
-    internal!("!", 1, Effect, Dependent, ExecuteAction, Runtime, &[]),
-    internal!("#[", 1, Table, Collection, Pure, Runtime, &[]),
-    internal!(":n", 1, Conversion, Elementwise, Pure, Runtime, &[]),
-    internal!(":z", 1, Conversion, Elementwise, Pure, Runtime, &[]),
-    internal!(":q", 1, Conversion, Elementwise, Pure, Runtime, &[]),
-    internal!(":d", 1, Conversion, Elementwise, Pure, Recognized, &[]),
-    internal!(":r", 1, Conversion, Elementwise, Pure, Runtime, &[]),
     internal!(
+        Some(CoreOp::Execute),
+        "!",
+        1,
+        Effect,
+        Dependent,
+        ExecuteAction,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::TableRows),
+        "#[",
+        1,
+        Table,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ToNatural),
+        ":n",
+        1,
+        Conversion,
+        Elementwise,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ToInteger),
+        ":z",
+        1,
+        Conversion,
+        Elementwise,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ToRational),
+        ":q",
+        1,
+        Conversion,
+        Elementwise,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        None,
+        ":d",
+        1,
+        Conversion,
+        Elementwise,
+        Pure,
+        Recognized,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ToReal),
+        ":r",
+        1,
+        Conversion,
+        Elementwise,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::IoPrint),
         "io.print",
         1,
         Effect,
@@ -347,6 +453,7 @@ pub static REGISTRY: &[Builtin] = &[
         &["io.println"]
     ),
     internal!(
+        Some(CoreOp::IoRead),
         "io.read",
         1,
         Effect,
@@ -356,6 +463,7 @@ pub static REGISTRY: &[Builtin] = &[
         &[]
     ),
     internal!(
+        Some(CoreOp::IoWrite),
         "io.write",
         2,
         Effect,
@@ -365,6 +473,7 @@ pub static REGISTRY: &[Builtin] = &[
         &[]
     ),
     internal!(
+        Some(CoreOp::IoExists),
         "io.exists",
         1,
         Effect,
@@ -374,6 +483,7 @@ pub static REGISTRY: &[Builtin] = &[
         &[]
     ),
     internal!(
+        Some(CoreOp::CsvRead),
         "csv.read",
         1,
         Effect,
@@ -383,6 +493,7 @@ pub static REGISTRY: &[Builtin] = &[
         &["io.read_csv"]
     ),
     internal!(
+        Some(CoreOp::CsvWrite),
         "csv.write",
         2,
         Effect,
@@ -392,6 +503,7 @@ pub static REGISTRY: &[Builtin] = &[
         &["io.write_csv"]
     ),
     internal!(
+        Some(CoreOp::Aggregate),
         "df.agg",
         3,
         Table,
@@ -401,6 +513,7 @@ pub static REGISTRY: &[Builtin] = &[
         &["table.agg"]
     ),
     internal!(
+        Some(CoreOp::Extend),
         "df.extend",
         2,
         Table,
@@ -410,6 +523,26 @@ pub static REGISTRY: &[Builtin] = &[
         &["table.extend"]
     ),
 ];
+
+// Indexed by the operation discriminant; aliases share the same execution contract.
+static OPERATIONS: LazyLock<[Option<&'static Builtin>; 128]> = LazyLock::new(|| {
+    let mut operations: [Option<&'static Builtin>; 128] = [None; 128];
+    for meta in REGISTRY {
+        if let Some(op) = meta.op {
+            let slot = &mut operations[op as usize];
+            if let Some(other) = slot {
+                assert_eq!(meta.arity, other.arity, "arity differs for builtin alias");
+            } else {
+                *slot = Some(meta);
+            }
+        }
+    }
+    operations
+});
+
+pub fn for_operation(op: CoreOp) -> Option<&'static Builtin> {
+    OPERATIONS[op as usize]
+}
 
 pub fn lookup(name: &str) -> Option<&'static Builtin> {
     REGISTRY

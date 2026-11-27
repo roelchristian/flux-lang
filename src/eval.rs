@@ -1,10 +1,21 @@
 //! Reference evaluator. Exact arithmetic is checked and bounded by i128.
 use crate::{
-    parser::{Expr, Program, Stmt},
+    parser::{Expr, Program, Stmt, TypeAnnotation},
     Error,
 };
 use std::{cmp::Ordering, collections::HashMap, rc::Rc};
 
+fn annotations(ts: &[Option<TypeAnnotation>]) -> Vec<Option<String>> {
+    ts.iter()
+        .map(|t| t.as_ref().map(|t| t.source().to_owned()))
+        .collect()
+}
+fn schema_annotations(fields: &[(String, TypeAnnotation)]) -> Vec<(String, String)> {
+    fields
+        .iter()
+        .map(|(n, t)| (n.clone(), t.source().to_owned()))
+        .collect()
+}
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Kind {
     N,
@@ -732,7 +743,7 @@ impl Engine {
             Expr::TypedLambda(params, types, b) => Ok(V::Fn(Fun {
                 code: Code::User {
                     params: params.clone(),
-                    types: types.clone(),
+                    types: annotations(types),
                     result: None,
                     body: Rc::new((**b).clone()),
                     env,
@@ -813,8 +824,8 @@ impl Engine {
             V::Fn(Fun {
                 code: Code::User {
                     params: params.clone(),
-                    types: param_types.clone(),
-                    result: result_type.clone(),
+                    types: annotations(param_types),
+                    result: result_type.as_ref().map(|t| t.source().to_owned()),
                     body: Rc::new(body.clone()),
                     env,
                 },
@@ -835,7 +846,7 @@ impl Engine {
             if let Stmt::Schema { name, fields, .. } = s {
                 self.frames[scope]
                     .schemas
-                    .insert(name.clone(), fields.clone());
+                    .insert(name.clone(), schema_annotations(fields));
             }
         }
         let mut env = scope;
@@ -1795,7 +1806,7 @@ fn evaluate_program(program: &Program) -> Result<(String, V), Error> {
                     name.clone(),
                     Binding::Pending {
                         body: Rc::new(body.clone()),
-                        ty: result_type.clone(),
+                        ty: result_type.as_ref().map(|t| t.source().to_owned()),
                         env: 0,
                     },
                 );
@@ -1808,7 +1819,9 @@ fn evaluate_program(program: &Program) -> Result<(String, V), Error> {
                 return Err(Error::new(*start, "sum declarations require typed HIR"))
             }
             Stmt::Schema { name, fields, .. } => {
-                e.frames[0].schemas.insert(name.clone(), fields.clone());
+                e.frames[0]
+                    .schemas
+                    .insert(name.clone(), schema_annotations(fields));
             }
             Stmt::Effect { start, .. } => {
                 return Err(Error::new(

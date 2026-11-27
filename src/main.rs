@@ -54,7 +54,7 @@ impl Session {
         let diag = |error: flux_lang::Error| error.diagnostic("<repl>", &source);
         let program = parser::parse(&source).map_err(diag)?;
         let prepared =
-            prepare(&program, SemanticMode::Inspection, Policy::Compatible).map_err(diag)?;
+            prepare(&program, SemanticMode::Inspection, Policy::TypedOnly).map_err(diag)?;
         let inspection = prepared
             .inspection()
             .ok_or("missing expression to inspect")?;
@@ -107,7 +107,7 @@ impl Session {
                 "{path}: :load accepts declarations only; run script entries with flux FILE"
             ));
         }
-        prepare(&program, SemanticMode::Script, Policy::Compatible).map_err(diagnostic)?;
+        prepare(&program, SemanticMode::Script, Policy::TypedOnly).map_err(diagnostic)?;
         self.declarations = candidate;
         println!("loaded {path}");
         Ok(())
@@ -123,12 +123,12 @@ impl Session {
         );
         if let Ok(program) = parser::parse(&source) {
             if program.entry.is_none() {
-                prepare(&program, SemanticMode::Script, Policy::Compatible)
+                prepare(&program, SemanticMode::Script, Policy::TypedOnly)
                     .map_err(|e| e.diagnostic("<repl>", &source))?;
                 self.declarations = source;
                 return Ok(());
             }
-            let prepared = prepare(&program, SemanticMode::Script, Policy::Compatible)
+            let prepared = prepare(&program, SemanticMode::Script, Policy::TypedOnly)
                 .map_err(|e| e.diagnostic("<repl>", &source))?;
             prepared
                 .run_with_output(&mut io::stdout())
@@ -238,12 +238,8 @@ fn cli() -> Result<u8, String> {
         "check" | "hir" => {
             let program = parser::parse(&source).map_err(diagnostic)?;
             let strict = mode == "hir";
-            let policy = if strict {
-                Policy::TypedOnly
-            } else {
-                Policy::Compatible
-            };
-            let prepared = prepare(&program, SemanticMode::Script, policy).map_err(diagnostic)?;
+            let prepared =
+                prepare(&program, SemanticMode::Script, Policy::TypedOnly).map_err(diagnostic)?;
             if strict {
                 println!(
                     "{:#?}",
@@ -290,12 +286,7 @@ eval_ns	{}",
                     "{path}: no executable !{{ ... }}; block (try flux check)"
                 ));
             }
-            let policy = if mode == "run-hir" {
-                Policy::TypedOnly
-            } else {
-                Policy::Compatible
-            };
-            let output = prepare(&program, SemanticMode::Script, policy)
+            let output = prepare(&program, SemanticMode::Script, Policy::TypedOnly)
                 .map_err(diagnostic)?
                 .run_with_output(&mut io::stdout())
                 .map_err(diagnostic)?;

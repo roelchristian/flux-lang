@@ -1,6 +1,9 @@
 //! Rank-one inference for the Draft 0.4 checked subset.
 use crate::{
-    parser::{Expr, Program, RecoveryCase, RecoveryPattern, Stmt},
+    parser::{
+        Expr, Program, RecoveryCase, RecoveryPattern, Stmt, TypeAnnotation, TypeAnnotationKind,
+        TypePrimitive,
+    },
     resolve::{Resolution, SymbolId},
     types::{Class, Constraint, InferCtx, NominalId, Prim, Row, Scheme, Type},
 };
@@ -398,175 +401,95 @@ impl Engine<'_> {
         }
         Ok(())
     }
-    fn annotation(&mut self, t: &str, vars: &mut HashMap<String, Type>) -> R<Type> {
-        // Annotations are source token strings; invoke the same maximal-munch lexer.
-        let toks = crate::lexer::lex(t).map_err(|e| self.err(e.message))?;
-        let mut index = 0;
-        let v = self.type_arrow(&toks, &mut index, vars, &[])?;
-        if index != toks.len() {
-            return Err(self.err("trailing type annotation tokens"));
+    fn annotation(&mut self, t: &TypeAnnotation, vars: &mut HashMap<String, Type>) -> R<Type> {
+        let start = self.start;
+        let active = self.active.take();
+        // Program annotations carry authored source positions; standalone library
+        // descriptors are checked by their schema construction call site.
+        if !t.span.is_empty() {
+            self.start = t.span.start;
+            self.active = Some(t.span.clone());
         }
-        Ok(v)
+        let checked = self.annotation_inner(t, vars);
+        self.start = start;
+        self.active = active;
+        checked
     }
-    fn type_arrow(
+    fn annotation_inner(
         &mut self,
-        t: &[crate::lexer::Token],
-        i: &mut usize,
-        v: &mut HashMap<String, Type>,
-        ends: &[&str],
+        t: &TypeAnnotation,
+        vars: &mut HashMap<String, Type>,
     ) -> R<Type> {
-        let next = |i: usize| t.get(i).map(|x| x.text.as_str()).unwrap_or("");
-        let mut args = vec![self.type_result(t, i, v)?];
-        while !next(*i).is_empty() && !ends.contains(&next(*i)) {
-            if next(*i) == "->" {
-                *i += 1;
-                return Ok(function(args.into_iter(), self.type_arrow(t, i, v, ends)?));
+        use TypeAnnotationKind as K;
+        Ok(match &t.kind {
+            K::Primitive(p0) => p(match p0 {
+                TypePrimitive::N => Prim::N,
+                TypePrimitive::Z => Prim::Z,
+                TypePrimitive::Q => Prim::Q,
+                TypePrimitive::D => Prim::D,
+                TypePrimitive::R => Prim::R,
+                TypePrimitive::S => Prim::S,
+                TypePrimitive::B => Prim::B,
+                TypePrimitive::C => Prim::C,
+                TypePrimitive::Unit => Prim::Unit,
+            }),
+            K::Named(name) => Type::Nominal(
+                self.schema_id(name)
+                    .ok_or_else(|| self.err(format!("unknown type {name}")))?
+                    .clone(),
+            ),
+            K::Variable(name) => vars
+                .entry(name.clone())
+                .or_insert_with(|| self.cx.fresh())
+                .clone(),
+            K::Hole => self.cx.fresh(),
+            K::Optional(t) => o(self.annotation(t, vars)?),
+            K::Action(t) => a(self.annotation(t, vars)?),
+            K::Table(t) => Type::Table(b(self.annotation(t, vars)?)),
+            K::PositionalTable(ts) => Type::Table(b(Type::Tuple(
+                ts.iter()
+                    .map(|x| self.annotation(x, vars))
+                    .collect::<R<_>>()?,
+            ))),
+            K::Sequence(t) => s(self.annotation(t, vars)?),
+            K::Tuple(ts) => Type::Tuple(
+                ts.iter()
+                    .map(|x| self.annotation(x, vars))
+                    .collect::<R<_>>()?,
+            ),
+            K::Dictionary(k, v) => {
+                Type::Dict(b(self.annotation(k, vars)?), b(self.annotation(v, vars)?))
             }
-            args.push(self.type_result(t, i, v)?)
-        }
-        if args.len() == 1 {
-            Ok(args.remove(0))
-        } else {
-            Err(self.err("multiple type components need an arrow"))
-        }
-    }
-    fn type_result(
-        &mut self,
-        t: &[crate::lexer::Token],
-        i: &mut usize,
-        v: &mut HashMap<String, Type>,
-    ) -> R<Type> {
-        let lhs = self.type_atom(t, i, v)?;
-        let next = |i: usize| t.get(i).map(|x| x.text.as_str()).unwrap_or("");
-        if next(*i) != "^" {
-            return Ok(lhs);
-        }
-        *i += 1;
-        self.saw_result = true;
-        let rhs = self.type_atom(t, i, v)?;
-        if next(*i) == "^" {
-            return Err(self.err("result caret chains need explicit parentheses"));
-        }
-        Ok(result(lhs, rhs))
-    }
-    fn type_atom(
-        &mut self,
-        t: &[crate::lexer::Token],
-        i: &mut usize,
-        v: &mut HashMap<String, Type>,
-    ) -> R<Type> {
-        let next = |i: usize| t.get(i).map(|x| x.text.as_str()).unwrap_or("");
-        let expect = |i: &mut usize, x: &str| {
-            if next(*i) == x {
-                *i += 1;
-                Ok(())
-            } else {
-                Err(format!("expected {x} in type annotation"))
+            K::Record(fs) => Type::Record(Row {
+                fields: fs
+                    .iter()
+                    .map(|(name, t)| Ok((name.clone(), self.annotation(t, vars)?)))
+                    .collect::<R<_>>()?,
+                tail: None,
+            }),
+            K::Result(ok, err) => {
+                self.saw_result = true;
+                result(self.annotation(ok, vars)?, self.annotation(err, vars)?)
             }
-        };
-        let tok = next(*i);
-        if tok.is_empty() {
-            return Err(self.err("expected a type"));
-        }
-        *i += 1;
-        use Prim::*;
-        Ok(match tok {
-            "n" => p(N),
-            "z" => p(Z),
-            "q" => p(Q),
-            "d" => p(D),
-            "r" => p(R),
-            "s" => p(S),
-            "b" => p(B),
-            "c" => p(C),
-            "_" => self.cx.fresh(),
-            "?" => o(self.type_atom(t, i, v)?),
-            "!" => a(self.type_atom(t, i, v)?),
-            "#" => Type::Table(crate::infer::b(self.type_atom(t, i, v)?)),
-            "[" => {
-                let x = self.type_arrow(t, i, v, &["]"])?;
-                expect(i, "]").map_err(|e| self.err(e))?;
-                s(x)
+            K::Function(xs, y) => {
+                let args = xs
+                    .iter()
+                    .map(|x| self.annotation(x, vars))
+                    .collect::<R<Vec<_>>>()?;
+                function(args.into_iter(), self.annotation(y, vars)?)
             }
-            "#[" => {
-                let mut xs = Vec::new();
-                while next(*i) != "]" {
-                    xs.push(self.type_result(t, i, v)?);
-                    if next(*i) == "," {
-                        *i += 1;
-                    }
-                }
-                *i += 1;
-                Type::Table(crate::infer::b(Type::Tuple(xs)))
-            }
-            "(" => {
-                if next(*i) == ")" {
-                    *i += 1;
-                    p(Unit)
-                } else {
-                    let mut xs = vec![self.type_arrow(t, i, v, &[")", ","])?];
-                    while next(*i) == "," {
-                        *i += 1;
-                        xs.push(self.type_arrow(t, i, v, &[")", ","])?);
-                    }
-                    expect(i, ")").map_err(|e| self.err(e))?;
-                    if xs.len() == 1 {
-                        xs.remove(0)
-                    } else {
-                        Type::Tuple(xs)
-                    }
-                }
-            }
-            "{" => {
-                let k = self.type_arrow(t, i, v, &[":"])?;
-                expect(i, ":").map_err(|e| self.err(e))?;
-                let x = self.type_arrow(t, i, v, &["}"])?;
-                expect(i, "}").map_err(|e| self.err(e))?;
-                Type::Dict(crate::infer::b(k), crate::infer::b(x))
-            }
-            ".{" => {
-                let mut fields = Vec::new();
-                while next(*i) != "}" {
-                    let name = next(*i);
-                    if name == "|" || name == ".." {
-                        return Err(self.err("explicit open-row annotations are not supported; infer the row from field use"));
-                    }
-                    if name.is_empty() {
-                        return Err(self.err("unclosed record type"));
-                    }
-                    *i += 1;
-                    expect(i, ":").map_err(|e| self.err(e))?;
-                    let ty = self.type_arrow(t, i, v, &[";", "}", "|", ".."])?;
-                    if fields.iter().any(|(k, _)| k == name) {
-                        return Err(self.err(format!("duplicate field {name}")));
-                    }
-                    fields.push((name.into(), ty));
-                    if next(*i) == ";" {
-                        *i += 1;
-                    } else if !matches!(next(*i), "}" | "|" | "..") {
-                        return Err(self.err("expected ; or } in record type"));
-                    }
-                }
-                expect(i, "}").map_err(|e| self.err(e))?;
-                Type::Record(Row { fields, tail: None })
-            }
-            x if x.starts_with('\'') => {
-                v.entry(x.into()).or_insert_with(|| self.cx.fresh()).clone()
-            }
-            x if self.schema_id(x).is_some() => Type::Nominal(self.schema_id(x).unwrap().clone()),
-            _ => return Err(self.err(format!("unknown type {tok}"))),
         })
     }
     fn signature(
         &mut self,
         params: &[String],
-        types: &[Option<String>],
-        out: Option<&str>,
+        types: &[Option<TypeAnnotation>],
+        out: Option<&TypeAnnotation>,
     ) -> R<Signature> {
         let mut vars = HashMap::new();
         let mut args = Vec::new();
         for (i, _) in params.iter().enumerate() {
-            args.push(match types.get(i).and_then(Option::as_deref) {
+            args.push(match types.get(i).and_then(Option::as_ref) {
                 Some(t) => self.annotation(t, &mut vars)?,
                 None => self.cx.fresh(),
             })
@@ -614,7 +537,9 @@ impl Engine<'_> {
                         payload.push(if crate::errors041::owner_id(t).is_some() {
                             Self::standard_type(t)
                         } else {
-                            self.annotation(t, &mut HashMap::new())?
+                            let meta = crate::parser::parse_type_annotation(t)
+                                .map_err(|e| self.err(e.message))?;
+                            self.annotation(&meta, &mut HashMap::new())?
                         });
                     }
                     self.result.bindings.insert(
@@ -844,7 +769,7 @@ impl Engine<'_> {
         }
         Ok(if v == Type::Never { Type::Never } else { ok })
     }
-    fn install_schema(&mut self, id: NominalId, fields: &[(String, String)]) -> R<()> {
+    fn install_schema(&mut self, id: NominalId, fields: &[(String, TypeAnnotation)]) -> R<()> {
         let mut row = Row {
             fields: vec![],
             tail: None,
@@ -1513,7 +1438,6 @@ impl Engine<'_> {
         }
     }
     fn builtin_ref(&mut self, n: &str, want: Option<&Type>) -> R<Type> {
-        use Prim::*;
         if fallible_builtin(n) {
             self.saw_result = true;
         }
@@ -1528,54 +1452,64 @@ impl Engine<'_> {
             self.unify(&out, &actual)?;
             return Ok(t);
         }
-        if let Some(w) = want {
-            let t = self.cx.resolve(w);
-            if let Type::Fun(..) = t {
-                let mut cursor = t.clone();
-                let mut args = Vec::new();
-                while let Type::Fun(a, b) = cursor {
-                    args.push(*a);
-                    cursor = *b;
-                }
-                let ret = self.builtin_types(n, &args, Some(&cursor))?;
-                self.unify(&ret, &cursor)?;
-                return Ok(w.clone());
-            }
+        let Some(spec) = crate::builtins::lookup(n) else {
+            return Err(self.unsupported(format!("unknown builtin reference &{n}")));
+        };
+        if spec.op.is_none() || spec.availability != crate::builtins::Availability::Runtime {
+            return Err(self.unsupported(format!(
+                "{} is recognized but not implemented",
+                spec.canonical
+            )));
         }
-        let x = self.cx.fresh();
-        Ok(match n {
-            "+" | "-" | "*" => {
-                self.req(Class::Num, &x)?;
-                f(x.clone(), f(x.clone(), x))
+        if spec.effect == crate::builtins::Effect::ExecuteAction
+            || matches!(spec.canonical, "??" | "@" | "@@")
+        {
+            return Err(self.err(format!(
+                "{} is a special form, not a function reference",
+                spec.canonical
+            )));
+        }
+        let args = (0..spec.arity).map(|_| self.cx.fresh()).collect::<Vec<_>>();
+        let out = self.cx.fresh();
+        let fun = function(args.iter().cloned(), out.clone());
+        if let Some(w) = want {
+            self.unify(&fun, w)?;
+        }
+        let typed_args = args.iter().map(|t| self.cx.resolve(t)).collect::<Vec<_>>();
+        let ret = self.builtin_types(spec.canonical, &typed_args, Some(&out))?;
+        self.unify(&ret, &out)?;
+        Ok(fun)
+    }
+    fn known_callee(&self, env: &Env, e: &Expr) -> bool {
+        match e {
+            Expr::Name(name) | Expr::Ref(name) => {
+                env.contains_key(name) || self.constructor_type(e).is_some()
             }
-            "=" | "/=" | "==" => {
-                self.req(Class::Eq, &x)?;
-                f(x.clone(), f(x, p(B)))
-            }
-            "<" | "<=" | ">" | ">=" => {
-                self.req(Class::Ord, &x)?;
-                f(x.clone(), f(x, p(B)))
-            }
-            "&&" | "||" => f(p(B), f(p(B), p(B))),
-            "?+" => f(o(x), p(B)),
-            "?!" => f(o(x.clone()), x),
-            "io.print" | "io.println" => f(x, a(result(p(Unit), Self::standard_type("ioerr")))),
-            "io.read" => f(p(S), a(result(p(S), Self::standard_type("ioerr")))),
-            "io.exists" => f(p(S), a(result(p(B), Self::standard_type("ioerr")))),
-            "io.write" => f(
-                p(S),
-                f(p(S), a(result(p(Unit), Self::standard_type("ioerr")))),
-            ),
-            "?1" => f(x.clone(), o(x)),
-            "+/" | "*/" => {
-                self.req(Class::Num, &x)?;
-                f(s(x.clone()), x)
-            }
-            _ => {
-                return Err(self.unsupported(format!(
-                    "builtin reference &{n} requires a contextual function type"
-                )))
-            }
+            _ => false,
+        }
+    }
+    fn bundle_arguments(
+        &mut self,
+        env: &Env,
+        callee: &Expr,
+        bundle: &Expr,
+        out: Type,
+        effect: bool,
+    ) -> R<Type> {
+        let tuple = self.expr(env, bundle, None, effect)?;
+        if tuple == Type::Never {
+            self.expr(env, callee, None, effect)?;
+            return Ok(Type::Never);
+        }
+        let Type::Tuple(xs) = self.cx.resolve(&tuple) else {
+            return Err(self.err("@@ requires a tuple bundle"));
+        };
+        let expected = function(xs.into_iter(), out.clone());
+        let callee = self.expr(env, callee, Some(&expected), effect)?;
+        Ok(if callee == Type::Never {
+            Type::Never
+        } else {
+            out
         })
     }
     fn builtin_call(
@@ -1588,8 +1522,22 @@ impl Engine<'_> {
         effect: bool,
     ) -> R<Type> {
         use Prim::*;
-        let canonical = crate::builtins::lookup(n).map_or(n, |b| b.canonical);
-        let n = canonical;
+        let spec = crate::builtins::lookup(n);
+        if let Some(spec) = spec {
+            if spec.arity != args.len() {
+                return Err(self.err(format!(
+                    "{} expects {} operands",
+                    spec.canonical, spec.arity
+                )));
+            }
+            if spec.availability == crate::builtins::Availability::Recognized || spec.op.is_none() {
+                return Err(self.unsupported(format!(
+                    "{} is recognized but not implemented",
+                    spec.canonical
+                )));
+            }
+        }
+        let n = spec.map_or(n, |s| s.canonical);
         if fallible_builtin(n) {
             self.saw_result = true;
         }
@@ -1597,24 +1545,46 @@ impl Engine<'_> {
             "@" => {
                 let arg = self.cx.fresh();
                 let out = want.cloned().unwrap_or_else(|| self.cx.fresh());
-                // Bind the operand first so selector references see tuple/row shape.
-                self.expr(env, &args[1], Some(&arg), effect)?;
-                self.expr(env, &args[0], Some(&f(arg, out.clone())), effect)?;
-                out
+                let expected = f(arg.clone(), out.clone());
+                // Known function signatures provide argument context, for
+                // example when a checked CSV action needs its row annotation.
+                // Overloaded operator/selector refs instead need the operand.
+                let known = self.known_callee(env, &args[0]);
+                let (callee, input) = if known {
+                    (
+                        self.expr(env, &args[0], Some(&expected), effect)?,
+                        self.expr(env, &args[1], Some(&arg), effect)?,
+                    )
+                } else {
+                    let operand = self.expr(env, &args[1], Some(&arg), effect)?;
+                    let callee = self.expr(env, &args[0], Some(&expected), effect)?;
+                    (callee, operand)
+                };
+                if callee == Type::Never || input == Type::Never {
+                    Type::Never
+                } else {
+                    out
+                }
             }
             "@@" => {
-                let tuple = self.expr(env, &args[1], None, effect)?;
-                let Type::Tuple(xs) = self.cx.resolve(&tuple) else {
-                    return Err(self.err("@@ requires a tuple bundle"));
-                };
                 let out = want.cloned().unwrap_or_else(|| self.cx.fresh());
-                self.expr(
-                    env,
-                    &args[0],
-                    Some(&function(xs.into_iter(), out.clone())),
-                    effect,
-                )?;
-                out
+                if let Expr::Tuple(xs) = &args[1] {
+                    if self.known_callee(env, &args[0]) {
+                        let params = (0..xs.len()).map(|_| self.cx.fresh()).collect::<Vec<_>>();
+                        let expected = function(params.iter().cloned(), out.clone());
+                        let callee = self.expr(env, &args[0], Some(&expected), effect)?;
+                        let args = self.expr(env, &args[1], Some(&Type::Tuple(params)), effect)?;
+                        if callee == Type::Never || args == Type::Never {
+                            Type::Never
+                        } else {
+                            out
+                        }
+                    } else {
+                        self.bundle_arguments(env, &args[0], &args[1], out, effect)?
+                    }
+                } else {
+                    self.bundle_arguments(env, &args[0], &args[1], out, effect)?
+                }
             }
             "@:" | "?:" | "=:" | ">:" | "<:" => {
                 let src = self.expr(env, &args[1], None, effect)?;
@@ -1633,13 +1603,19 @@ impl Engine<'_> {
                         s(result)
                     }
                     (_, "?:") => {
-                        let mask = matches!(&args[0], Expr::Array(_))
-                            || matches!(&args[0],Expr::Name(n) if env.get(n).is_some_and(|sc|matches!(self.cx.resolve(&sc.ty),Type::Seq(_))))
-                            || matches!(&args[0],Expr::Call(n,_) if matches!(n.as_str(),"<"|"<="|">"|">="|"="|"/="|"&&"|"||")||n.starts_with('.'));
-                        if mask {
-                            self.expr(env, &args[0], Some(&s(p(B))), effect)?;
+                        let predicate = &args[0];
+                        if matches!(
+                            predicate,
+                            Expr::Lambda(..) | Expr::TypedLambda(..) | Expr::Ref(_)
+                        ) {
+                            self.unary_fn(env, predicate, &elt, Some(&p(B)), effect)?;
                         } else {
-                            self.unary_fn(env, &args[0], &elt, Some(&p(B)), effect)?;
+                            let pred = self.expr(env, predicate, None, effect)?;
+                            match self.cx.resolve(&pred) {
+                                Type::Never => return Ok(Type::Never),
+                                Type::Seq(_) => self.unify(&pred, &s(p(B)))?,
+                                _ => self.unify(&pred, &f(elt.clone(), p(B)))?,
+                            }
                         }
                         src
                     }
@@ -1768,23 +1744,10 @@ impl Engine<'_> {
             }
             "csv.read" => {
                 let path = self.expr(env, &args[0], Some(&p(S)), effect)?;
-                let ok = match want.map(|t| self.cx.resolve(t)) {
-                    Some(Type::Action(t)) => match *t {
-                        Type::Result(t, _) => match *t {
-                            Type::Table(row) => {
-                                self.csv_row(&row)?;
-                                Type::Table(row)
-                            }
-                            _ => s(s(p(S))),
-                        },
-                        _ => s(s(p(S))),
-                    },
-                    _ => s(s(p(S))),
-                };
                 if path == Type::Never {
                     Type::Never
                 } else {
-                    a(result(ok, Self::standard_type("csverr")))
+                    self.csv_read_type(want)?
                 }
             }
             "csv.write" => {
@@ -1833,7 +1796,12 @@ impl Engine<'_> {
                 }
             }
             "/:" | "\\:" => {
-                let acc = self.expr(env, &args[1], if n == "/:" { want } else { None }, effect)?;
+                let acc_expect = match (n, want.map(|w| self.cx.resolve(w))) {
+                    ("/:", t) => t,
+                    (_, Some(Type::Seq(t))) => Some(*t),
+                    _ => None,
+                };
+                let acc = self.expr(env, &args[1], acc_expect.as_ref(), effect)?;
                 let seq = self.expr(env, &args[2], None, effect)?;
                 let item = self.seq_element(&seq)?;
                 self.expr(
@@ -1855,6 +1823,29 @@ impl Engine<'_> {
                     .map(|(i, x)| {
                         let context = match (n, i) {
                             ("^", 1) | ("take" | "[:" | "drop", 0) | ("slice", 0 | 1) => Some(p(N)),
+                            ("take" | "drop" | "[:", 1)
+                            | ("slice", 2)
+                            | ("rev" | "=." | "tr", 0)
+                            | ("+:", 0 | 1) => want.map(|w| self.cx.resolve(w)).filter(|t| {
+                                matches!(t, Type::Seq(_) | Type::Table(_) | Type::Prim(Prim::S))
+                            }),
+                            ("flat", 0) => match want.map(|w| self.cx.resolve(w)) {
+                                Some(t @ Type::Seq(_)) => Some(s(t)),
+                                _ => None,
+                            },
+                            ("&:" | "*:", i @ (0 | 1)) => match want.map(|w| self.cx.resolve(w)) {
+                                Some(Type::Seq(pair)) => match *pair {
+                                    Type::Tuple(ts) if ts.len() == 2 => Some(s(ts[i].clone())),
+                                    _ => None,
+                                },
+                                Some(Type::Table(pair)) if n == "*:" => match *pair {
+                                    Type::Tuple(ts) if ts.len() == 2 => {
+                                        Some(Type::Table(b(ts[i].clone())))
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            },
                             _ => None,
                         };
                         self.expr(env, x, context.as_ref(), effect)
@@ -1879,6 +1870,22 @@ impl Engine<'_> {
             },
         );
         Ok(result)
+    }
+    fn csv_read_type(&mut self, want: Option<&Type>) -> R<Type> {
+        let ok = match want.map(|t| self.cx.resolve(t)) {
+            Some(Type::Action(t)) => match *t {
+                Type::Result(t, _) => match *t {
+                    Type::Table(row) => {
+                        self.csv_row(&row)?;
+                        Type::Table(row)
+                    }
+                    _ => s(s(p(Prim::S))),
+                },
+                _ => s(s(p(Prim::S))),
+            },
+            _ => s(s(p(Prim::S))),
+        };
+        Ok(a(result(ok, Self::standard_type("csverr"))))
     }
     fn csv_row(&mut self, t: &Type) -> R<()> {
         let r = self.row(t)?;
@@ -1908,6 +1915,83 @@ impl Engine<'_> {
             }
         }
         Ok(match n {
+            "@" => {
+                let out = want.cloned().unwrap_or_else(|| self.cx.fresh());
+                self.unify(&xs[0], &f(xs[1].clone(), out.clone()))?;
+                out
+            }
+            "@@" => {
+                let Type::Tuple(args) = self.cx.resolve(&xs[1]) else {
+                    return Err(
+                        self.err("tuple application requires a statically known tuple bundle")
+                    );
+                };
+                let out = want.cloned().unwrap_or_else(|| self.cx.fresh());
+                self.unify(&xs[0], &function(args.into_iter(), out.clone()))?;
+                out
+            }
+            "/:" | "\\:" => {
+                let item = self.seq_element(&xs[2])?;
+                self.unify(&xs[0], &f(xs[1].clone(), f(item, xs[1].clone())))?;
+                if n == "/:" {
+                    xs[1].clone()
+                } else {
+                    s(xs[1].clone())
+                }
+            }
+            ".:" => match self.cx.resolve(&xs[1]) {
+                Type::Seq(t) | Type::Table(t) => {
+                    self.unify(&xs[0], &p(N))?;
+                    o(*t)
+                }
+                Type::Dict(k, v) => {
+                    self.unify(&xs[0], &k)?;
+                    o(*v)
+                }
+                other => {
+                    return Err(self.err(format!(
+                        "lookup needs a known sequence, table or dictionary, found {other}"
+                    )))
+                }
+            },
+            "@:" | "?:" | "=:" | ">:" | "<:" => {
+                let src = self.cx.resolve(&xs[1]);
+                let item = match &src {
+                    Type::Seq(x) | Type::Table(x) => x.as_ref().clone(),
+                    Type::Dict(_, v) if n == "@:" => v.as_ref().clone(),
+                    _ => return Err(self.err(format!("{n} reference needs a known iterable type"))),
+                };
+                let key = self.cx.fresh();
+                if n == "?:" {
+                    if !matches!(self.cx.resolve(&xs[0]), Type::Seq(_)) {
+                        self.unify(&xs[0], &f(item, p(B)))?;
+                    } else {
+                        self.unify(&xs[0], &s(p(B)))?;
+                    }
+                    src
+                } else {
+                    self.unify(&xs[0], &f(item, key.clone()))?;
+                    match n {
+                        "@:" => match src {
+                            Type::Dict(k, _) => Type::Dict(k, b(key)),
+                            _ => s(key),
+                        },
+                        "=:" => {
+                            self.req(Class::Hash, &key)?;
+                            Type::Dict(b(key), b(src))
+                        }
+                        _ => {
+                            self.req(Class::Ord, &key)?;
+                            src
+                        }
+                    }
+                }
+            }
+            "?1" => o(xs[0].clone()),
+            "??" => {
+                self.unify(&xs[1], &o(xs[0].clone()))?;
+                xs[0].clone()
+            }
             "+" | "-" | "*" | "/" | "//" | "%" | "^" => {
                 self.numeric_binary(n, &xs[0], &xs[1], want)?
             }
@@ -2031,6 +2115,53 @@ impl Engine<'_> {
                     t
                 }
             }
+            "csv.read" => {
+                self.unify(&xs[0], &p(S))?;
+                self.csv_read_type(want)?
+            }
+            "csv.write" => {
+                self.unify(&xs[0], &p(S))?;
+                let Type::Table(row) = self.cx.resolve(&xs[1]) else {
+                    return Err(self.err("csv.write expects a statically known table schema"));
+                };
+                self.csv_row(&row)?;
+                a(result(p(Unit), Self::standard_type("csverr")))
+            }
+            "df.agg" => {
+                let src = self.cx.resolve(&xs[2]);
+                let Type::Table(row) = &src else {
+                    return Err(self.err("df.agg expects a statically known table schema"));
+                };
+                let key = self.cx.fresh();
+                self.unify(&xs[0], &f(row.as_ref().clone(), key.clone()))?;
+                self.req(Class::Hash, &key)?;
+                let output = match want.map(|w| self.cx.resolve(w)) {
+                    Some(Type::Table(row)) => *row,
+                    _ => self.cx.fresh(),
+                };
+                self.unify(&xs[1], &f(key, f(src, output.clone())))?;
+                self.row(&output)?;
+                Type::Table(b(output))
+            }
+            "df.extend" => {
+                let Type::Table(row) = self.cx.resolve(&xs[1]) else {
+                    return Err(self.err("df.extend expects a statically known table schema"));
+                };
+                let mut out = self.row(&row)?;
+                let columns = self.row(&xs[0])?;
+                if columns.fields.is_empty() {
+                    return Err(self.err("df.extend requires at least one new column"));
+                }
+                for (name, t) in columns.fields {
+                    if out.fields.iter().any(|(k, _)| k == &name) {
+                        return Err(
+                            self.err(format!("df.extend cannot replace existing column {name}"))
+                        );
+                    }
+                    out.fields.push((name, self.seq_element(&t)?));
+                }
+                Type::Table(b(Type::Record(out)))
+            }
             "io.print" | "io.println" => a(result(p(Unit), Self::standard_type("ioerr"))),
             "io.read" | "io.exists" | "io.write" => {
                 for path in xs {
@@ -2080,10 +2211,41 @@ impl Engine<'_> {
                 self.req(Class::Eq, &el)?;
                 s(el)
             }
-            ":#" => match self.cx.resolve(&xs[0]) {
-                Type::Table(row) => s(*row),
-                x => return Err(self.err(format!(":# expects a table, found {x}"))),
-            },
+            "#:" => {
+                let source = self.cx.resolve(&xs[0]);
+                let row =
+                    match source {
+                        Type::Seq(row)
+                            if matches!(
+                                row.as_ref(),
+                                Type::Record(_) | Type::Nominal(_) | Type::Tuple(_)
+                            ) =>
+                        {
+                            *row
+                        }
+                        Type::Record(_) | Type::Nominal(_) => {
+                            let cols = self.row(&source)?;
+                            if cols.fields.is_empty() {
+                                return Err(self.err("#: requires at least one column"));
+                            }
+                            let fields = cols
+                                .fields
+                                .into_iter()
+                                .map(|(name, t)| Ok((name, self.seq_element(&t)?)))
+                                .collect::<crate::infer::R<_>>()?;
+                            Type::Record(Row { fields, tail: None })
+                        }
+                        _ => return Err(self.err(
+                            "#: reference needs a known sequence of rows or record-of-columns type",
+                        )),
+                    };
+                Type::Table(b(row))
+            }
+            ":#" => {
+                let row = self.cx.fresh();
+                self.unify(&xs[0], &Type::Table(b(row.clone())))?;
+                s(row)
+            }
             "+:" => {
                 self.unify(&xs[0], &xs[1])?;
                 self.collection(&xs[0])?;
@@ -2096,7 +2258,12 @@ impl Engine<'_> {
             }
             "*:" => match (self.cx.resolve(&xs[0]), self.cx.resolve(&xs[1])) {
                 (Type::Table(a), Type::Table(b1)) => Type::Table(b(Type::Tuple(vec![*a, *b1]))),
-                _ => return Err(self.err("*: expects two tables")),
+                (Type::Seq(a), Type::Seq(b1)) => s(Type::Tuple(vec![*a, *b1])),
+                _ => {
+                    return Err(
+                        self.err("*: expects two sequences or two tables of compatible kinds")
+                    )
+                }
             },
             n if n.starts_with('.') && n != ".:" => self.select(&n[1..], &xs[0])?,
             n => return Err(self.unsupported(format!("{n} is not covered by Draft 0.4 inference"))),
@@ -2192,7 +2359,7 @@ impl Engine<'_> {
             unreachable!()
         };
         self.start = *start;
-        let mut sig = self.signature(params, param_types, result_type.as_deref())?;
+        let mut sig = self.signature(params, param_types, result_type.as_ref())?;
         if let Some(qs) = self.qualifiers.get(start) {
             for (c, v) in qs {
                 let class = match c.as_str() {
@@ -2912,5 +3079,45 @@ mod tests {
         }
         let err = check("f(x:z):z^s := ^{ ^: x };").unwrap_err();
         assert_eq!(err.kind, InferErrorKind::IncompatibleError);
+    }
+    #[test]
+    fn staged_builtin_references_preserve_arity_and_collection_context() {
+        let src = r#"
+            sum(x,y:z):z := + x y;
+            foldsum := @ &/: &sum;
+            total:z := @ (@ foldsum 0) [1 2 3];
+            accs:[z] := \: &sum 0 [];
+            joined:[q] := +: [] [];
+            paired:[(z,s)] := &: [] [];
+            crossed:[(z,s)] := *: [1] ["x"];
+            idx:n->[z]->?z := &.:;
+            found:?z := @ (@ idx 1) [7];
+            measure:[q]->?q := &var;
+            stat:?q := @ measure [1 3];
+        "#;
+        check(src).unwrap();
+    }
+
+    #[test]
+    fn higher_order_actions_receive_schema_and_filter_uses_the_actual_mask_type() {
+        check(
+            r#"
+            << "csv";
+            row :: { value:q; };
+            typed(action:!(#row^csverr)):!(#row^csverr) := action;
+            load := @ &typed csv.read "nothing.csv";
+            flags(u:()):[b] := [1b 0b];
+            kept:[z] := ?: flags () [2 3];
+        "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn annotation_failure_points_at_the_unresolved_named_type() {
+        let src = "f(x:?absent):z := 1;";
+        let err = check(src).unwrap_err();
+        assert_eq!(&src[err.start..err.end], "absent");
+        assert!(err.message.contains("unknown type"));
     }
 }
