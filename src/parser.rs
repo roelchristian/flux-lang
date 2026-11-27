@@ -1,6 +1,11 @@
+use crate::builtins;
 use crate::lexer::{lex, Token};
 pub use crate::Error;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
+    ops::Range,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -9,6 +14,10 @@ pub struct Program {
     pub entry: Option<Expr>,
     /// Zero-based byte offset of the entry’s opening `!`, if any.
     pub entry_start: Option<usize>,
+    /// Explicit (class, type variable) qualifiers by declaration byte offset.
+    pub constraints: BTreeMap<usize, Vec<(String, String)>>,
+    pub exports: Vec<String>,
+    origins: Vec<Origin>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -54,6 +63,145 @@ pub enum Expr {
     NamedRecord(String, Vec<(String, Expr)>),
 }
 
+// Post-order traversal mirrors the parser's expression completion order.
+// These entries are owned by Program, so cloning/moving it does not move or
+// invalidate any pointer keys. A later resolver associates current AST nodes.
+#[derive(Debug, Clone, PartialEq)]
+struct Origin {
+    signature: u64,
+    span: Option<Range<usize>>,
+}
+
+impl Origin {
+    fn new(expr: &Expr, span: Option<Range<usize>>) -> Self {
+        Self {
+            signature: expression_signature(expr),
+            span,
+        }
+    }
+}
+fn expression_signature(expr: &Expr) -> u64 {
+    let mut hash = DefaultHasher::new();
+    std::mem::discriminant(expr).hash(&mut hash);
+    match expr {
+        Expr::Int(n) => n.hash(&mut hash),
+        Expr::Char(c) => c.hash(&mut hash),
+        Expr::Bool(b) => b.hash(&mut hash),
+        Expr::Unit => {}
+        Expr::Name(n) | Expr::Ref(n) | Expr::Str(n) | Expr::Num(n) => n.hash(&mut hash),
+        Expr::Call(name, args) => {
+            name.hash(&mut hash);
+            args.len().hash(&mut hash);
+        }
+        Expr::Tuple(es) | Expr::Array(es) | Expr::Pipeline(es) => es.len().hash(&mut hash),
+        Expr::Cases(arms, _) => arms.len().hash(&mut hash),
+        Expr::Lambda(ps, _) => ps.hash(&mut hash),
+        Expr::TypedLambda(ps, ts, _) => {
+            ps.hash(&mut hash);
+            ts.hash(&mut hash);
+        }
+        Expr::NamedRecord(name, fs) => {
+            name.hash(&mut hash);
+            for (n, _) in fs {
+                n.hash(&mut hash);
+            }
+        }
+        Expr::Record(fs) => {
+            for (n, _) in fs {
+                n.hash(&mut hash);
+            }
+        }
+        Expr::Block(stmts, last) | Expr::Action(stmts, last) => {
+            stmts.len().hash(&mut hash);
+            last.is_some().hash(&mut hash);
+            for stmt in stmts {
+                std::mem::discriminant(stmt).hash(&mut hash);
+                match stmt {
+                    Stmt::Def { name, start, .. } | Stmt::Schema { name, start, .. } => {
+                        name.hash(&mut hash);
+                        start.hash(&mut hash);
+                    }
+                    Stmt::Effect { name, start, .. } => {
+                        name.hash(&mut hash);
+                        start.hash(&mut hash);
+                    }
+                }
+            }
+        }
+    }
+    hash.finish()
+}
+impl Program {
+    pub(crate) fn expression_origins(&self) -> Vec<(&Expr, Range<usize>)> {
+        fn stmt<'p>(s: &'p Stmt, nodes: &mut Vec<&'p Expr>) {
+            match s {
+                Stmt::Def { body, .. } | Stmt::Effect { body, .. } => expr(body, nodes),
+                Stmt::Schema { .. } => {}
+            }
+        }
+        fn expr<'p>(e: &'p Expr, nodes: &mut Vec<&'p Expr>) {
+            match e {
+                Expr::Call(_, es) | Expr::Tuple(es) | Expr::Array(es) | Expr::Pipeline(es) => {
+                    for x in es {
+                        expr(x, nodes);
+                    }
+                }
+                Expr::Cases(pairs, otherwise) => {
+                    for (a, b) in pairs {
+                        expr(a, nodes);
+                        expr(b, nodes);
+                    }
+                    expr(otherwise, nodes);
+                }
+                Expr::Lambda(_, body) | Expr::TypedLambda(_, _, body) => expr(body, nodes),
+                Expr::Record(fs) | Expr::NamedRecord(_, fs) => {
+                    for (_, x) in fs {
+                        expr(x, nodes);
+                    }
+                }
+                Expr::Action(ss, last) | Expr::Block(ss, last) => {
+                    for s in ss {
+                        stmt(s, nodes);
+                    }
+                    if let Some(x) = last {
+                        expr(x, nodes);
+                    }
+                }
+                Expr::Int(_)
+                | Expr::Str(_)
+                | Expr::Bool(_)
+                | Expr::Char(_)
+                | Expr::Unit
+                | Expr::Num(_)
+                | Expr::Name(_)
+                | Expr::Ref(_) => {}
+            }
+            nodes.push(e);
+        }
+        let mut nodes = Vec::with_capacity(self.origins.len());
+        for s in &self.defs {
+            stmt(s, &mut nodes);
+        }
+        if let Some(e) = &self.entry {
+            expr(e, &mut nodes);
+        }
+        if nodes.len() != self.origins.len()
+            || nodes
+                .iter()
+                .zip(&self.origins)
+                .any(|(node, origin)| expression_signature(node) != origin.signature)
+        {
+            // A programmatic AST edit invalidates the original position map.
+            return Vec::new();
+        }
+        nodes
+            .into_iter()
+            .zip(&self.origins)
+            .filter_map(|(node, origin)| origin.span.clone().map(|span| (node, span)))
+            .collect()
+    }
+}
+
 type PResult<T> = Result<T, Error>;
 #[derive(Copy, Clone, Debug)]
 enum Binding {
@@ -61,74 +209,6 @@ enum Binding {
     Value,
     Record,
 }
-const PRELUDE: &[(&str, usize)] = &[
-    ("+", 2),
-    ("-", 2),
-    ("*", 2),
-    ("/", 2),
-    ("//", 2),
-    ("%", 2),
-    ("^", 2),
-    ("-:", 1),
-    ("^/", 1),
-    ("|", 1),
-    ("<", 2),
-    ("<=", 2),
-    (">", 2),
-    (">=", 2),
-    ("=", 2),
-    ("/=", 2),
-    ("==", 2),
-    ("~=", 3),
-    ("~", 1),
-    ("&&", 2),
-    ("||", 2),
-    ("#", 1),
-    ("..", 2),
-    ("@", 2),
-    ("@@", 2),
-    ("@:", 2),
-    ("?:", 2),
-    ("=:", 2),
-    (">:", 2),
-    ("<:", 2),
-    ("+:", 2),
-    ("&:", 2),
-    ("*:", 2),
-    ("=.", 1),
-    (".:", 2),
-    ("[:", 2),
-    ("/:", 3),
-    ("\\:", 3),
-    ("+/", 1),
-    ("*/", 1),
-    ("&&/", 1),
-    ("||/", 1),
-    (">/", 1),
-    ("</", 1),
-    ("avg", 1),
-    ("pct", 2),
-    ("sd", 1),
-    ("cor", 2),
-    ("take", 2),
-    ("drop", 2),
-    ("slice", 3),
-    ("rev", 1),
-    ("flat", 1),
-    ("tr", 1),
-    ("med", 1),
-    ("var", 1),
-    ("?0", 0),
-    ("?1", 1),
-    ("?+", 1),
-    ("??", 2),
-    ("?!", 1),
-    ("#:", 1),
-    (":#", 1),
-    ("*=", 4),
-    ("*?", 4),
-];
-
 pub fn parse(source: &str) -> PResult<Program> {
     Parser {
         toks: lex(source)?,
@@ -137,6 +217,8 @@ pub fn parse(source: &str) -> PResult<Program> {
         scopes: Vec::new(),
         aliases: HashMap::new(),
         depth: 0,
+        constraints: BTreeMap::new(),
+        origins: Vec::new(),
     }
     .program()
 }
@@ -147,6 +229,8 @@ struct Parser {
     scopes: Vec<HashMap<String, Binding>>,
     aliases: HashMap<String, String>,
     depth: usize,
+    constraints: BTreeMap<usize, Vec<(String, String)>>,
+    origins: Vec<Origin>,
 }
 fn is_ident(s: &str) -> bool {
     let mut bytes = s.bytes();
@@ -223,9 +307,7 @@ impl Parser {
                 }) {
                     Some(Binding::Callable(1))
                 } else {
-                    PRELUDE
-                        .iter()
-                        .find_map(|&(x, k)| (x == n).then_some(Binding::Callable(k)))
+                    builtins::prelude_arity(n).map(Binding::Callable)
                 }
             })
     }
@@ -347,6 +429,9 @@ impl Parser {
             imports: Vec::new(),
             entry: None,
             entry_start: None,
+            constraints: BTreeMap::new(),
+            exports: Vec::new(),
+            origins: Vec::new(),
         };
         let mut exports = Vec::new();
         // Resolve top-level interfaces before any expression is parsed;
@@ -362,7 +447,7 @@ impl Parser {
                 if self.aliases.insert(alias.clone(), path.clone()).is_some() {
                     return self.err(format!("duplicate module alias `{alias}`"));
                 }
-                for &(name, arity) in module_items(&path)
+                for (name, arity) in builtins::module_items(&path)
                     .ok_or_else(|| Error::new(start, format!("unknown module `{path}`")))?
                 {
                     self.scope()
@@ -408,14 +493,14 @@ impl Parser {
             }
         }
         let mut seen = HashSet::new();
-        for n in exports {
+        for n in &exports {
             if !seen.insert(n.clone()) {
                 return self.err(format!("duplicate export `{n}`"));
             }
             let d = p
                 .defs
                 .iter()
-                .find(|d| matches!(d,Stmt::Def{name,..}|Stmt::Schema{name,..} if *name==n));
+                .find(|d| matches!(d,Stmt::Def{name,..}|Stmt::Schema{name,..} if name==n));
             match d {
                 Some(Stmt::Def {
                     result_type: Some(_),
@@ -427,6 +512,9 @@ impl Parser {
                 None => return self.err(format!("unknown export `{n}`")),
             }
         }
+        p.constraints = self.constraints;
+        p.exports = exports;
+        p.origins = self.origins;
         Ok(p)
     }
     fn import_decl(&mut self) -> PResult<(String, String, usize)> {
@@ -552,8 +640,31 @@ impl Parser {
             (Vec::new(), Vec::new())
         };
         let result_type = self.annotation(&[":=", "|"])?;
-        if self.peek() == "|" {
-            return self.err("explicit type constraints are not implemented");
+        if self.eat("|") {
+            if params.is_empty() || result_type.is_none() || param_types.iter().any(Option::is_none)
+            {
+                return self.err("type constraints require a complete named function signature");
+            }
+            let mut qualifiers = Vec::new();
+            loop {
+                let class = self.ident()?;
+                if !matches!(class.as_str(), "num" | "eq" | "ord" | "hash") {
+                    return self.err(format!("unknown type constraint `{class}`"));
+                }
+                let var = self.next()?;
+                if !var.text.strip_prefix(char::from(39)).is_some_and(is_ident) {
+                    return Err(Error::new(var.start, "expected a quantified type variable"));
+                }
+                let pair = (class, var.text);
+                if qualifiers.contains(&pair) {
+                    return Err(Error::new(var.start, "duplicate type constraint"));
+                }
+                qualifiers.push(pair);
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.constraints.insert(start, qualifiers);
         }
         if result_type.is_some() && param_types.iter().any(Option::is_none) {
             return self.err("annotated function result requires annotated parameters");
@@ -585,9 +696,14 @@ impl Parser {
         if self.depth >= 256 {
             return self.err("expression depth limit exceeded");
         }
+        let start = self.offset();
         self.depth += 1;
         let r = self.atom(effect);
         self.depth -= 1;
+        if let Ok(expr) = &r {
+            let end = self.toks[self.pos - 1].end;
+            self.origins.push(Origin::new(expr, Some(start..end)));
+        }
         r
     }
     fn atom(&mut self, effect: bool) -> PResult<Expr> {
@@ -610,6 +726,9 @@ impl Parser {
                     Ok(Expr::Tuple(row))
                 } else {
                     self.expect(")")?;
+                    // Grouping is transparent in the AST; replace the inner
+                    // node's source envelope rather than add an extra node.
+                    self.origins.pop();
                     Ok(first)
                 }
             }
@@ -619,7 +738,11 @@ impl Parser {
                     xs.push(self.expr(effect)?);
                 }
                 if t.text == "#[" {
-                    Ok(Expr::Call(t.text, vec![Expr::Array(xs)]))
+                    let rows = Expr::Array(xs);
+                    // The table wrapper has a source token; the synthetic
+                    // array operand has no independent opener or range.
+                    self.origins.push(Origin::new(&rows, None));
+                    Ok(Expr::Call(t.text, vec![rows]))
                 } else {
                     Ok(Expr::Array(xs))
                 }
@@ -850,24 +973,6 @@ impl Parser {
     }
 }
 
-fn module_items(path: &str) -> Option<&'static [(&'static str, usize)]> {
-    match path {
-        "io" => Some(&[
-            ("print", 1),
-            ("println", 1),
-            ("read", 1),
-            ("write", 2),
-            ("read_csv", 1),
-            ("write_csv", 2),
-        ]),
-        "csv" => Some(&[("read", 1), ("write", 2)]),
-        "df" | "table" => Some(&[("agg", 3), ("extend", 2)]),
-        "statistics" | "stats" => {
-            Some(&[("avg", 1), ("mean", 1), ("pct", 2), ("sd", 1), ("cor", 2)])
-        }
-        _ => None,
-    }
-}
 fn decode(t: &Token) -> PResult<String> {
     if t.text.len() < 2 {
         return Err(Error::new(t.start, "invalid literal"));

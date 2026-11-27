@@ -1,4 +1,7 @@
-use flux_lang::{check, check_source, eval, format_source, lexer, parser};
+use flux_lang::{
+    format_source, lexer, parser,
+    semantic::{prepare, prepare_timed, Mode as SemanticMode, Policy, Timings},
+};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::process::ExitCode;
@@ -50,18 +53,22 @@ impl Session {
         let source = format!("{}!{{\n{expression}\n}};", self.declarations);
         let diag = |error: flux_lang::Error| error.diagnostic("<repl>", &source);
         let program = parser::parse(&source).map_err(diag)?;
-        let inspection = check::inspect_entry(&program).map_err(diag)?;
+        let prepared =
+            prepare(&program, SemanticMode::Inspection, Policy::Compatible).map_err(diag)?;
+        let inspection = prepared
+            .inspection()
+            .ok_or("missing expression to inspect")?;
         match mode {
             Mode::Type => println!("{}", inspection.type_name),
             Mode::Schema => {
-                let schema = inspection.schema.ok_or_else(|| {
+                let schema = inspection.schema.as_ref().ok_or_else(|| {
                     format!(":schema expects a table; found {}", inspection.type_name)
                 })?;
                 println!("{schema}");
             }
             Mode::View | Mode::Time => {
                 let start = Instant::now();
-                let out = eval::view_entry(&program).map_err(diag)?;
+                let out = prepared.view().map_err(diag)?;
                 let elapsed = start.elapsed();
                 print!("{}", out.stdout);
                 if out.value.contains('\n') {
@@ -101,7 +108,7 @@ impl Session {
                 "{path}: :load accepts declarations only; run script entries with flux FILE"
             ));
         }
-        check::check(&program).map_err(diagnostic)?;
+        prepare(&program, SemanticMode::Script, Policy::Compatible).map_err(diagnostic)?;
         self.declarations = candidate;
         println!("loaded {path}");
         Ok(())
@@ -117,12 +124,16 @@ impl Session {
         );
         if let Ok(program) = parser::parse(&source) {
             if program.entry.is_none() {
-                check::check(&program).map_err(|e| e.diagnostic("<repl>", &source))?;
+                prepare(&program, SemanticMode::Script, Policy::Compatible)
+                    .map_err(|e| e.diagnostic("<repl>", &source))?;
                 self.declarations = source;
                 return Ok(());
             }
-            check::check(&program).map_err(|e| e.diagnostic("<repl>", &source))?;
-            let output = eval::run(&program).map_err(|e| e.diagnostic("<repl>", &source))?;
+            let prepared = prepare(&program, SemanticMode::Script, Policy::Compatible)
+                .map_err(|e| e.diagnostic("<repl>", &source))?;
+            let output = prepared
+                .run()
+                .map_err(|e| e.diagnostic("<repl>", &source))?;
             print!("{}", output.stdout);
             return Ok(());
         }
@@ -198,32 +209,100 @@ fn cli() -> Result<u8, String> {
     let (mode, path) = match args.as_slice() {
         [] => return repl(),
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("Flux reference prototype\n\nUsage: flux [FILE | check FILE | fmt FILE | --version]\n\nRun without arguments for the REPL. fmt writes to stdout.");
+            println!("Flux reference prototype\n\nUsage: flux [FILE | check FILE | hir FILE | run-hir FILE | phases FILE | fmt FILE | --version]\n\nRun without arguments for the REPL. fmt writes to stdout.");
             return Ok(0);
         }
         [flag] if flag == "--version" || flag == "-V" => {
             println!("flux {}", env!("CARGO_PKG_VERSION"));
             return Ok(0);
         }
-        [file] if file != "check" && file != "fmt" && !file.starts_with('-') => ("run", file),
-        [command, file] if command == "check" || command == "fmt" => (command.as_str(), file),
+        [file]
+            if !matches!(
+                file.as_str(),
+                "check" | "fmt" | "hir" | "phases" | "run-hir"
+            ) && !file.starts_with('-') =>
+        {
+            ("run", file)
+        }
+        [command, file]
+            if matches!(
+                command.as_str(),
+                "check" | "fmt" | "hir" | "phases" | "run-hir"
+            ) =>
+        {
+            (command.as_str(), file)
+        }
         _ => return Err("usage: flux [FILE | check FILE | fmt FILE]".into()),
     };
     let source = fs::read_to_string(path).map_err(|err| format!("{path}: {err}"))?;
     let diagnostic = |err: flux_lang::Error| err.diagnostic(path, &source);
     match mode {
-        "check" => {
-            check_source(&source).map_err(diagnostic)?;
+        "check" | "hir" => {
+            let program = parser::parse(&source).map_err(diagnostic)?;
+            let strict = mode == "hir";
+            let policy = if strict {
+                Policy::TypedOnly
+            } else {
+                Policy::Compatible
+            };
+            let prepared = prepare(&program, SemanticMode::Script, policy).map_err(diagnostic)?;
+            if strict {
+                println!(
+                    "{:#?}",
+                    prepared.hir().expect("strict compilation yields HIR")
+                );
+            }
+        }
+        "phases" => {
+            let start = Instant::now();
+            let program = parser::parse(&source).map_err(diagnostic)?;
+            let parse = start.elapsed();
+            let mut timing = Timings::default();
+            let plan = prepare_timed(
+                &program,
+                SemanticMode::Script,
+                Policy::TypedOnly,
+                &mut timing,
+            )
+            .map_err(diagnostic)?;
+            let start = Instant::now();
+            if program.entry.is_some() {
+                let out = plan.run().map_err(diagnostic)?;
+                std::io::stdout()
+                    .write_all(out.stdout.as_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+            let run = start.elapsed();
+            eprintln!(
+                "parse_ns	{}
+resolve_ns	{}
+infer_ns	{}
+elaborate_ns	{}
+eval_ns	{}",
+                parse.as_nanos(),
+                timing.resolution.as_nanos(),
+                timing.inference.as_nanos(),
+                timing.elaboration.as_nanos(),
+                run.as_nanos()
+            );
         }
         "fmt" => print!("{}", format_source(&source).map_err(diagnostic)?),
         _ => {
-            let program = check_source(&source).map_err(diagnostic)?;
+            let program = parser::parse(&source).map_err(diagnostic)?;
             if program.entry.is_none() {
                 return Err(format!(
                     "{path}: no executable !{{ ... }}; block (try flux check)"
                 ));
             }
-            let output = flux_lang::eval::run(&program).map_err(diagnostic)?;
+            let policy = if mode == "run-hir" {
+                Policy::TypedOnly
+            } else {
+                Policy::Compatible
+            };
+            let output = prepare(&program, SemanticMode::Script, policy)
+                .map_err(diagnostic)?
+                .run()
+                .map_err(diagnostic)?;
             print!("{}", output.stdout);
             return Ok(output.status);
         }
