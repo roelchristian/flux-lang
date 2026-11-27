@@ -74,3 +74,12 @@ See the [tacit plan](plan-0.7-tacit.md) for the current typed frontend.
 Tacit constructs lower to ordinary references, lambdas, and applications;
 the legacy oracle is not required to parse the new syntax. Generalized
 trains, rank, and optimizer-only changes remain outside this draft.
+
+## Draft 0.8: source formatting
+
+The formatter works on original tokens and trivia. An opt-in parser pass
+provides source ranges for prefix and tacit operands, including callable
+arities from imported modules. Only the requested root file is formatted.
+Ordinary compilation does not collect these layout ranges. See the
+[layout conventions](draft-0.8-layout.md) and
+[independent review](review-0.8-layout.md).

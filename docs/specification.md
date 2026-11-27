@@ -228,3 +228,10 @@ The REPL is distinct from source grammar. Semicolon-ended submissions can displa
 subgrammar, identity, composition, fork and hook. It extends the typed HIR
 interpreter without changing ordinary Polish call arities or implicit
 effects. A tacit function binding remains a first-class value.
+
+## Draft 0.8: layout
+
+The [typographical conventions](draft-0.8-layout.md) describe how to place
+complex prefix calls, guards, tacit functions and effects on the page.
+Indentation is not part of Flux grammar. The formatter does not change
+tokens or insert punctuation.
