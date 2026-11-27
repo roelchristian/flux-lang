@@ -1,0 +1,7 @@
+<< "./geometry.flx" : geo;
+
+r:geo.rectangle := geo.rectangle { width:=3q; height:=4q; };
+!{ ^{
+    ^? ! print (@ geo.area r,geo.perimeter r,geo.volume r 5q);
+    ()
+} };
