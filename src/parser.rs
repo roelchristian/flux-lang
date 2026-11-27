@@ -634,8 +634,11 @@ fn parser_for(
         eof,
         scopes: Vec::new(),
         type_scopes: Vec::new(),
-        standard: HashMap::new(),
-        native_type_names: HashSet::new(),
+        standard: errors041::variants("ioerr")
+            .iter()
+            .map(|v| (v.name.to_owned(), Binding::Constructor(v.payload.len())))
+            .collect(),
+        native_type_names: HashSet::from(["ioerr".to_owned()]),
         aliases: HashMap::new(),
         source_interfaces: imports.to_vec(),
         links: HashMap::new(),
@@ -1782,6 +1785,10 @@ pub(crate) fn standard_owners(module: &str) -> &'static [&'static str] {
         "io" => &["ioerr", "csverr"],
         "csv" => &["ioerr", "csverr"],
         "math" => &["numerr"],
+        "fs" | "sys" => &["ioerr"],
+        "rx" => &["rxerr"],
+        "dt" => &["dterr"],
+        "json" => &["jsonerr"],
         _ => &[],
     }
 }
@@ -2099,8 +2106,9 @@ f(x:q^err^e):q := 0;";
 
     #[test]
     fn linked_nominal_scope_blocks_native_and_foreign_leakage() {
-        assert!(parse_module("f(x:ioerr):ioerr := x;", 0, Some("m"), &[]).is_err());
-        assert!(parse_module(r#"<< "csv"; f(x:ioerr):ioerr := x;"#, 0, Some("m"), &[]).is_ok());
+        assert!(parse_module("f(x:ioerr):ioerr := x;", 0, Some("m"), &[]).is_ok());
+        assert!(parse_module("f(x:csverr):csverr := x;", 0, Some("m"), &[]).is_err());
+        assert!(parse_module(r#"<< "csv"; f(x:csverr):csverr := x;"#, 0, Some("m"), &[]).is_ok());
         let p = parse_module(
             r#"row :: { x:q; }; a := { row :: { y:s; }; r:row := row {y:="ok";}; r };"#,
             100,

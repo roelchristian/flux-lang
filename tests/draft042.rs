@@ -169,6 +169,39 @@ const EFFECTS: &[&str] = &[
     "csv.write",
 ];
 
+// Each name below is actually invoked in the strict public fixtures in
+// tests/draft05_stdlib.rs. Prelude print, fs.exists and stat add aliases,
+// not new canonical entries. Keep complete equality with the registry.
+const STDLIB_05: &[&str] = &[
+    "opt.map",
+    "opt.bind",
+    "opt.result",
+    "res.map",
+    "res.maperr",
+    "res.collect",
+    "res.partition",
+    "res.ok",
+    "res.optional",
+    "io.readln",
+    "fs.ls",
+    "fs.mkdir",
+    "fs.base",
+    "fs.join",
+    "sys.args",
+    "sys.env",
+    "sys.pid",
+    "str.upper",
+    "str.lower",
+    "str.trim",
+    "str.split",
+    "str.join",
+    "rx.find",
+    "dt.days",
+    "dt.date",
+    "json.encode",
+    "json.decode",
+];
+
 fn expression_source(expression: &str) -> String {
     format!("{PRELUDE}\n!{{ ^= ! io.print {expression} {{ _ : (); }}; }};")
 }
@@ -194,7 +227,7 @@ fn every_runtime_registry_entry_has_a_strict_fixture() {
     let covered: BTreeSet<_> = [ARITHMETIC, LOGIC, COLLECTIONS, REDUCTIONS, TABLES]
         .into_iter()
         .flat_map(|cases| cases.iter().map(|case| case.0))
-        .chain(EFFECTS.iter().copied())
+        .chain(EFFECTS.iter().chain(STDLIB_05).copied())
         .collect();
     let registered: BTreeSet<_> = REGISTRY
         .iter()
