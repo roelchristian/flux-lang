@@ -442,3 +442,34 @@ fn oversized_regex_and_json_inputs_fail_recoverably() {
     checked(&f);
     expect_output(f.run(Some("run-hir")), "(0b, 0b)\n");
 }
+
+#[test]
+fn json_decode_bounds_total_numeric_expansion_per_document() {
+    // Each zero has a cheap coefficient and a legal scale, but the scale
+    // still costs digits to expand. Keep the complete inputs below 1 KiB.
+    let mut nums = vec!["0e-10000"; 99];
+    nums.push("0e-9900");
+    let at_limit = format!("[{}]", nums.join(","));
+    nums.push("0");
+    let over_limit = format!("[{}]", nums.join(","));
+    let source = format!(
+        r#"<< "json";
+<< "res";
+decode(s:s):[d]^jsonerr := json.decode s;
+!{{
+    status := ^= res.map (\xs -> "success") (decode "{over_limit}") {{
+        invalidjson _ : "syntax error";
+        jsonshape note : note;
+    }};
+    ^= ! print (status,res.ok (decode "{at_limit}")) {{ _ : (); }};
+}};"#
+    );
+    let f = Fixture::new(&source);
+    checked(&f);
+    for mode in [None, Some("run-hir")] {
+        expect_output(
+            f.run(mode),
+            "(JSON total numeric expansion exceeds the resource limit, 1b)\n",
+        );
+    }
+}

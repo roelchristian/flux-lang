@@ -421,3 +421,24 @@ moneys:#(d,s) := #[];
         assert_eq!(written.replace("\r\n", "\n"), expected, "{name}");
     }
 }
+
+#[test]
+fn reordered_named_table_fields_are_structural_and_display_in_schema_order() {
+    strict(
+        r#"
+<< "df";
+a:#.{id:n; value:s;} := #[.{id:=1n; value:="a";}];
+b:#.{value:s; id:n;} := #[.{value:="a"; id:=1n;}];
+c:#.{value:s; id:n;} := #[.{value:="b"; id:=2n;}];
+rows := #[.{child:=a;} .{child:=b;}];
+empty_left:#.{child:#.{id:n;value:s;};} := #[];
+empty_right:#.{child:#.{value:s;id:n;};} := #[];
+!{ ^{
+    ^? ! print (== a b, # (df.distinct rows), == empty_left empty_right);
+    ^? ! print (df.union a c);
+    ()
+} };
+"#,
+        "(1b, 1, 1b)\n#[{id := 1; value := a} {id := 2; value := b}]\n",
+    );
+}
