@@ -1,0 +1,27 @@
+<< "df";
+<< "schema.flx" : s;
+
+>> (raw_counts, repeated);
+
+tagged :: { sample:s; measured:n; reference:n; };
+
+mark_measured(x:s.measurement):tagged := tagged {
+    sample := .sample x; measured := 1n; reference := 0n;
+};
+mark_reference(x:s.reference):tagged := tagged {
+    sample := .sample x; measured := 0n; reference := 1n;
+};
+measured_count:#tagged->n := &{ @. +/ .measured };
+reference_count:#tagged->n := &{ @. +/ .reference };
+count(k:s,g:#tagged):s.count := s.count {
+    sample := k; measured := @ measured_count g; reference := @ reference_count g;
+};
+
+raw_counts(m:#s.measurement,r:#s.reference):(n,n) :=
+    (# (*= &.sample &.sample m r),# (*? &.sample &.sample m r));
+
+repeated(m:#s.measurement,r:#s.reference):#s.count := {
+    combined := +: (#: (@: &mark_measured m)) (#: (@: &mark_reference r));
+    by_key := df.agg &.sample &count combined;
+    ?: (|| (> .measured by_key 1n) (> .reference by_key 1n)) by_key
+};

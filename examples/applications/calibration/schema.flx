@@ -1,0 +1,6 @@
+>> (measurement, reference, count, finding);
+
+measurement :: { sample:s; measured_mm:d; };
+reference :: { sample:s; reference_mm:?d; };
+count :: { sample:s; measured:n; reference:n; };
+finding :: { sample:s; status:s; measured:n; reference:n; offset_mm:?d; };

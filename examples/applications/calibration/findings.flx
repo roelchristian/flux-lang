@@ -1,0 +1,52 @@
+<< "df";
+<< "schema.flx" : s;
+<< "matching.flx" : matching;
+
+>> (audit);
+
+duplicate(x:s.count):s.finding := s.finding {
+    sample := .sample x; status := "duplicate_sample";
+    measured := .measured x; reference := .reference x; offset_mm := ?0;
+};
+measurement_only(x:s.measurement):s.finding := s.finding {
+    sample := .sample x; status := "measurement_only";
+    measured := 1n; reference := 0n; offset_mm := ?0;
+};
+reference_only(x:s.reference):s.finding := s.finding {
+    sample := .sample x; status := "reference_only";
+    measured := 0n; reference := 1n; offset_mm := ?0;
+};
+reference_value(x:s.reference):d := ?! .reference_mm x;
+reference_present:(s.measurement,s.reference)->b := &{ @. ?+ (@. .reference_mm .2) };
+reference_missing:(s.measurement,s.reference)->b := &{ @. ~ reference_present };
+offset:(s.measurement,s.reference)->d :=
+    &{ @* - (@. .measured_mm .1) (@. reference_value .2) };
+key:(s.measurement,s.reference)->s := &{ @. .sample .1 };
+deviates(x:(s.measurement,s.reference)):b := /= (@ offset x) 0.00d;
+
+missing(x:(s.measurement,s.reference)):s.finding := s.finding {
+    sample := @ key x; status := "missing_reference_value";
+    measured := 1n; reference := 1n; offset_mm := ?0;
+};
+deviation(x:(s.measurement,s.reference)):s.finding := s.finding {
+    sample := @ key x; status := "deviation";
+    measured := 1n; reference := 1n; offset_mm := ?1 (@ offset x);
+};
+
+audit(m:#s.measurement,r:#s.reference):#s.finding := {
+    repeats := matching.repeated m r;
+    clean_m := df.anti &.sample &.sample m repeats;
+    clean_r := df.anti &.sample &.sample r repeats;
+    m_only := df.anti &.sample &.sample clean_m clean_r;
+    r_only := df.anti &.sample &.sample clean_r clean_m;
+    paired := *= &.sample &.sample clean_m clean_r;
+    present := ?: reference_present paired;
+    absent := ?: reference_missing paired;
+    changed := ?: &deviates present;
+
+    rows := +: (@: &duplicate repeats)
+            (+: (@: &measurement_only m_only)
+            (+: (@: &reference_only r_only)
+            (+: (@: &missing absent) (@: &deviation changed))));
+    >: &.sample (#: rows)
+};
