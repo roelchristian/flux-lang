@@ -1,0 +1,14 @@
+--- Summarize repeated measurements by field site in first-seen order.
+<< "df";
+sample :: { site:s; length:q; };
+xs:#sample := #[
+    sample { site:="fen"; length:=8; }
+    sample { site:="dune"; length:=7; }
+    sample { site:="fen"; length:=10; }
+    sample { site:="dune"; length:=11; }
+    sample { site:="fen"; length:=12; }
+];
+summarize(site:s, rows:#sample) := .{ name:=site; average:=avg .length rows; };
+summary := df.agg &.site &summarize xs;
+
+!{ ^{ ^? ! print (.name summary,.average summary); () } };
