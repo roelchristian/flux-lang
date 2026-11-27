@@ -1,6 +1,6 @@
 # Flux Language Specification
 
-**Draft 0.3 • Surface language revision**
+**Draft 0.3 • Aesthetic and surface revision**
 
 Flux is a statically typed, predominantly functional, array-oriented language for general-purpose scripting, exact numerical work and tabular analysis. Its source is ASCII and its expressions use strict Polish notation. This document changes the surface rules in [Draft 0.2](draft-0.2.md); sections of that baseline not superseded here still describe the intended language. The old spreadsheet specimens and old program-entry rule are superseded. A draft rule is a design commitment, not a claim that the Rust prototype implements it. See [Implementation Notes](implementation.md) for that distinction.
 
@@ -8,8 +8,8 @@ Flux is a statically typed, predominantly functional, array-oriented language fo
 |---|---|
 | Adopted in this draft | Flux name; anonymous executable body; unit from a trailing-semicolon effect block; tuple application with `@@`; removal of dedicated I/O signs from the core |
 | Working conventions | `.flx` extension and `flux` CLI spelling; command/API details can change before release |
-| Provisional language/library proposals | Anonymous records `{. … }`, structural records and row polymorphism; table overload of `=.`; module-library signatures below |
-| Carried forward | `[:` remains the fixed-arity take operator; a named `take` replacement is deferred |
+| Provisional language/library proposals | Open row polymorphism, the full standard library and package system; table overload of `=.` |
+| Aesthetic revision | Default import aliases, short unary lambda, signed default, doc comments; prototype forms for prefix pipelines and structural table construction; `take` preferred over compatible `[:` |
 
 ## 1. Source, values and expressions
 
@@ -31,8 +31,8 @@ This retains nominal records, tuples, immutable sequences, dictionaries and orde
 A source file used as a script consists of declarations followed by at most one anonymous effect block, terminated by a semicolon. It must be the last top-level item. There is no magic `main` binding; an ordinary binding called `main` does not run. An imported module contains declarations only. An entry block in an imported file is an error, not silently skipped or run.
 
 ```flux
-<< "io" : io;
-sq(x:q) := * x x;
+<< "io";
+sq(x:z) := * x x;
 !{
     x := .. 1 10;
     y := @: &sq x;
@@ -72,7 +72,7 @@ application  = '@' expr expr | '@@' expr expr ;
 
 ## 4. Tabular analysis independent of storage
 
-A table has an ordered sequence of rows and a fixed schema. It retains duplicates and preserves row order under filter. `#:` converts a sequence of compatible rows into a table, and `:#` extracts the ordered rows. `@:` over a table returns a sequence; it does not infer a new table automatically. Named records remain the established explicit schema path. These rules apply whether input came from CSV, JSON, Parquet, a database or a manual literal.
+A table has an ordered sequence of rows and a fixed schema. It retains duplicates and preserves row order under filter. `#:` converts a sequence of compatible rows into a table, and `:#` extracts the ordered rows. `@:` over a table returns a sequence; it does not infer a new table automatically. Named records remain the explicit input schema path; anonymous structural records can describe intermediate or inferred output schemas. These rules apply whether input came from CSV, JSON, Parquet, a database or a manual literal.
 
 | Purpose | Form |
 |---|---|
@@ -137,17 +137,86 @@ unpaid := ?: (~ (@: &?+ (.2 paired))) paired;
 
 The left join keeps both ledger rows; the mask retains rows for which the optional receipt is absent. Matching receipt presence is not evidence that its amount balances: a production report compares amounts separately. To deduplicate a same-schema import without a proposed table overload, use `#: (=. (:# t))`; to inspect the first ten rows after a stable ascending sort by a declared temporal key, use `[: 10 (>: &.timestamp t)`. The latter orders already-validated keys, not raw timestamps in arbitrary string formats. In a batch, repeat the same classification for each input and concatenate compatible reports before running one write action.
 
-### Structural extension under investigation
+### Structural extension and library boundary
 
-```flux
-a := df.map (\(x)-> {.
-    station := .station x;
-    squared := ^ .value x 2;
-}) t;
-```
-
-Neither `{.` nor `df.map` is normative yet. The example illustrates a pure schema-changing transformation; before adoption specify duplicate/missing fields, row field ordering, equality, inference, and whether anonymous schemas can escape module boundaries. A concrete `#obs` currently does not mean “any row with a `value` field.” Do not promise such polymorphism from the example.
+The retired proposed opener was `{.`; the current opener is `.{`. `df.map` is not a core operation. A concrete `#obs` does not mean “any row with a `value` field”; open row polymorphism remains future work.
 
 ## 5. Priorities after 0.3
 
 Draft 0.4 should settle typed result/propagation (distinct from `?a` and `!a`), numeric overload and conversion inference, structural records/row polymorphism, nullable operations and module interfaces. Draft 0.5 should specify libraries for data adapters, dimensional/temporal semantics, statistics, strings and filesystem operations. Iteration, efficient collection folds, foreign/Arrow interoperability, controlled mutation and tensors follow as separate designs; concurrency is later. Keep strict deterministic semantics even where the implementation introduces lazy range or table representations.
+
+## 6. Aesthetic revision rules
+
+This section overrides the corresponding Draft 0.2 rules and carries forward the Draft 0.3 entry and tuple-application rules above. The prototype implementation can be narrower; check the implementation notes and the example index.
+
+### 6.1 Signs and opening delimiters
+
+Use these associations to judge new operators, not to invent user-defined punctuation: `:` defines, annotates and transforms; `.` accesses fields and structure; `/` divides and reduces; `?` selects and signals absence; `!` describes and runs effects; `#` counts and denotes table structure; `@` applies; `&` references; `*` combines products or relations; `\` abstracts. Specialized prefixes precede the delimiter: `{` computation, `!{` action, `?{` guards, `#{` dictionary, `#[` table, `.{` structural record and `|{` pipeline. The alternative `{.` opener is obsolete. Canonical formatting uses compact adjacent openers (legacy spaces in guards may be accepted). No significant indentation, infix fallback, implicit function-valued variable application or object method chains.
+
+### 6.2 Prefix pipelines
+
+```flux
+u := |{
+    t;
+    ?: (> .value $ 0) $;
+    <: &.value $;
+    take 10 $
+};
+
+x := |{
+    .. 1 100;
+    ^ $ 2;
+    ?: (> $ 100) $;
+    +/ $
+};
+```
+
+A pipeline has at least one expression stage, separated by semicolons, and a final expression without a semicolon. Evaluate each stage once in order, binding its value immutably as `$` for the following stage. Repeating `$` refers to the same value (not a recomputation). The seed has no new placeholder; inside a nested pipeline its seed can see a surrounding stage's existing `$`, while its subsequent stages shadow it. Leaving a nested pipeline restores the enclosing binding. A `$` with no preceding visible stage is an error. Stages preserve lexical scope in inner expressions: any closure or delayed action that references a visible `$` captures the stage value, never a mutable slot. `$` is neither assignable nor a parameter name. A pipeline does not run effects implicitly or create an effect context; `!` must still be explicitly written and legal at its lexical position. Pipeline block and tuple application are prototype features to stress-test before freezing grammar.
+
+### 6.3 Structural rows and column reconstruction
+
+```flux
+u := #: .{
+    date    := .date t;
+    account := .account t;
+    net     := - .gross t .tax t;
+    margin  := / .profit t .gross t;
+};
+
+v := df.extend .{
+    net    := - .gross t .tax t;
+    margin := / .profit t .gross t;
+} t;
+```
+
+`.{ field := expr; ... }` builds an immutable structural record. Field names are unique and case-sensitive under lowercase identifier rules; a duplicate is an error even if its values or types agree. Fields evaluate once, left-to-right in written order, and do not become local bindings for siblings. Structural schemas carry field names and types in source order, which is preserved by row display and CSV output. Named field projection resolves statically. A structural literal does not implicitly coerce to a nominal record, and structural equality/compatibility must not erase field distinctions by comparing values alone. Generalized or open rows remain future work.
+
+`#:` still takes compatible row sequences. Its additional overload takes a nonempty structural record of sequence-valued fields. All columns have equal lengths, including legal length zero when each column's element type is known; mismatched lengths and scalar fields are errors, and no scalar broadcasting is implied. A zero-column record supplies no row count and cannot make a table. Rows are formed by position in the input columns, without reordering; the field list establishes the output schema's field order. `df.extend` preserves original row order and old schema field order, then appends new fields in their written order. New fields may not duplicate existing names; this is an extension, not silent replacement. New column lengths must match row count even for empty input.
+
+### 6.4 Bindings, imports and arithmetic
+
+```flux
+<< "csv";
+<< "statistics" : st;
+<< "table" : df;
+
+sq:q->q := \x -> ^ x 2;
+plus:q q->q := \(x,y) -> + x y;
+recip := \(x:q) -> / 1 x;
+```
+
+A bare lowercase module name can supply its own alias; the explicit `: alias` form remains available and alias collisions within a scope are errors. A path that does not itself form a lowercase identifier must use an explicit alias unless the module system separately specifies a canonical basename rule. `\x -> expr` is exactly one untyped parameter; parentheses are mandatory for multiple parameters or a typed parameter. `->` is retained and scope is lexical. Short library aliases are customary: `io`, `fs`, `sys`, `math`, `stat`, `df`, `str`, `rx`, `dt`, `csv`, `json`, `sql`, `net`. This list is not a module-availability guarantee.
+
+An unsuffixed integral literal defaults to signed `z`, including positive values; `- 3 5` therefore yields `-2 : z`. An explicit `n` suffix or a compatible natural-number context keeps `n`; a negative literal does not fit `n`, and a natural underflow is a diagnostic rather than wrapping. Unsuffixed fraction `0.125` is exact `q`; `0.125d` denotes exact decimal, `0.125r` approximate real. Division `/ 1 3` is exact rational; `//` is integer quotient. Explicit suffixes are distinct from contextual inference.
+
+`take` is preferred over the compatibility sign `[:`. Preserve the familiar symbolic set `@:`, `?:`, `=:`, `>:`, `<:`, `+/`, `*/`, `/:`, `\:`, `=.`; prefer the short names `drop`, `slice`, `rev`, `flat`, `tr`, `med`, `var` rather than new symbols. Library contracts and prototype availability are separate. When present, `med` is percentile 50, and `var` is population variance; both return optionals for empty input. `sd` denotes population standard deviation.
+
+### 6.5 Written and interactive form
+
+A triple hyphen `---` begins a documentation comment; one or more consecutive doc-comment lines directly before a declaration are its documentation. Plain `--` comments and both comment styles are ignored as executable syntax. The formatter must not drop comments, change the token stream, or alter string content. Prefer four spaces, compact declarations and lambdas, blank lines between logical sections, and modest alignment in guarded cases and field lists; avoid artificially expanding small expressions. For complex nested expressions, add grouping only when it makes the prefix structure easier to read.
+
+The REPL is distinct from source grammar. Semicolon-ended submissions can display values and their types; a table view should show ordered fields, types, and row/column counts. Interactive commands include `:type`, `:schema`, `:load`, `:time`, `:help`, `:quit`, with `:history` and explicit `:replay` for the current session. `:load` checks and loads declarations without running a script entry; run a script separately with `flux FILE`. A command such as `:type avg .value t;` inspects a type, not a value-producing or effect-running statement. `:schema t;` should reflect the static/opened schema and not reload data. Explicitly executing an action at the prompt is distinct from displaying a suspended action.
+
+### 6.6 Typed CSV and grouped summaries
+
+`csv.read` and `csv.write` construct actions. A typed read such as `t:#obs := ! csv.read "observations.csv";` uses its expected named schema and column types to match/reorder exact header names and decode each field in a parsed CSV record, rejecting missing, duplicate or unexpected names; the untyped grid reader, where provided, returns strings and is not the same result. A nonempty malformed cell is an error even in an optional column; an empty optional field represents absence. Empty strings in a required string column are string values, not automatic nulls. Logical cells accept `true`, `false`, `1b` and `0b` in the prototype. Neither aggregation nor ingestion silently fills gaps. `df.agg key summarize t` is pure: it partitions an ordered table by the key function, calls the curried summarizer once per key and same-schema group, and returns one structural or nominal summary row per group in first-seen order. The schema of a zero-group result comes from the summarizer's static result, not by inventing or evaluating an empty group. Summary field order follows the record constructor. The prototype writes that field order to the CSV header, quotes cells as needed, and refuses to overwrite an existing destination. In successful scripts, output and writing still require explicit `!`; never execute actions because they appear within a pipeline, struct literal, top-level definition or module import.

@@ -14,6 +14,7 @@ enum T {
     N,
     Z,
     Q,
+    Approx,
     B,
     S,
     C,
@@ -26,6 +27,7 @@ enum T {
     Table(Box<T>),
     Dict(Box<T>, Box<T>),
     Record(String),
+    Shape(Vec<(String, T)>),
 }
 use T::*;
 fn bx(t: T) -> Box<T> {
@@ -37,6 +39,7 @@ impl fmt::Display for T {
             N => write!(f, "n"),
             Z => write!(f, "z"),
             Q => write!(f, "q"),
+            Approx => write!(f, "r"),
             B => write!(f, "b"),
             S => write!(f, "s"),
             C => write!(f, "c"),
@@ -48,6 +51,15 @@ impl fmt::Display for T {
             Fun(a, b) => write!(f, "({a}->{b})"),
             Dict(k, v) => write!(f, "{{{k}:{v}}}"),
             Record(n) => write!(f, "{n}"),
+            Shape(fields) => write!(
+                f,
+                ".{{ {} }}",
+                fields
+                    .iter()
+                    .map(|(n, t)| format!("{n}:{t}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
             Tuple(xs) => write!(
                 f,
                 "({})",
@@ -134,12 +146,17 @@ fn annotation(env: &Env, text: &str) -> R<T> {
                 "b" => Ok(B),
                 "s" => Ok(S),
                 "c" => Ok(C),
-                "d" | "r" => Err(format!(
-                    "type {tok} is not supported in this prototype; use exact q"
-                )),
+                "r" => Ok(Approx),
+                "d" => Err("type d is not supported in this prototype; use exact q".into()),
                 "?" => Ok(Opt(bx(self.atom()?))),
                 "!" => Ok(Action(bx(self.atom()?))),
-                "#" => Ok(Table(bx(self.atom()?))),
+                "#" => {
+                    let row = self.atom()?;
+                    if !matches!(row, Tuple(_) | Record(_) | Shape(_)) {
+                        return Err(format!("table type needs a row schema, found {row}"));
+                    }
+                    Ok(Table(bx(row)))
+                }
                 "[" => {
                     let t = self.ty(&["]"])?;
                     self.end("]")?;
@@ -170,6 +187,25 @@ fn annotation(env: &Env, text: &str) -> R<T> {
                     }
                     self.end(")")?;
                     Ok(Tuple(ts))
+                }
+                ".{" => {
+                    let mut ts = Vec::new();
+                    while !self.eat("}") {
+                        let k = self.peek().to_string();
+                        if k.is_empty()
+                            || !k.as_bytes().first().is_some_and(|b| b.is_ascii_lowercase())
+                        {
+                            return Err("expected field name in structural record type".into());
+                        }
+                        self.i += 1;
+                        self.end(":")?;
+                        ts.push((k, self.ty(&[";", "}"])?));
+                        if self.eat("}") {
+                            break;
+                        }
+                        self.end(";")?;
+                    }
+                    shape_type(ts)
                 }
                 "{" => {
                     let k = self.ty(&[":"])?;
@@ -236,6 +272,12 @@ fn prep(defs: &[Stmt], env: &mut Env) -> Result<(), Error> {
             start,
         } = stmt
         {
+            if matches!(name.as_str(), "n" | "z" | "q" | "d" | "r" | "b" | "s" | "c") {
+                return Err(Error::new(
+                    *start,
+                    format!("{name} is reserved in the type namespace"),
+                ));
+            }
             if env.rows.contains_key(name) {
                 return Err(Error::new(
                     *start,
@@ -392,7 +434,6 @@ fn contextual_num(n: i128, want: Option<&T>) -> T {
         Some(Q) => Q,
         Some(Z) => Z,
         Some(N) if n >= 0 => N,
-        _ if n >= 0 => N,
         _ => Z,
     }
 }
@@ -400,7 +441,11 @@ fn lit(s: &str, want: Option<&T>) -> R<T> {
     let signed = s.starts_with('-');
     let frac = s.contains('.');
     match s.as_bytes().last() {
-        Some(b'd' | b'r') => Err("decimal d and binary64 r are not supported; use exact q".into()),
+        Some(b'd') => Err("decimal d is not supported; use exact q".into()),
+        Some(b'r') => match s[..s.len() - 1].parse::<f64>() {
+            Ok(v) if v.is_finite() => Ok(Approx),
+            _ => Err("real literal must be finite".into()),
+        },
         Some(b'n') if signed || frac => {
             Err("expected a nonnegative integral natural literal".into())
         }
@@ -412,6 +457,115 @@ fn lit(s: &str, want: Option<&T>) -> R<T> {
         _ if signed => Ok(contextual_num(-1, want)),
         _ => Ok(contextual_num(0, want)),
     }
+}
+fn shape_type(fields: Vec<(String, T)>) -> R<T> {
+    let mut names = HashSet::new();
+    for (n, _) in &fields {
+        if !names.insert(n) {
+            return Err(format!("duplicate field {n}"));
+        }
+    }
+    Ok(Shape(fields))
+}
+fn record_fields(env: &Env, t: &T) -> R<Vec<(String, T)>> {
+    match t {
+        Shape(fs) => Ok(fs.clone()),
+        Record(n) => env
+            .rows
+            .get(n)
+            .cloned()
+            .ok_or_else(|| format!("unknown schema {n}")),
+        _ => Err(format!("expected a record, found {t}")),
+    }
+}
+fn column_shape(env: &Env, columns: &T) -> R<Vec<(String, T)>> {
+    let cols = record_fields(env, columns)?;
+    if cols.is_empty() {
+        return Err("record-of-columns requires at least one column".into());
+    }
+    cols.into_iter()
+        .map(|(n, t)| match t {
+            Seq(element) => Ok((n, *element)),
+            _ => Err(format!("column {n} must be a sequence, found {t}")),
+        })
+        .collect()
+}
+fn apply_two(env: &Env, f: &Expr, a: &T, b: &T, effect: bool) -> R<T> {
+    match f {
+        Expr::TypedLambda(ps, ts, body) => {
+            lambda(env, ps, ts, body, None, Some(&[a.clone(), b.clone()]))
+        }
+        Expr::Lambda(ps, body) => lambda(env, ps, &[], body, None, Some(&[a.clone(), b.clone()])),
+        _ => {
+            let f = expr(env, f, None, effect)?;
+            let Fun(p, r) = f else {
+                return Err("df.agg summary must be a two-argument function".into());
+            };
+            if &*p != a {
+                return Err(mismatch(a, &p));
+            }
+            let Fun(p, r) = *r else {
+                return Err("df.agg summary must accept the group as its second parameter".into());
+            };
+            if &*p != b {
+                return Err(mismatch(b, &p));
+            }
+            Ok(*r)
+        }
+    }
+}
+fn lambda(
+    env: &Env,
+    params: &[String],
+    annotations: &[Option<String>],
+    body: &Expr,
+    want: Option<&T>,
+    supplied: Option<&[T]>,
+) -> R<T> {
+    let mut cursor = want;
+    let mut nested = env.clone();
+    let mut seen = HashSet::new();
+    let mut ts = Vec::new();
+    if supplied.is_some_and(|ts| ts.len() != params.len()) {
+        return Err("function has wrong lambda arity".into());
+    }
+    for (i, p) in params.iter().enumerate() {
+        if !seen.insert(p) {
+            return Err(format!("duplicate lambda parameter {p}"));
+        }
+        let contextual = match cursor {
+            Some(Fun(arg, result)) => {
+                cursor = Some(result);
+                Some(arg.as_ref())
+            }
+            Some(_) => return Err("too many lambda parameters for contextual function type".into()),
+            None => None,
+        };
+        let expected = supplied.map(|ts| &ts[i]).or(contextual);
+        let given = annotations
+            .get(i)
+            .and_then(Option::as_deref)
+            .map(|s| annotation(env, s))
+            .transpose()?;
+        let t = match (given, expected) {
+            (Some(t), Some(e)) if &t != e => return Err(mismatch(e, &t)),
+            (Some(t), _) => t,
+            (None, Some(e)) => e.clone(),
+            _ => {
+                return Err(format!(
+                    "cannot infer lambda parameter {p}; add its type annotation"
+                ))
+            }
+        };
+        nested.values.insert(p.clone(), Binding::Value(t.clone()));
+        ts.push(t);
+    }
+    let out = expr(&nested, body, cursor, false)?;
+    Ok(if supplied.is_some() {
+        out
+    } else {
+        fun(ts, out)
+    })
 }
 fn expr(env: &Env, e: &Expr, want: Option<&T>, effect: bool) -> R<T> {
     let t = match e {
@@ -502,6 +656,30 @@ fn expr(env: &Env, e: &Expr, want: Option<&T>, effect: bool) -> R<T> {
                 t
             }
         }
+        Expr::Pipeline(stages) => {
+            let Some((first, rest)) = stages.split_first() else {
+                return Err("pipeline needs a source expression".into());
+            };
+            let mut ty = expr(
+                env,
+                first,
+                if rest.is_empty() { want } else { None },
+                effect,
+            )?;
+            let mut nested = env.clone();
+            for (i, stage) in rest.iter().enumerate() {
+                nested.values.insert("$".to_string(), Binding::Value(ty));
+                ty = expr(
+                    &nested,
+                    stage,
+                    if i + 1 == rest.len() { want } else { None },
+                    effect,
+                )
+                .map_err(|e| format!("pipeline stage {}: {e}", i + 1))?;
+            }
+            ty
+        }
+        Expr::TypedLambda(ps, annotations, b) => lambda(env, ps, annotations, b, want, None)?,
         Expr::Lambda(ps, b) => {
             let mut cursor = want;
             let mut nested = env.clone();
@@ -550,8 +728,18 @@ fn expr(env: &Env, e: &Expr, want: Option<&T>, effect: bool) -> R<T> {
             }
             Record(n.clone())
         }
-        Expr::Record(_) => {
-            return Err("anonymous records are not supported; declare a named schema".into())
+        Expr::Record(fields) => {
+            let expected = match want {
+                Some(Shape(fields)) => Some(fields.as_slice()),
+                _ => None,
+            };
+            let mut actual = Vec::new();
+            for (name, value) in fields {
+                let context =
+                    expected.and_then(|ts| ts.iter().find(|(k, _)| k == name).map(|(_, t)| t));
+                actual.push((name.clone(), expr(env, value, context, effect)?));
+            }
+            shape_type(actual)?
         }
     };
     if let Some(expected) = want {
@@ -591,6 +779,11 @@ fn column(env: &Env, selector: &str, t: &T) -> R<T> {
             .cloned()
             .ok_or_else(|| format!("tuple has no position .{i}"))
         }
+        Shape(fields) => fields
+            .iter()
+            .find(|(f, _)| f == selector)
+            .map(|(_, t)| t.clone())
+            .ok_or_else(|| format!("record has no field {selector}")),
         Record(n) => env
             .rows
             .get(n)
@@ -653,6 +846,23 @@ fn invoke(env: &Env, f: &Expr, arg: &T, want: Option<&T>, effect: bool) -> R<T> 
         Expr::Ref(n) if !env.values.contains_key(n) => {
             builtin(env, n, std::slice::from_ref(arg), want, effect)
         }
+        Expr::TypedLambda(ps, ts, body) if ps.len() == 1 => {
+            let inferred = want.map(|t| fun(vec![arg.clone()], t.clone()));
+            let t = lambda(
+                env,
+                ps,
+                ts,
+                body,
+                inferred.as_ref(),
+                Some(std::slice::from_ref(arg)),
+            )?;
+            if let Some(w) = want {
+                if !conforms(w, &t) {
+                    return Err(mismatch(w, &t));
+                }
+            }
+            Ok(t)
+        }
         Expr::Lambda(ps, body) if ps.len() == 1 => {
             let mut nested = env.clone();
             nested
@@ -692,6 +902,71 @@ fn call(env: &Env, n: &str, args: &[Expr], want: Option<&T>, effect: bool) -> R<
         });
     }
     match n {
+        "df.extend" | "table.extend" => {
+            arity(n, args.len(), 2)?;
+            let source = expr(env, &args[1], None, effect)?;
+            let Table(row) = source else {
+                return Err("df.extend expects a table as its second operand".into());
+            };
+            let mut fields = record_fields(env, &row)?;
+            let columns = expr(env, &args[0], None, effect)?;
+            for (name, t) in column_shape(env, &columns)? {
+                if fields.iter().any(|(existing, _)| existing == &name) {
+                    return Err(format!("df.extend cannot replace existing column {name}"));
+                }
+                fields.push((name, t));
+            }
+            return Ok(Table(bx(shape_type(fields)?)));
+        }
+        "df.agg" | "table.agg" => {
+            arity(n, args.len(), 3)?;
+            let src = expr(env, &args[2], None, effect)?;
+            let Table(row) = &src else {
+                return Err("df.agg expects a table as its third operand".into());
+            };
+            let key = invoke(env, &args[0], row, None, effect)?;
+            if !comparable(&key) {
+                return Err(format!("invalid grouping key {key}"));
+            }
+            let summary = apply_two(env, &args[1], &key, &src, effect)?;
+            record_fields(env, &summary)?;
+            return Ok(Table(bx(summary)));
+        }
+        "#:" => {
+            arity(n, args.len(), 1)?;
+            if let (Expr::Record(cols), Some(Table(row))) = (&args[0], want) {
+                if let Shape(fs) = row.as_ref() {
+                    let field_types =
+                        shape_type(fs.iter().cloned().map(|(n, t)| (n, Seq(bx(t)))).collect())?;
+                    expr(env, &Expr::Record(cols.clone()), Some(&field_types), effect)?;
+                    return Ok(Table(row.clone()));
+                }
+            }
+            let t = expr(
+                env,
+                &args[0],
+                match want {
+                    Some(Table(row)) if matches!(&args[0], Expr::Array(_)) => {
+                        Some(Seq(row.clone()))
+                    }
+                    _ => None,
+                }
+                .as_ref(),
+                effect,
+            )?;
+            return builtin(env, n, &[t], want, effect);
+        }
+        ".:" => {
+            arity(n, args.len(), 2)?;
+            let context = expr(env, &args[1], None, effect)?;
+            let key_type = match &context {
+                Dict(k, _) => Some(k.as_ref()),
+                Seq(_) | Table(_) => Some(&N),
+                _ => None,
+            };
+            let key = expr(env, &args[0], key_type, effect)?;
+            return builtin(env, n, &[key, context], want, effect);
+        }
         "#[" => {
             arity(n, args.len(), 1)?;
             let Expr::Array(rows) = &args[0] else {
@@ -706,8 +981,8 @@ fn call(env: &Env, n: &str, args: &[Expr], want: Option<&T>, effect: bool) -> R<
                 },
                 effect,
             )?;
-            if !matches!(t, Tuple(_) | Record(_)) {
-                return Err("table rows must be tuples or named records".into());
+            if !matches!(t, Tuple(_) | Record(_) | Shape(_)) {
+                return Err("table rows must be tuples or records".into());
             }
             return Ok(Table(bx(t)));
         }
@@ -836,7 +1111,7 @@ fn call(env: &Env, n: &str, args: &[Expr], want: Option<&T>, effect: bool) -> R<
                     _ => Seq(bx(ret)),
                 }),
                 "=:" if comparable(&ret) => Ok(Dict(bx(ret), bx(src))),
-                ">:" | "<:" if numeric(&ret) || matches!(ret, S | C) => Ok(src),
+                ">:" | "<:" if numeric(&ret) || matches!(ret, S | C | Approx) => Ok(src),
                 _ => Err(format!("invalid key type {ret} for {n}")),
             };
         }
@@ -858,7 +1133,8 @@ fn call(env: &Env, n: &str, args: &[Expr], want: Option<&T>, effect: bool) -> R<
                     "cannot execute an action in a pure context; use an action block".into(),
                 );
             }
-            let t = expr(env, &args[0], None, effect)?;
+            let action_context = want.map(|t| Action(bx(t.clone())));
+            let t = expr(env, &args[0], action_context.as_ref(), effect)?;
             if let Action(t) = t {
                 return Ok(*t);
             }
@@ -866,11 +1142,44 @@ fn call(env: &Env, n: &str, args: &[Expr], want: Option<&T>, effect: bool) -> R<
         }
         _ => {}
     }
+    let preferred_numeric = if matches!(
+        n,
+        "+" | "-" | "*" | "/" | "//" | "%" | ".." | ">" | ">=" | "<" | "<=" | "=" | "/="
+    ) && args.len() == 2
+    {
+        args.iter().find_map(|x| {
+            if matches!(x, Expr::Int(_)) {
+                return None;
+            }
+            let v = expr(env, x, None, effect).ok()?;
+            if numeric(&v) {
+                Some(v)
+            } else if let Seq(t) = v {
+                numeric(&t).then_some(*t)
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+    let result_collection = match want {
+        Some(Seq(t)) if n == ".." => Some(t.as_ref()),
+        _ => None,
+    };
+    let reduction = want.filter(|t| numeric(t)).map(|t| Seq(bx(t.clone())));
     let shape = |i| match n {
         "+" | "-" | "*" if matches!(want, Some(N | Z | Q)) => want,
         "//" | "%" if matches!(want, Some(N | Z)) => want,
         "^" if i == 1 => Some(&N),
         "^" if matches!(want, Some(N | Z | Q)) => want,
+        "[:" | "take" | "drop" if i == 0 => Some(&N),
+        "slice" if i < 2 => Some(&N),
+        "+/" | "*/" if reduction.is_some() => reduction.as_ref(),
+        ".." if result_collection.is_some() => result_collection,
+        _ if matches!(args.get(i), Some(Expr::Int(_))) && preferred_numeric.is_some() => {
+            preferred_numeric.as_ref()
+        }
         "~" => Some(&B),
         _ => None,
     };
@@ -880,7 +1189,7 @@ fn call(env: &Env, n: &str, args: &[Expr], want: Option<&T>, effect: bool) -> R<
         .map(|(i, x)| {
             expr(env, x, shape(i), effect).or_else(|original| {
                 if shape(i).is_some()
-                    && matches!(n, "+" | "-" | "*" | "//" | "%" | "^")
+                    && matches!(n, "+" | "-" | "*" | "//" | "%" | "^" | "+/" | "*/" | "..")
                     && !(n == "^" && i == 1)
                 {
                     expr(env, x, None, effect).map_err(|_| original)
@@ -909,6 +1218,21 @@ fn comparable(t: &T) -> bool {
         Tuple(ts) => ts.iter().all(comparable),
         _ => true,
     }
+}
+fn csv_schema(env: &Env, row: &T) -> R<()> {
+    let fields = record_fields(env, row)?;
+    if fields.is_empty() {
+        return Err("CSV requires at least one column".into());
+    }
+    fn scalar(t: &T) -> bool {
+        matches!(t, N | Z | Q | Approx | B | S | C)
+    }
+    for (name, t) in fields {
+        if !scalar(&t) && !matches!(&t,Opt(x) if scalar(x)) {
+            return Err(format!("CSV column {name} has unsupported type {t}"));
+        }
+    }
+    Ok(())
 }
 fn builtin(env: &Env, n: &str, ts: &[T], _want: Option<&T>, _effect: bool) -> R<T> {
     let one = || {
@@ -961,7 +1285,9 @@ fn builtin(env: &Env, n: &str, ts: &[T], _want: Option<&T>, _effect: bool) -> R<
                 if !comparable(&j) {
                     return Err(format!("{n} cannot compare {j}"));
                 }
-                if matches!(n, "<" | "<=" | ">" | ">=") && !(numeric(&j) || matches!(j, S | C)) {
+                if matches!(n, "<" | "<=" | ">" | ">=")
+                    && !(numeric(&j) || matches!(j, S | C | Approx))
+                {
                     return Err(format!("{n} cannot order {j}"));
                 }
                 Ok(B)
@@ -1017,8 +1343,9 @@ fn builtin(env: &Env, n: &str, ts: &[T], _want: Option<&T>, _effect: bool) -> R<
             t => Err(format!("# expects a collection, found {t}")),
         },
         "#:" => match one()? {
-            Seq(t) if matches!(t.as_ref(), Tuple(_) | Record(_)) => Ok(Table(t.clone())),
-            _ => Err("#: expects a sequence of rows".into()),
+            Seq(t) if matches!(t.as_ref(), Tuple(_) | Record(_) | Shape(_)) => Ok(Table(t.clone())),
+            t @ (Shape(_) | Record(_)) => Ok(Table(bx(shape_type(column_shape(env, t)?)?))),
+            _ => Err("#: expects a sequence of rows or a record of columns".into()),
         },
         ":#" => match one()? {
             Table(t) => Ok(Seq(t.clone())),
@@ -1055,10 +1382,10 @@ fn builtin(env: &Env, n: &str, ts: &[T], _want: Option<&T>, _effect: bool) -> R<
         }
         "[:" => {
             let (a, b) = two()?;
-            if a == &N && matches!(b, Seq(_) | Table(_)) {
+            if a == &N && matches!(b, Seq(_) | Table(_) | S) {
                 Ok(b.clone())
             } else {
-                Err("take expects a natural count and a collection".into())
+                Err("take expects a natural count and a sequence, table, or string".into())
             }
         }
         ".:" => {
@@ -1069,6 +1396,45 @@ fn builtin(env: &Env, n: &str, ts: &[T], _want: Option<&T>, _effect: bool) -> R<
                 _ => Err(format!("cannot index {b} with {a}")),
             }
         }
+        "take" | "drop" | "slice" => {
+            arity(n, ts.len(), if n == "slice" { 3 } else { 2 })?;
+            let (inds, tail) = ts.split_at(ts.len() - 1);
+            if inds.iter().all(|t| t == &N) && matches!(&tail[0], Seq(_) | Table(_) | S) {
+                Ok(tail[0].clone())
+            } else {
+                Err(format!(
+                    "{n} expects natural indices and a sequence, table, or string"
+                ))
+            }
+        }
+        "rev" => match one()? {
+            t @ (Seq(_) | Table(_) | S) => Ok(t.clone()),
+            _ => Err("rev expects a sequence, table, or string".into()),
+        },
+        "flat" => match one()? {
+            Seq(t) if matches!(t.as_ref(), Seq(_)) => Ok(t.as_ref().clone()),
+            _ => Err("flat expects a sequence of sequences".into()),
+        },
+        "tr" => match one()? {
+            t @ Seq(rows) if matches!(rows.as_ref(), Seq(_)) => Ok(t.clone()),
+            _ => Err("tr expects a rectangular sequence of sequences".into()),
+        },
+        "sd" | "statistics.sd" | "stats.sd" => match one()? {
+            Seq(t) if numeric(t) || t.as_ref() == &Approx => Ok(Opt(bx(Approx))),
+            _ => Err(format!("{n} expects an exact numeric sequence")),
+        },
+        "^/" => {
+            let x = one()?;
+            if x != &Approx {
+                number(x)?;
+            }
+            Ok(Approx)
+        }
+        "med" | "var" | "statistics.med" | "statistics.var" | "stats.med" | "stats.var"
+        | "statistics.avg" | "statistics.mean" | "stats.avg" | "stats.mean" => match one()? {
+            Seq(t) if numeric(t) => Ok(Opt(bx(Q))),
+            _ => Err(format!("{n} expects a numerical sequence")),
+        },
         "pct" | "statistics.pct" | "stats.pct" => {
             let (a, b) = two()?;
             if numeric(a) && matches!(b,Seq(t) if numeric(t)) {
@@ -1098,7 +1464,24 @@ fn builtin(env: &Env, n: &str, ts: &[T], _want: Option<&T>, _effect: bool) -> R<
             if t != &S {
                 return Err(mismatch(&S, t));
             }
+            if let Some(Action(out)) = _want {
+                if let Table(row) = out.as_ref() {
+                    csv_schema(env, row)?;
+                    return Ok(Action(out.clone()));
+                }
+            }
             Ok(Action(bx(Seq(bx(Seq(bx(S)))))))
+        }
+        "csv.write" => {
+            let (path, t) = two()?;
+            if path != &S {
+                return Err(mismatch(&S, path));
+            }
+            let Table(row) = t else {
+                return Err("csv.write expects a named or structural table".into());
+            };
+            csv_schema(env, row)?;
+            Ok(Action(bx(Unit)))
         }
         s if s.starts_with('.') && s.len() > 1 && s != ".:" => column(env, &s[1..], one()?),
         _ => Err(format!(
@@ -1107,26 +1490,96 @@ fn builtin(env: &Env, n: &str, ts: &[T], _want: Option<&T>, _effect: bool) -> R<
     }
 }
 
-pub fn check(p: &Program) -> Result<(), Error> {
+fn program_env(p: &Program) -> Result<Env, Error> {
     let mut env = Env::default();
     for import in &p.imports {
-        if !matches!(import.as_str(), "io" | "csv") {
+        if !matches!(
+            import.as_str(),
+            "io" | "csv" | "df" | "table" | "stats" | "statistics"
+        ) {
             return Err(Error::new(
                 0,
-                format!("import {import} is not supported; only io and csv are available"),
+                format!(
+                    "import {import} is not supported; available modules: io, csv, df, statistics"
+                ),
             ));
         }
     }
     top_defs_check(&p.defs, &mut env)?;
+    Ok(env)
+}
+
+pub fn inspect(p: &Program, expression: &Expr) -> Result<String, Error> {
+    let env = program_env(p)?;
+    expr(&env, expression, None, false)
+        .map(|t| t.to_string())
+        .map_err(|e| Error::new(0, e))
+}
+pub fn inspect_binding(p: &Program, name: &str) -> Result<String, Error> {
+    let env = program_env(p)?;
+    match env.values.get(name) {
+        Some(Binding::Value(t)) => Ok(t.to_string()),
+        Some(Binding::Callable(ts, Some(t))) => Ok(fun(ts.clone(), t.clone()).to_string()),
+        _ => Err(Error::new(0, format!("unknown binding {name}"))),
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inspection {
+    pub type_name: String,
+    pub schema: Option<String>,
+}
+fn describe(env: &Env, t: &T) -> Inspection {
+    let schema = match t {
+        Table(row) => match record_fields(env, row) {
+            Ok(fields) => Some(format!(
+                ".{{ {} }}",
+                fields
+                    .iter()
+                    .map(|(n, t)| format!("{n}:{t}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )),
+            Err(_) => Some(row.to_string()),
+        },
+        _ => None,
+    };
+    Inspection {
+        type_name: t.to_string(),
+        schema,
+    }
+}
+pub fn inspect_entry(p: &Program) -> Result<Inspection, Error> {
+    let env = program_env(p)?;
+    let e = p
+        .entry
+        .as_ref()
+        .ok_or_else(|| Error::new(0, "missing expression to inspect"))?;
+    let t = expr(&env, e, None, true).map_err(|e| Error::new(p.entry_start.unwrap_or(0), e))?;
+    Ok(describe(
+        &env,
+        match &t {
+            Action(inner) => inner,
+            _ => &t,
+        },
+    ))
+}
+pub fn check(p: &Program) -> Result<(), Error> {
+    let env = program_env(p)?;
     if let Some(e) = &p.entry {
-        let t = expr(&env, e, None, true).map_err(|e| Error::new(0, e))?;
+        let t = expr(&env, e, None, true).map_err(|e| Error::new(p.entry_start.unwrap_or(0), e))?;
+        if matches!(&t,Action(ret) if ret.as_ref()==&Z)
+            && expr(&env, e, Some(&Action(bx(N))), true).is_ok()
+        {
+            return Ok(());
+        }
+
         let returned = match &t {
             Action(r) => r.as_ref(),
             _ => &t,
         };
         if !matches!(returned, Unit | N) {
             return Err(Error::new(
-                0,
+                p.entry_start.unwrap_or(0),
                 format!("entry must yield () or n, found {returned}"),
             ));
         }
@@ -1148,6 +1601,22 @@ mod tests {
         assert!(error.contains(needle), "expected {needle:?} in {error:?}");
     }
     #[test]
+    fn bad_entry_reports_the_entry_start() {
+        let source = "x := 3;
+
+!{ 0b };";
+        let p = parse(source).unwrap();
+        assert_eq!(check(&p).unwrap_err().start, source.find("!{").unwrap());
+        let source = "x := 3;
+
+!{ ! x };";
+        let p = parse(source).unwrap();
+        assert_eq!(
+            inspect_entry(&p).unwrap_err().start,
+            source.find("!{").unwrap()
+        );
+    }
+    #[test]
     fn return_and_argument_types() {
         verify("sq(x:q):q := * x x; y := sq 4;").unwrap();
         check_error("sq(x:q):q := * x x; y := sq 0b;", "expected q, found b");
@@ -1161,13 +1630,13 @@ mod tests {
     }
     #[test]
     fn rejects_bad_condition_side_even_if_never_run() {
-        check_error("x := ? 1b 2 0b;", "expected n, found b");
-        check_error("x := ? 3 2 1;", "expected b, found n");
+        check_error("x := ? 1b 2 0b;", "expected z, found b");
+        check_error("x := ? 3 2 1;", "expected b, found z");
     }
     #[test]
     fn collection_and_record_validation() {
         verify("row :: { city:s; cost:q; }; data: #row := #[row { city:=\"X\"; cost:=2; }]; x:?q := avg .cost data;").unwrap();
-        check_error("x := [1 0b];", "expected n, found b");
+        check_error("x := [1 0b];", "expected z, found b");
         check_error(
             "row :: { city:s; cost:q; }; x := row { city:=\"X\"; };",
             "missing field cost",
@@ -1185,7 +1654,7 @@ mod tests {
     fn recursion_and_function_values() {
         verify("fact(x:n):n := ? (= x 0) 1 (* x (fact (- x 1))); f := &fact; v := @ f 4;").unwrap();
         check_error("f := 2; x := @ f 4;", "expected a function value");
-        verify("xs:[n] := @: (\\(v)-> + v 1) [1 2 3];").unwrap();
+        verify("xs:[n] := @: (\\(v)-> + v 1) [1n 2n 3n];").unwrap();
     }
     #[test]
     fn grouped_stats_with_mask_and_csv_effect_type() {
@@ -1204,7 +1673,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        check_error(r#"<< "csv" : c; !{ ! c.read 17; };"#, "expected s, found n");
+        check_error(r#"<< "csv" : c; !{ ! c.read 17; };"#, "expected s, found z");
     }
 
     #[test]
@@ -1217,8 +1686,92 @@ mod tests {
     }
 
     #[test]
+    fn structural_tables_extend_and_pipeline_inspect() {
+        let p = parse(
+            r#"
+            << "table" : df;
+            t := #: .{ name := ["x" "y"]; gross := [2 3]; };
+            v := df.extend .{ net := - .gross t 1; } t;
+            !{ |{ v; take 1 $; $ } };
+        "#,
+        )
+        .unwrap();
+        let inspected = inspect_entry(&p).unwrap();
+        assert_eq!(inspected.type_name, "#.{ name:s; gross:z; net:z }");
+        assert_eq!(
+            inspected.schema.as_deref(),
+            Some(".{ name:s; gross:z; net:z }")
+        );
+        check_error(
+            r#" << "df"; t := #: .{ amount := [1]; }; v := df.extend .{ amount := [2]; } t; "#,
+            "cannot replace existing column amount",
+        );
+        check_error("t := #: .{ amount := 1; };", "must be a sequence");
+        check_error("t := .missing .{ amount := 1; };", "no field missing");
+    }
+    #[test]
+    fn typed_lambdas_and_grouped_schema() {
+        let p = parse(
+            r#"
+            << "df";
+            t := #: .{ station := ["north" "south"]; value := [2 5]; };
+            g := df.agg &.station (\(k,rows)-> .{ station := k; average := avg .value rows; }) t;
+            lambda := \(x:q) -> / 1 x;
+            value:q := @ lambda 2;
+            !{ g };
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_entry(&p).unwrap().schema.as_deref(),
+            Some(".{ station:s; average:?q }")
+        );
+    }
+    #[test]
+    fn contextual_naturals_signed_default_and_typed_csv() {
+        verify(
+            r#"
+            << "csv";
+            obs :: { station:s; value:q; valid:b; };
+            !{ t:#obs := ! csv.read "input.csv"; u := slice 1 2 t; ! csv.write "out.csv" u; };
+        "#,
+        )
+        .unwrap();
+        verify(
+            r#"
+            << "csv";
+            !{ t:#.{ station:s; value:?q; } := ! csv.read "input.csv";
+                ! csv.write "out.csv" t; };
+        "#,
+        )
+        .unwrap();
+        let p = parse("x := - 3 5; y:n := 2; c := 0.125; !{ () };").unwrap();
+        assert_eq!(inspect_binding(&p, "x").unwrap(), "z");
+        assert_eq!(inspect_binding(&p, "y").unwrap(), "n");
+        assert_eq!(inspect_binding(&p, "c").unwrap(), "q");
+    }
+
+    #[test]
+    fn string_collection_operations_type_as_strings() {
+        verify(
+            r#"
+            word := "a\u{00e9}b";
+            a:s := take 2 word;
+            b:s := drop 1 word;
+            c:s := slice 2 1 word;
+            d:s := rev word;
+            e:s := [: 2 word;
+        "#,
+        )
+        .unwrap();
+        check_error(r#"a := drop -1 "abc";"#, "expected n, found z");
+        check_error(r#"a := rev 1;"#, "rev expects a sequence, table, or string");
+    }
+
+    #[test]
     fn rejects_unsupported_types() {
-        check_error("x:r := 1;", "not supported");
+        check_error("x:d := 1;", "not supported");
+        verify("x:r := 1.0r;").unwrap();
         check_error(
             "id(x:'a):'a := x;",
             "polymorphic type variables are not supported",

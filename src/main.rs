@@ -1,13 +1,178 @@
-use flux_lang::{check_source, format_source, run_source};
+use flux_lang::{check, check_source, eval, format_source, lexer, parser};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::process::ExitCode;
+use std::time::Instant;
+
+const REPL_HELP: &str =
+    "Submit one line at a time. Expressions print their value and type. Definitions and history last for this session.
+:type EXPR    show the static type without evaluating
+:schema EXPR  show a table's static schema without evaluating
+:load PATH    load and check a file of declarations without executing it
+:time EXPR    evaluate and report elapsed time
+:history      list successful expressions from this session
+:replay N     evaluate expression N again (including its explicit effects)
+:help         show these commands
+:quit         leave the REPL (:q also works alone)
+Parenthesize a suspended action to inspect it; use ! to execute it.";
+
+struct Session {
+    declarations: String,
+    expressions: Vec<String>,
+}
+
+impl Session {
+    fn new() -> Self {
+        Self {
+            declarations: String::from("<< \"io\" : io;\n"),
+            expressions: Vec::new(),
+        }
+    }
+
+    fn expression(&mut self, expression: &str, mode: Mode) -> Result<(), String> {
+        let expression = expression.trim();
+        let tokens = lexer::lex(expression).map_err(|e| e.diagnostic("<repl>", expression))?;
+        let Some(last) = tokens.last() else {
+            return Err("expected an expression".into());
+        };
+        let cleaned;
+        let expression = if last.text == ";" {
+            cleaned = format!("{}{}", &expression[..last.start], &expression[last.end..]);
+            cleaned.trim()
+        } else {
+            expression
+        };
+        if expression.is_empty() {
+            return Err("expected an expression".into());
+        }
+        // Leave a newline before the closing delimiter; a line comment must not
+        // consume the synthetic wrapper.
+        let source = format!("{}!{{\n{expression}\n}};", self.declarations);
+        let diag = |error: flux_lang::Error| error.diagnostic("<repl>", &source);
+        let program = parser::parse(&source).map_err(diag)?;
+        let inspection = check::inspect_entry(&program).map_err(diag)?;
+        match mode {
+            Mode::Type => println!("{}", inspection.type_name),
+            Mode::Schema => {
+                let schema = inspection.schema.ok_or_else(|| {
+                    format!(":schema expects a table; found {}", inspection.type_name)
+                })?;
+                println!("{schema}");
+            }
+            Mode::View | Mode::Time => {
+                let start = Instant::now();
+                let out = eval::view_entry(&program).map_err(diag)?;
+                let elapsed = start.elapsed();
+                print!("{}", out.stdout);
+                if out.value.contains('\n') {
+                    println!("{}\n: {}", out.value, inspection.type_name);
+                } else {
+                    println!("{} : {}", out.value, inspection.type_name);
+                }
+                if matches!(mode, Mode::Time) {
+                    println!("elapsed: {:.3} ms", elapsed.as_secs_f64() * 1_000.0);
+                }
+                self.expressions.push(expression.to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    fn load(&mut self, arg: &str) -> Result<(), String> {
+        let path = arg
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(arg);
+        if path.is_empty() {
+            return Err("usage: :load PATH".into());
+        }
+        let file = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let candidate = format!("{}{file}\n", self.declarations);
+        let diagnostic = |e: flux_lang::Error| {
+            if let Some(start) = e.start.checked_sub(self.declarations.len()) {
+                flux_lang::Error::new(start, e.message).diagnostic(path, &file)
+            } else {
+                e.diagnostic("<repl>", &candidate)
+            }
+        };
+        let program = parser::parse(&candidate).map_err(diagnostic)?;
+        if program.entry.is_some() {
+            return Err(format!(
+                "{path}: :load accepts declarations only; run script entries with flux FILE"
+            ));
+        }
+        check::check(&program).map_err(diagnostic)?;
+        self.declarations = candidate;
+        println!("loaded {path}");
+        Ok(())
+    }
+
+    fn submission(&mut self, line: &str) -> Result<(), String> {
+        let lexed = lexer::lex(line).map_err(|e| e.diagnostic("<repl>", line))?;
+        let terminated = lexed.last().is_some_and(|t| t.text == ";");
+        let source = format!(
+            "{}{line}\n{}\n",
+            self.declarations,
+            if terminated { "" } else { ";" }
+        );
+        if let Ok(program) = parser::parse(&source) {
+            if program.entry.is_none() {
+                check::check(&program).map_err(|e| e.diagnostic("<repl>", &source))?;
+                self.declarations = source;
+                return Ok(());
+            }
+            check::check(&program).map_err(|e| e.diagnostic("<repl>", &source))?;
+            let output = eval::run(&program).map_err(|e| e.diagnostic("<repl>", &source))?;
+            print!("{}", output.stdout);
+            return Ok(());
+        }
+        self.expression(line, Mode::View)
+    }
+
+    fn dispatch(&mut self, line: &str) -> Result<bool, String> {
+        let (head, arg) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let arg = arg.trim();
+        match head {
+            ":q" | ":quit" if arg.is_empty() => return Ok(false),
+            ":help" => println!("{REPL_HELP}"),
+            ":type" => self.expression(arg, Mode::Type)?,
+            ":schema" => self.expression(arg, Mode::Schema)?,
+            ":time" => self.expression(arg, Mode::Time)?,
+            ":load" => self.load(arg)?,
+            ":history" => {
+                for (i, expression) in self.expressions.iter().enumerate() {
+                    println!("{}  {expression}", i + 1);
+                }
+            }
+            ":replay" => {
+                let i = arg
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| i.checked_sub(1))
+                    .and_then(|i| self.expressions.get(i).cloned())
+                    .ok_or_else(|| "usage: :replay N (an index shown by :history)".to_string())?;
+                self.expression(&i, Mode::View)?;
+            }
+            // In particular `:q 4` remains an ordinary numeric conversion.
+            _ => self.submission(line)?,
+        }
+        Ok(true)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Type,
+    Schema,
+    View,
+    Time,
+}
 
 fn repl() -> Result<u8, String> {
     let stdin = io::stdin();
     let interactive = stdin.is_terminal();
     let mut lines = stdin.lock().lines();
-    let mut declarations = String::from("<< \"io\" : io;\n");
+    let mut session = Session::new();
     loop {
         if interactive {
             print!("flux> ");
@@ -16,34 +181,13 @@ fn repl() -> Result<u8, String> {
         let Some(line) = lines.next() else { break };
         let line = line.map_err(|e| e.to_string())?;
         let line = line.trim();
-        if line == ":q" || line == ":quit" {
-            break;
-        }
         if line.is_empty() || line.starts_with("--") {
             continue;
         }
-        let statement = if line.ends_with(';') {
-            line.to_string()
-        } else {
-            format!("{line};")
-        };
-        let candidate = format!("{declarations}{statement}\n");
-        if let Ok(program) = check_source(&candidate) {
-            if program.entry.is_none() {
-                declarations = candidate;
-                continue;
-            }
-            match run_source(&candidate) {
-                Ok(output) => print!("{}", output.stdout),
-                Err(error) => eprintln!("{}", error.diagnostic("<repl>", &candidate)),
-            }
-            continue;
-        }
-        let expression = line.strip_suffix(';').unwrap_or(line);
-        let command = format!("{declarations}!{{ ! io.print ({expression}); }};");
-        match run_source(&command) {
-            Ok(output) => print!("{}", output.stdout),
-            Err(err) => eprintln!("{}", err.diagnostic("<repl>", &command)),
+        match session.dispatch(line) {
+            Ok(false) => break,
+            Ok(true) => {}
+            Err(error) => eprintln!("{error}"),
         }
     }
     Ok(0)
