@@ -8,6 +8,7 @@ const MAX_BYTES: usize = 1 << 20;
 const MAX_NODES: usize = 100_000;
 const MAX_DEPTH: usize = 64;
 const MAX_DIGITS: usize = 100_000;
+const MAX_TOTAL_NUMBER_DIGITS: usize = 1_000_000;
 
 #[derive(Debug)]
 enum JsonError {
@@ -22,20 +23,39 @@ fn invalid(e: serde_json::Error) -> JsonError {
     JsonError::Invalid(e.to_string())
 }
 
-struct Budget(usize);
+struct Budget {
+    nodes: usize,
+    number_digits: usize,
+}
+impl Default for Budget {
+    fn default() -> Self {
+        Self {
+            nodes: MAX_NODES,
+            number_digits: MAX_TOTAL_NUMBER_DIGITS,
+        }
+    }
+}
 impl Budget {
     fn enter(&mut self, depth: usize) -> J<()> {
-        if depth > MAX_DEPTH || self.0 == 0 {
+        if depth > MAX_DEPTH || self.nodes == 0 {
             return Err(shape("JSON nesting or node limit exceeded"));
         }
-        self.0 -= 1;
+        self.nodes -= 1;
+        Ok(())
+    }
+
+    fn number(&mut self, digits: usize) -> J<()> {
+        self.number_digits = self
+            .number_digits
+            .checked_sub(digits)
+            .ok_or_else(|| shape("JSON total numeric expansion exceeds the resource limit"))?;
         Ok(())
     }
 }
 
 /// Convert a JSON number to plain decimal notation, retaining decimal scale
 /// after application of its exponent. The JSON parser validates token syntax.
-fn plain_number(raw: &str) -> J<String> {
+fn plain_number(raw: &str, budget: &mut Budget) -> J<String> {
     let (mantissa, exponent) = match raw.split_once(['e', 'E']) {
         Some((m, e)) => (
             m,
@@ -49,7 +69,8 @@ fn plain_number(raw: &str) -> J<String> {
         None => (false, mantissa),
     };
     let (whole, fractional) = m.split_once('.').unwrap_or((m, ""));
-    if whole.len() + fractional.len() > MAX_DIGITS {
+    let input_digits = whole.len() + fractional.len();
+    if input_digits > MAX_DIGITS {
         return Err(shape("JSON numeric digits exceed the resource limit"));
     }
     let scale = (fractional.len() as i64)
@@ -58,6 +79,23 @@ fn plain_number(raw: &str) -> J<String> {
     if scale.unsigned_abs() > MAX_DIGITS as u64 {
         return Err(shape("JSON numeric scale exceeds the resource limit"));
     }
+    // Charge both input digits and exponent-driven padding before allocating
+    // the expanded string or parsing a wide coefficient/denominator.
+    let significant_whole = whole.trim_start_matches('0').len();
+    let significant_digits = if significant_whole == 0 {
+        fractional.trim_start_matches('0').len()
+    } else {
+        significant_whole + fractional.len()
+    };
+    let expanded_digits = if scale > 0 {
+        significant_digits.max(scale as usize + 1)
+    } else if significant_digits == 0 {
+        1
+    } else {
+        significant_digits + (-scale) as usize
+    };
+    budget.number(input_digits.max(expanded_digits))?;
+
     let digits = format!("{whole}{fractional}");
     let unpadded = digits.trim_start_matches('0');
     let digits = if unpadded.is_empty() { "0" } else { unpadded };
@@ -86,7 +124,7 @@ fn plain_number(raw: &str) -> J<String> {
     Ok(out)
 }
 
-fn number(raw: &str, kind: Prim) -> J<V> {
+fn number(raw: &str, kind: Prim, budget: &mut Budget) -> J<V> {
     if !raw
         .as_bytes()
         .first()
@@ -94,7 +132,7 @@ fn number(raw: &str, kind: Prim) -> J<V> {
     {
         return Err(shape("expected a JSON number"));
     }
-    let plain = plain_number(raw)?;
+    let plain = plain_number(raw, budget)?;
     if kind == Prim::D {
         return decimal05::decimal_literal(&plain).map_err(shape);
     }
@@ -189,7 +227,7 @@ fn read(
         Type::Prim(Prim::Unit) if raw == "null" => Ok(V::Unit),
         Type::Prim(Prim::B) if raw == "true" => Ok(V::Bool(true)),
         Type::Prim(Prim::B) if raw == "false" => Ok(V::Bool(false)),
-        Type::Prim(k @ (Prim::N | Prim::Z | Prim::Q | Prim::D)) => number(raw, *k),
+        Type::Prim(k @ (Prim::N | Prim::Z | Prim::Q | Prim::D)) => number(raw, *k, budget),
         Type::Prim(Prim::C | Prim::S) if raw.starts_with('"') => {
             let value = serde_json::from_str::<String>(raw).map_err(invalid)?;
             if *ty == Type::Prim(Prim::S) {
@@ -362,7 +400,7 @@ pub(super) fn apply(
         (CoreOp::JsonEncode, [v]) => {
             let mut encoder = Encoder {
                 out: String::new(),
-                budget: Budget(MAX_NODES),
+                budget: Budget::default(),
             };
             let result = encoder.value(v, 0).map(|()| V::String(encoder.out.into()));
             outcome(result, span, program)
@@ -379,7 +417,7 @@ pub(super) fn apply(
             } else {
                 serde_json::from_str::<&RawValue>(input)
                     .map_err(invalid)
-                    .and_then(|raw| read(raw, target, program, &mut Budget(MAX_NODES), 0))
+                    .and_then(|raw| read(raw, target, program, &mut Budget::default(), 0))
             };
             outcome(result, span, program)
         }
@@ -401,15 +439,17 @@ mod tests {
             ("-0.000", "-0.000"),
             ("20e+2", "2000"),
         ] {
-            assert_eq!(plain_number(a).unwrap(), b);
+            assert_eq!(plain_number(a, &mut Budget::default()).unwrap(), b);
         }
+        let mut budget = Budget::default();
+        let mut number = |s, kind| super::number(s, kind, &mut budget);
         assert_eq!(repr(&number("12.000", Prim::Z).unwrap()), "12");
         assert!(number("12.001", Prim::Z).is_err());
         assert!(number("-1", Prim::N).is_err());
         let d = number("9007199254740993.2000", Prim::D).unwrap();
         let mut enc = Encoder {
             out: String::new(),
-            budget: Budget(MAX_NODES),
+            budget: Budget::default(),
         };
         enc.value(&d, 0).unwrap();
         assert_eq!(enc.out, "9007199254740993.2000");
@@ -418,7 +458,7 @@ mod tests {
     fn nonterminating_rationals_and_present_null_are_not_silently_encoded() {
         let mut enc = Encoder {
             out: String::new(),
-            budget: Budget(MAX_NODES),
+            budget: Budget::default(),
         };
         let v = rational(BigInt::from(1), BigInt::from(3)).unwrap();
         assert!(matches!(enc.value(&v, 0), Err(JsonError::Shape(_))));
