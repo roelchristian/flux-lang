@@ -1,0 +1,12 @@
+district,ward,year,residents
+North,Cedar,2020,800
+North,River,2020,1200
+North,Cedar,2025,830
+North,River,2025,1270
+South,Hill,2020,600
+South,Market,2020,400
+South,Hill,2025,590
+South,Market,2025,360
+East,Park,2025,200
+West,Harbor,2020,0
+West,Harbor,2025,12
