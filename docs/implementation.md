@@ -50,7 +50,7 @@ exact rational division; same-length and mismatched column tables, zero-row
 typed columns, duplicate field names, and insertion order; empty groups,
 stable ties, missing/malformed CSV cells and no-clobber output; its own error
 paths for `df.extend`; and formatter token fidelity for all comment styles.
-`examples/monitoring.flx` is the intended end-to-end regression, not a
+`examples/tables/monitoring.flx` is the intended end-to-end regression, not a
 benchmark. The old raw CSV example remains useful as a distinct regression.
 
 See the [measured performance review](performance.md). For performance measurement, keep lex/parse/check separate from evaluation

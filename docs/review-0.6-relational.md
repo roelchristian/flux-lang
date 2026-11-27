@@ -26,12 +26,13 @@ the left layout, and requires real structural equality for row values.
 Both defects were independently retested. The output cardinality limit
 allowed 99,856 matching pairs and rejected a join exceeding 100,000.
 
-The [synthetic financial reconciliation](../examples/reconciliation/)
-passed under both default and strict CLI. Seven rows on each side produce
-eight inner pairs and nine left rows. The emitted CSV records an exact
-+0.25 mismatch, one ledger-only and one statement-only key, one duplicate
-key with 2-by-2 source counts, and a matched statement row with no amount.
-The actual zero reconciles. A rerun does not overwrite the first report.
+The current [calibration audit](../examples/applications/calibration/)
+preserves the relational coverage of the original synthetic example.
+Seven rows on each side produce eight inner pairs and nine left rows. The
+CSV records an exact `0.25` mm deviation, one measurement-only key, one
+reference-only key, a duplicate key with 2-by-2 source counts, and a
+matched reference row without a reading. A present zero matches. A
+rerun does not overwrite the first report.
 
 Rust 1.85: 281 all-feature/all-target tests, formatting, strict Clippy, and
 locked release build passed. Twelve end-to-end relational tests, 22 separate

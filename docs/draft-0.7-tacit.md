@@ -43,9 +43,9 @@ Pure tacit values generalize as ordinary function values. Identity has type
 checker. For example:
 
 ```flux
-profit := &{ @* - .revenue .cost };
-a := @ profit .{ revenue := 120; cost := 80; };
-b := @ profit .{ account := "sales"; revenue := 125.50d; cost := 80.25d; };
+offset := &{ @* - .measured .reference };
+a := @ offset .{ measured := 120; reference := 80; };
+b := @ offset .{ station := "north"; measured := 125.50d; reference := 80.25d; };
 sqv:[q]->[q] := &{ @* * . . };
 ss:[q]->q := &{ @. +/ sqv };
 norm:[q]->r := &{ @. ^/ ss };
