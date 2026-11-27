@@ -53,3 +53,22 @@ then executes inner, left, and anti joins.
 These are bounded reference-interpreter workloads, not a columnar engine
 benchmark. Rolling/window functions, pivots, temporal joins, and production
 columnar execution are deliberately later.
+
+## Final stack review
+
+Three independent passes checked cross-module typed HIR calls, relational
+ordering and schema evidence, and exact-number/typed-error behavior across
+library and table boundaries. Imported typed joins and projection callbacks,
+empty schemas, curried table operations, CSV exact-value round trips and JSON
+error provenance through result combinators matched the checked semantics.
+
+Two findings were revised before merge. Table equality now compares named
+fields rather than their declaration order, so deduplication handles nested
+tables with equivalent schemas; display still follows the enclosing table's
+column order. JSON decoding now limits cumulative exact-number expansion to
+one million digits per document, in addition to individual number and
+document limits. The regression suite checks both sides of this limit.
+
+For pathological nested values, the structural deduplication fallback counts
+row comparisons, not every nested comparison. This remains a performance
+limitation of the reference interpreter.
