@@ -85,8 +85,11 @@ fn reject(f: &Fixture, path: &str, fragments: &[&str]) -> String {
 #[test]
 fn examples_run_in_both_modes() {
     let f = Fixture::new();
-    f.write("tacit.flx", include_str!("../examples/tacit.flx"));
-    f.write("finance.flx", include_str!("../examples/tacit-finance.flx"));
+    f.write("tacit.flx", include_str!("fixtures/pre-corpus/tacit.flx"));
+    f.write(
+        "finance.flx",
+        include_str!("fixtures/pre-corpus/tacit-finance.flx"),
+    );
     accept(&f, "", "tacit.flx", "(10, 13, 12, identity)\n");
     accept(&f, "", "finance.flx", "([C], [0.00 0.00 0.02])\n");
 }

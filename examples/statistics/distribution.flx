@@ -1,0 +1,9 @@
+--- A frequency table for the observed number of events per interval.
+<< "df";
+obs :: { events:n; };
+ys:#obs := #[obs { events:=0; } obs { events:=2; } obs { events:=0; }
+             obs { events:=1; } obs { events:=2; } obs { events:=0; }];
+count(k:n, rows:#obs) := .{ events:=k; frequency:=# rows; };
+freq := df.agg &.events &count ys;
+
+!{ ^{ ^? ! print (.events freq,.frequency freq); () } };

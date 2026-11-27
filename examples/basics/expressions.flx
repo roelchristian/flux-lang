@@ -1,0 +1,6 @@
+--- Prefix operators take their operands from left to right.
+weighted := + (* 3z 5z) 2z;
+exact_share := / 7z 12z;
+change := - 12.50d 10.25d;
+
+!{ ^{ ^? ! print (weighted,exact_share,change); () } };

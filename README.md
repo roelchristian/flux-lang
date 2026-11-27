@@ -6,43 +6,36 @@ designed for numerical work, tabular analysis, and scripting. This repository
 contains the Draft 0.7 typed HIR interpreter in Rust, not a stable language release.
 
 ```flux
-<< "io" : io;
-sq(x:z) := * x x;
-
-!{
-    x := .. 1 10;
-    ^{
-        ^? ! io.print (@: &sq x);
-        ()
-    }
-};
+sq := &{ @* * . . };
+!{ ^{
+    ^? ! print (@: sq (.. 1z 5z));
+    ()
+} };
 ```
 
-The single executable block runs when invoked as a script. Pure declarations
-stay outside it; importing a library does not run an entry block.
+This prints `[1 4 9 16 25]`. The pure declaration binds a function value.
+Supply one argument with prefix `@ sq 5z`, or map it with `@:`. A named
+callable such as `square(x:z):z := * x x;` instead takes `square 5z`.
+The anonymous entry executes the suspended print action with `!`; `^?`
+propagates a typed failure.
 
-## Run the prototype
+## Try the examples
+
+From the repository root:
 
 ```sh
-cargo test --locked
-cargo run -- examples/permutation.flx
-cargo run -- examples/observations.flx
-cargo run -- examples/csv-grid.flx
-cargo run -- examples/pipeline.flx
-cargo run -- examples/monitoring.flx
-cargo run -- check examples/observations.flx
-cargo run -- fmt examples/observations.flx
-cargo run -- hir examples/permutation.flx
-cargo run -- run-hir examples/permutation.flx
-cargo run --
+cargo run -- examples/basics/hello.flx
+cargo run -- examples/tacit/arithmetic.flx
+cargo run -- examples/mathematics/exact.flx
+cargo run -- check examples/tables/observations.flx
+cargo run -- run-hir examples/tacit/composition.flx
+cargo test --locked --test example_corpus
 ```
 
-`cargo install --path .` installs `flux`. The interactive shell accepts
-declarations or expressions and continues open delimiters on the next line. Try `:type`, `:schema`, `:history`,
-`:load`, or `:help`, and exit with `:quit`. The monitoring example refuses to
-overwrite an existing `summary.csv`. The early
-formatter writes to stdout, normalizes line endings and removes trailing
-whitespace, and checks that the token stream is unchanged.
+The [example index](examples/README.md) is a guided tour from expressions and
+function algebra to local modules and complete scientific and text-processing
+applications. `cargo install --path .` installs `flux`. Invoke it without a file
+for the REPL; try `:type`, `:schema`, `:load`, or `:help`.
 
 ## Recoverable failure
 
@@ -51,8 +44,7 @@ propagate, and `^= result { ... }` to recover. These operations are checked
 statically. The ordinary `/` operator still produces a fatal diagnostic on a
 zero divisor; use `math.div` for checked, exact division.
 
-The I/O signatures changed in Draft 0.4.1. A print now returns an action
-of type `!(()^ioerr)`; executing that action yields a result, not bare unit.
+The prelude’s `print` returns an action of type `!(()^ioerr)`; executing that action yields a result, not bare unit.
 File and CSV actions likewise return typed results. A script must handle or
 propagate them explicitly.
 

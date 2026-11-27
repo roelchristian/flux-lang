@@ -1,0 +1,11 @@
+>> (identity,twice,ordered,tidy,clean);
+<< "str" : text;
+
+identity:'a->'a := &.;
+twice(x:'a):'a | num 'a := + x x;
+ordered(x,y:'a):b | ord 'a := <= x y;
+
+tidy:s->s := &{ @. text.lower text.trim };
+-- This helper is deliberately absent from the export list.
+tidy_all(xs:[s]):[s] := @: tidy xs;
+clean(xs:[s]):[s] := tidy_all xs;

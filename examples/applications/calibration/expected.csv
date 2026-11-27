@@ -1,0 +1,6 @@
+sample,status,measured,reference,offset_mm
+B,deviation,1,1,0.25
+C,measurement_only,1,0,
+D,reference_only,0,1,
+E,duplicate_sample,2,2,
+G,missing_reference_value,1,1,

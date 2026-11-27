@@ -1,0 +1,31 @@
+<< "csv";
+<< "df";
+
+err :: { | data csverr; | output ioerr; };
+obs :: { station:s; value:q; valid:b; };
+
+summ(k:s,t:#obs) := .{
+    station := k;
+    count := # t;
+    mean := avg .value t;
+    median := med .value t;
+    sd := sd .value t;
+};
+
+!{
+    ^{
+        t:#obs := ^= ! csv.read "examples/data/observations.csv" {
+            e : ^: data e;
+        };
+        summary := |{
+            t;
+            ?: .valid $ $;
+            ?: (> .value $ 0q) $;
+            df.agg &.station &summ $;
+            <: &.count $
+        };
+        ^= ! print summary { e : ^: output e; };
+        ^= ! csv.write "summary.csv" summary { e : ^: data e; };
+        ()
+    }
+};

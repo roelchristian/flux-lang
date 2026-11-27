@@ -1,0 +1,13 @@
+<< "df";
+
+reading :: { id:s; level:z; note:?s; };
+has_note(x:reading):b := /= .note x ?0;
+positive(x:reading):b := > .level x 0z;
+usable:reading->b := &{ @* && positive has_note };
+
+rows := #[
+    reading {id:="A"; level:=2z; note:=?1 "checked";}
+    reading {id:="B"; level:=3z; note:=?0;}
+    reading {id:="C"; level:=-1z; note:=?1 "checked";}
+];
+!{ ^{ ^? ! print .id (?: usable rows); () } };

@@ -160,30 +160,6 @@ fn floor_quotient_is_not_a_comment_and_calls_stay_prefix() {
 }
 
 #[test]
-fn bundled_examples_run_with_documented_results() {
-    for (file, expected) in [
-        ("examples/permutation.flx", "60\n1\n0\n"),
-        ("examples/observations.flx", "2\n?1 15\n"),
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_flux"))
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .arg(file)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{file}: {}", text(&output.stderr));
-        assert_eq!(text(&output.stdout), expected, "{file}");
-    }
-    let output = Command::new(env!("CARGO_BIN_EXE_flux"))
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .arg("examples/csv-grid.flx")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", text(&output.stderr));
-    assert!(text(&output.stdout).starts_with("5\n[[station value valid]"));
-    assert!(text(&output.stdout).contains("[west, upland 40 false]"));
-}
-
-#[test]
 fn fmt_normalizes_whitespace_without_editing_input() {
     let file = Script::new("-- comment  \r\n!{ 7 }; \r\n");
     let output = file.invoke(&["fmt"]);

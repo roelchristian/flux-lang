@@ -1,0 +1,21 @@
+--- Both branches see the same point.
+point :: { x:q; y:q; };
+sq := &{ @* * . . };
+magnitude_squared:point->q := &{ @* + (@. sq .x) (@. sq .y) };
+
+--- Extrema return optionals. Guard the empty input before unwrapping.
+high(xs:[q]):q := ?! (>/ xs);
+low(xs:[q]):q := ?! (</ xs);
+spread:[q]->q := &{ @* - high low };
+range(xs:[q]):?q := ?{ = (# xs) 0n : ?0; _ : ?1 @ spread xs; };
+length(xs:[q]):q := :q (# xs);
+average:[q]->q := &{ @* / +/ length };
+mean(xs:[q]):?q := ?{ = (# xs) 0n : ?0; _ : ?1 @ average xs; };
+
+!{
+    ^{
+        ^? ! print (@ magnitude_squared point {x:=3q; y:=4q;});
+        ^? ! print (range [2q 10q 3q],mean [2q 10q 3q],range [],mean []);
+        ()
+    }
+};

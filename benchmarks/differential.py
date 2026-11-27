@@ -23,7 +23,7 @@ SPECIMENS = {
 def invoke(executable, name, source, *, typed=False, legacy=False, oracle_tree=None):
     with TemporaryDirectory(prefix="flux-diff-") as name_of_directory:
         directory = Path(name_of_directory)
-        shutil.copytree(ROOT / "examples", directory / "examples")
+        shutil.copytree(ROOT / "tests" / "fixtures" / "pre-corpus", directory / "examples")
         if source is None:
             script = f"examples/{name}"
             if legacy:

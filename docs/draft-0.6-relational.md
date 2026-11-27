@@ -97,12 +97,12 @@ simply because their fields happen to be named alike.
 Window functions, pivots, as-of joins, and columnar execution are not in
 this revision.
 
-## Reconciliation example
+## Calibration audit example
 
-Copy the files in `examples/reconciliation` to a working directory and run
-`flux run-hir reconcile.flx` there. The synthetic ledger and statement CSVs
-produce five exceptions, including a decimal discrepancy of `0.25`, records
-present on only one side, duplicate source records and a matched record with
-a missing statement amount. Genuine zero amounts match and do not appear
-as missing. The output is an ordered `report.csv`, created without
-overwriting an existing file.
+Copy the files in [examples/applications/calibration](../examples/applications/calibration/)
+to a working directory and run `flux run-hir audit.flx` there. The synthetic
+measurement and reference CSVs produce five findings: an exact `0.25` mm
+offset, records present on only one side, duplicate sample IDs, and a
+matched record with an absent reference reading. A present zero matches
+other zeros and does not appear as missing. The ordered `findings.csv`
+is created without overwriting an existing file.

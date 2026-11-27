@@ -1,0 +1,27 @@
+<< "df";
+<< "io";
+<< "str";
+
+apperr :: { | input ioerr; | output ioerr; };
+wordrow :: { word:s; };
+entry :: { word:s; occurrences:n; };
+
+separate(text:s,delimiter:s):s := str.join " " (str.split delimiter text);
+normalize:s->s := &{ @. str.trim str.lower };
+not_blank(word:s):b := /= word "";
+row(word:s):wordrow := wordrow { word:=word; };
+count(word:s,rows:#wordrow):entry := entry { word:=word; occurrences:=# rows; };
+show(x:entry):(s,n) := (.word x,.occurrences x);
+
+!{ ^{
+    text := ^= ! io.read "examples/data/corpus.txt" { e : ^: input e; };
+    clean := /: &separate (@ normalize text) ["\n" "\r" "\t" "," "." ";" ":" "!" "?"];
+    words := ?: &not_blank (str.split " " clean);
+    alphabet := >: &.word (df.agg &.word &count (#: (@: &row words)));
+    ranked := <: &.occurrences alphabet;
+    ^= ! print "alphabetical (word, frequency)" { e : ^: output e; };
+    ^= ! print (@: &show alphabet) { e : ^: output e; };
+    ^= ! print "frequency (descending; ties alphabetical)" { e : ^: output e; };
+    ^= ! print (@: &show ranked) { e : ^: output e; };
+    ()
+} };

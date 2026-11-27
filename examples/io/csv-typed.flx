@@ -1,0 +1,18 @@
+<< "csv";
+<< "res";
+
+sample :: { name:s; reading:?d; };
+problem :: { | input csverr; | output ioerr; };
+unexpected(t:#sample):b := 0b;
+!{ ^{
+    samples:#sample := ^= ! csv.read "examples/io/data/readings.csv" { e : ^: input e; };
+    values := .reading samples;
+    present := ?: &?+ values;
+    parsed:#sample^csverr := ! csv.read "examples/io/data/malformed-reading.csv";
+    malformed := ^= res.map &unexpected parsed {
+        cellerr row col raw : && (= row 2n) (&& (== col "reading") (== raw "not-a-decimal"));
+        _ : 0b;
+    };
+    ^= ! print (# samples,# present,@: &?! present,malformed) { e : ^: output e; };
+    ()
+} };

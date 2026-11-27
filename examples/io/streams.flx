@@ -1,0 +1,11 @@
+<< "io";
+
+!{ ^{
+    first := ^? ! io.readln;
+    blank := ^? ! io.readln;
+    last  := ^? ! io.readln;
+    eof   := ^? ! io.readln;
+    ^? ! print (?? "missing" first,?+ blank,# (?? "missing" blank));
+    ^? ! print (?? "missing" last,?+ eof);
+    ()
+} };

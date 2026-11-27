@@ -1,0 +1,5 @@
+>> (rectangle,area,perimeter,volume);
+rectangle :: { width:q; height:q; };
+area:rectangle->q := &{ @* * .width .height };
+perimeter(r:rectangle):q := * 2 (+ .width r .height r);
+volume(r:rectangle,depth:q):q := * (@ area r) depth;

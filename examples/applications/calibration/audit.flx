@@ -1,0 +1,17 @@
+<< "csv";
+<< "schema.flx" : s;
+<< "matching.flx" : matching;
+<< "findings.flx" : findings;
+
+auditerr :: { | input csverr; | output csverr; | trace ioerr; };
+
+!{ ^{
+    m:#s.measurement := ^= ! csv.read "measured.csv" { e : ^: input e; };
+    r:#s.reference := ^= ! csv.read "reference.csv" { e : ^: input e; };
+    raw := matching.raw_counts m r;
+    report := findings.audit m r;
+
+    ^= ! csv.write "findings.csv" report { e : ^: output e; };
+    ^= ! print (.1 raw,.2 raw,# report) { e : ^: trace e; };
+    ()
+} };
