@@ -1,0 +1,41 @@
+<< "csv";
+<< "df";
+<< "math";
+<< "opt";
+
+err :: { | data csverr; | output ioerr; };
+entry :: { star:s; constellation:s; magnitude:?d; parallax_mas:?d; };
+survey :: { star:s; constellation:s; parallax_mas:?d; };
+
+object(x:entry):(s,s) := (.star x,.constellation x);
+sighting(x:survey):(s,s) := (.star x,.constellation x);
+parallax(x:survey):?d := .parallax_mas x;
+
+--- A simple inverse-parallax estimate, without an uncertainty model.
+pc(p:d):?d := ?{
+    <= p 0d : ?0;
+    _ : ?1 (math.quantize 2n (/ 1000d p));
+};
+
+report(x:(entry,?survey)) := {
+    observed := .2 x;
+    p := opt.bind &parallax observed;
+    .{ star := .star .1 x; matched := ?+ observed;
+       parallax_mas := p; distance_pc := opt.bind &pc p; }
+};
+
+!{
+    ^{
+        stars:#entry := ^= ! csv.read "examples/data/catalogue.csv" {
+            e : ^: data e;
+        };
+        raw:#survey := ^= ! csv.read "examples/data/parallax.csv" {
+            e : ^: data e;
+        };
+        measurements := df.distinct raw;
+        matched := *? &object &sighting stars measurements;
+        ^= ! print (# stars,# raw,# measurements) { e : ^: output e; };
+        ^= ! print (df.select &report matched) { e : ^: output e; };
+        ()
+    }
+};
