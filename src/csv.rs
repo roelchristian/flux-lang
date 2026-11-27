@@ -1,32 +1,123 @@
+use crate::errors041::{IoFault, IoKind};
 use std::io::{Read, Write};
 
 type Rt<T> = Result<T, String>;
+type FileResult<T> = Result<T, IoFault>;
+type CsvResult<T> = Result<T, CsvFault>;
 
 const CSV_MAX_BYTES: u64 = 1_048_576;
 const CSV_MAX_CELLS: usize = 100_000;
-pub fn read(path: &str) -> Rt<String> {
-    let err = |e: std::io::Error| format!("cannot read CSV {path:?}: {e}");
-    let m = std::fs::metadata(path).map_err(err)?;
-    if !m.is_file() {
-        return Err(format!("CSV path {path:?} is not a regular file"));
+pub(crate) const TEXT_MAX_BYTES: u64 = 1_048_576;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CsvFaultKind {
+    Header(String),
+    Duplicate(String),
+    Absent(String),
+    Row(usize),
+}
+
+#[derive(Debug)]
+pub(crate) struct CsvFault {
+    pub kind: CsvFaultKind,
+    pub diagnostic: String,
+}
+
+impl CsvFault {
+    fn row(index: usize, diagnostic: String) -> Self {
+        Self {
+            kind: CsvFaultKind::Row(index),
+            diagnostic,
+        }
     }
-    if m.len() > CSV_MAX_BYTES {
-        return Err(format!("CSV input exceeds {CSV_MAX_BYTES} bytes"));
+
+    fn header(diagnostic: String) -> Self {
+        Self {
+            kind: CsvFaultKind::Header(diagnostic.clone()),
+            diagnostic,
+        }
     }
-    let f = std::fs::File::open(path).map_err(err)?;
-    if !f.metadata().map_err(err)?.is_file() {
-        return Err(format!("CSV path {path:?} is not a regular file"));
+}
+
+/// A byte source used for executing read actions. It is not consulted when an
+/// action is constructed or statically checked. The runtime still enforces
+/// its independent length limit and UTF-8 decoding.
+pub trait RuntimeInput {
+    fn open(&mut self, path: &str) -> std::io::Result<OpenedInput>;
+}
+
+pub struct OpenedInput {
+    pub reader: Box<dyn Read>,
+    pub byte_len: Option<u64>,
+}
+
+/// Default input uses the platform filesystem and only opens regular files.
+/// File writes and existence queries are not redirected by the input seam.
+pub struct FsInput;
+
+impl RuntimeInput for FsInput {
+    fn open(&mut self, path: &str) -> std::io::Result<OpenedInput> {
+        use std::io::{Error, ErrorKind};
+        let irregular = || Error::new(ErrorKind::InvalidInput, "path is not a regular file");
+        // Test before open so named pipes and other non-regular input are not
+        // opened intentionally; recheck the opened descriptor as well.
+        let before = std::fs::metadata(path)?;
+        if !before.is_file() {
+            return Err(irregular());
+        }
+        let file = std::fs::File::open(path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() {
+            return Err(irregular());
+        }
+        Ok(OpenedInput {
+            reader: Box::new(file),
+            byte_len: Some(before.len().max(opened.len())),
+        })
+    }
+}
+
+pub(crate) fn read_text_with_input(
+    input: &mut dyn RuntimeInput,
+    path: &str,
+    label: &str,
+    max: u64,
+) -> FileResult<String> {
+    let io = |error| IoFault::system(path, error, false);
+    let too_large = || {
+        IoFault::details(
+            IoKind::Read,
+            path,
+            format!("{label} input exceeds {max} bytes"),
+        )
+    };
+    let opened = input.open(path).map_err(io)?;
+    if opened.byte_len.is_some_and(|len| len > max) {
+        return Err(too_large());
     }
     let mut bytes = Vec::new();
-    f.take(CSV_MAX_BYTES + 1)
+    opened
+        .reader
+        .take(max + 1)
         .read_to_end(&mut bytes)
-        .map_err(err)?;
-    if bytes.len() as u64 > CSV_MAX_BYTES {
-        return Err(format!("CSV input exceeds {CSV_MAX_BYTES} bytes"));
+        .map_err(io)?;
+    if bytes.len() as u64 > max {
+        return Err(too_large());
     }
-    String::from_utf8(bytes).map_err(|_| format!("CSV {path:?} is not valid UTF-8"))
+    String::from_utf8(bytes).map_err(|_| IoFault::encoding(path))
 }
+
+pub(crate) fn read041_with_input(input: &mut dyn RuntimeInput, path: &str) -> FileResult<String> {
+    read_text_with_input(input, path, "CSV", CSV_MAX_BYTES)
+}
+pub fn read(path: &str) -> Rt<String> {
+    read041_with_input(&mut FsInput, path).map_err(|e| e.diagnostic)
+}
+
 pub fn decode(s: &str) -> Rt<Vec<Vec<String>>> {
+    decode041(s).map_err(|e| e.diagnostic)
+}
+pub(crate) fn decode041(s: &str) -> CsvResult<Vec<Vec<String>>> {
     #[derive(PartialEq, Eq)]
     enum State {
         Start,
@@ -42,23 +133,30 @@ pub fn decode(s: &str) -> Rt<Vec<Vec<String>>> {
     let mut open = false;
     let mut count = 0usize;
     let mut chars = s.chars().peekable();
-    let mut add_field = |row: &mut Vec<String>, field: &mut String| -> Rt<()> {
-        count += 1;
-        if count > CSV_MAX_CELLS {
-            return Err(format!("CSV input exceeds {CSV_MAX_CELLS} cells"));
-        }
-        row.push(std::mem::take(field));
-        Ok(())
-    };
-    fn add_row(rows: &mut Vec<Vec<String>>, row: &mut Vec<String>) -> Rt<()> {
+    let mut add_field =
+        |row: &mut Vec<String>, field: &mut String, index: usize| -> CsvResult<()> {
+            count += 1;
+            if count > CSV_MAX_CELLS {
+                return Err(CsvFault::row(
+                    index,
+                    format!("CSV input exceeds {CSV_MAX_CELLS} cells"),
+                ));
+            }
+            row.push(std::mem::take(field));
+            Ok(())
+        };
+    fn add_row(rows: &mut Vec<Vec<String>>, row: &mut Vec<String>) -> CsvResult<()> {
         if let Some(first) = rows.first() {
             if row.len() != first.len() {
-                return Err(format!(
-                    "record {} has {} fields; expected {} (first mismatched column {})",
+                return Err(CsvFault::row(
                     rows.len() + 1,
-                    row.len(),
-                    first.len(),
-                    row.len().min(first.len()) + 1
+                    format!(
+                        "record {} has {} fields; expected {} (first mismatched column {})",
+                        rows.len() + 1,
+                        row.len(),
+                        first.len(),
+                        row.len().min(first.len()) + 1
+                    ),
                 ));
             }
         }
@@ -82,31 +180,37 @@ pub fn decode(s: &str) -> Rt<Vec<Vec<String>>> {
         }
         match c {
             ',' => {
-                add_field(&mut row, &mut field)?;
+                add_field(&mut row, &mut field, rows.len() + 1)?;
                 state = State::Start;
             }
             '\r' | '\n' => {
                 if c == '\r' && chars.peek() == Some(&'\n') {
                     chars.next();
                 }
-                add_field(&mut row, &mut field)?;
+                add_field(&mut row, &mut field, rows.len() + 1)?;
                 add_row(&mut rows, &mut row)?;
                 state = State::Start;
                 open = false;
             }
             '"' if state == State::Start => state = State::Quoted,
             '"' => {
-                return Err(format!(
-                    "unexpected quote in record {}, field {}",
+                return Err(CsvFault::row(
                     rows.len() + 1,
-                    row.len() + 1
+                    format!(
+                        "unexpected quote in record {}, field {}",
+                        rows.len() + 1,
+                        row.len() + 1
+                    ),
                 ))
             }
             _ if state == State::Closed => {
-                return Err(format!(
-                    "unexpected content after closing quote in record {}, field {}",
+                return Err(CsvFault::row(
                     rows.len() + 1,
-                    row.len() + 1
+                    format!(
+                        "unexpected content after closing quote in record {}, field {}",
+                        rows.len() + 1,
+                        row.len() + 1
+                    ),
                 ))
             }
             _ => {
@@ -116,14 +220,17 @@ pub fn decode(s: &str) -> Rt<Vec<Vec<String>>> {
         }
     }
     if state == State::Quoted {
-        return Err(format!(
-            "unclosed quoted field in record {}, field {}",
+        return Err(CsvFault::row(
             rows.len() + 1,
-            row.len() + 1
+            format!(
+                "unclosed quoted field in record {}, field {}",
+                rows.len() + 1,
+                row.len() + 1
+            ),
         ));
     }
     if open {
-        add_field(&mut row, &mut field)?;
+        add_field(&mut row, &mut field, rows.len() + 1)?;
         add_row(&mut rows, &mut row)?;
     }
     Ok(rows)
@@ -131,43 +238,55 @@ pub fn decode(s: &str) -> Rt<Vec<Vec<String>>> {
 
 /// Parse records and select columns in schema order, without returning the header.
 pub fn typed_rows(s: &str, ordered_header: &[String]) -> Rt<Vec<Vec<String>>> {
+    typed_rows041(s, ordered_header).map_err(|e| e.diagnostic)
+}
+pub(crate) fn typed_rows041(s: &str, ordered_header: &[String]) -> CsvResult<Vec<Vec<String>>> {
     use std::collections::{HashMap, HashSet};
-    let mut rows = decode(s)?.into_iter();
+    let mut rows = decode041(s)
+        .map_err(|e| match e.kind {
+            CsvFaultKind::Row(1) => CsvFault::header(e.diagnostic),
+            _ => e,
+        })?
+        .into_iter();
     let header = rows
         .next()
-        .ok_or("CSV row 1: expected header, found empty input")?;
+        .ok_or_else(|| CsvFault::header("CSV row 1: expected header, found empty input".into()))?;
     let mut columns = HashMap::new();
     for (i, name) in header.iter().enumerate() {
         if let Some(first) = columns.insert(name.as_str(), i) {
-            return Err(format!(
-                "CSV row 1, column {}: duplicate header {name:?} (first seen in column {})",
-                i + 1,
-                first + 1
-            ));
+            return Err(CsvFault {
+                kind: CsvFaultKind::Duplicate(name.clone()),
+                diagnostic: format!(
+                    "CSV row 1, column {}: duplicate header {name:?} (first seen in column {})",
+                    i + 1,
+                    first + 1
+                ),
+            });
         }
     }
     let mut fields = HashSet::new();
     let mut order = Vec::with_capacity(ordered_header.len());
     for (i, name) in ordered_header.iter().enumerate() {
         if !fields.insert(name.as_str()) {
-            return Err(format!(
+            return Err(CsvFault::header(format!(
                 "CSV schema column {}: duplicate name {name:?}",
                 i + 1
-            ));
+            )));
         }
-        order.push(*columns.get(name.as_str()).ok_or_else(|| {
-            format!(
+        order.push(*columns.get(name.as_str()).ok_or_else(|| CsvFault {
+            kind: CsvFaultKind::Absent(name.clone()),
+            diagnostic: format!(
                 "CSV row 1, schema column {}: missing header {name:?}",
                 i + 1
-            )
+            ),
         })?);
     }
     for (i, name) in header.iter().enumerate() {
         if !fields.contains(name.as_str()) {
-            return Err(format!(
+            return Err(CsvFault::header(format!(
                 "CSV row 1, column {}: unexpected header {name:?}",
                 i + 1
-            ));
+            )));
         }
     }
     Ok(rows
@@ -208,33 +327,55 @@ pub fn encode(rows: &[Vec<String>]) -> String {
 
 /// Write a new regular file; never truncate an existing path.
 pub fn write(path: &str, rows: &[Vec<String>]) -> Rt<()> {
+    write041(path, rows).map_err(|e| e.diagnostic)
+}
+
+pub(crate) fn write041(path: &str, rows: &[Vec<String>]) -> FileResult<()> {
     let width = rows.first().map_or(0, Vec::len);
     let mut cells = 0;
     for (i, row) in rows.iter().enumerate() {
         if row.is_empty() || row.len() != width {
-            return Err(format!(
-                "CSV row {}: expected {} fields, found {}",
-                i + 1,
-                width.max(1),
-                row.len()
+            return Err(IoFault::details(
+                IoKind::Write,
+                path,
+                format!(
+                    "CSV row {}: expected {} fields, found {}",
+                    i + 1,
+                    width.max(1),
+                    row.len()
+                ),
             ));
         }
         cells += row.len();
         if cells > CSV_MAX_CELLS {
-            return Err(format!("CSV output exceeds {CSV_MAX_CELLS} cells"));
+            return Err(IoFault::details(
+                IoKind::Write,
+                path,
+                format!("CSV output exceeds {CSV_MAX_CELLS} cells"),
+            ));
         }
     }
     let out = encode(rows);
-    if out.len() as u64 > CSV_MAX_BYTES {
-        return Err(format!("CSV output exceeds {CSV_MAX_BYTES} bytes"));
+    write_text(path, &out, "CSV", CSV_MAX_BYTES)
+}
+
+pub(crate) fn write_text(path: &str, text: &str, label: &str, max: u64) -> FileResult<()> {
+    if text.len() as u64 > max {
+        return Err(IoFault::details(
+            IoKind::Write,
+            path,
+            format!("{label} output exceeds {max} bytes"),
+        ));
     }
-    let err = |e| format!("cannot write CSV {path:?}: {e}");
+    let err = |error| IoFault::system(path, error, true);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .map_err(err)?;
-    file.write_all(out.as_bytes()).map_err(err)
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.flush())
+        .map_err(err)
 }
 
 #[cfg(test)]
@@ -243,6 +384,31 @@ mod tests {
 
     fn row(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn structured_csv_failures_retain_header_and_record_identity() {
+        let columns = row(&["station", "value"]);
+        assert_eq!(
+            typed_rows041("station,station\n", &columns)
+                .unwrap_err()
+                .kind,
+            CsvFaultKind::Duplicate("station".to_owned()),
+        );
+        assert_eq!(
+            typed_rows041("station\n", &columns).unwrap_err().kind,
+            CsvFaultKind::Absent("value".to_owned()),
+        );
+        assert_eq!(
+            typed_rows041(concat!("station,value\n", r#""bad,1"#), &columns)
+                .unwrap_err()
+                .kind,
+            CsvFaultKind::Row(2),
+        );
+        assert!(matches!(
+            typed_rows041("", &columns).unwrap_err().kind,
+            CsvFaultKind::Header(_),
+        ));
     }
 
     #[test]

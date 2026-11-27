@@ -1,8 +1,14 @@
 << "csv" : csv;
 << "io" : io;
+apperr :: { | input csverr; | output ioerr; };
 
 !{
-    rows:[[s]] := ! csv.read "examples/observations.csv";
-    ! io.print (# rows);
-    ! io.print rows;
+    ^{
+        rows := ^= ! csv.read "examples/observations.csv" {
+            e : ^: input e;
+        };
+        ^= ! io.print (# rows) { e : ^: output e; };
+        ^= ! io.print rows { e : ^: output e; };
+        ()
+    }
 };

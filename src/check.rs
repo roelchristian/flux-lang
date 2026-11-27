@@ -263,6 +263,9 @@ fn prep(defs: &[Stmt], env: &mut Env) -> Result<(), Error> {
                 }
             }
             Stmt::Effect { name: None, .. } => {}
+            Stmt::Sum { start, .. } => {
+                return Err(Error::new(*start, "sum declarations require typed HIR"))
+            }
         }
     }
     for stmt in defs {
@@ -351,6 +354,9 @@ fn prep(defs: &[Stmt], env: &mut Env) -> Result<(), Error> {
 fn check_def(def: &Stmt, env: &mut Env, effect: bool) -> Result<(), Error> {
     match def {
         Stmt::Schema { .. } => {}
+        Stmt::Sum { start, .. } => {
+            return Err(Error::new(*start, "sum declarations require typed HIR"))
+        }
         Stmt::Effect { name, body, start } => {
             if !effect {
                 return Err(Error::new(
@@ -701,6 +707,9 @@ fn expr(env: &Env, e: &Expr, want: Option<&T>, effect: bool) -> R<T> {
                 cursor = Some(out);
             }
             fun(ts, expr(&nested, b, cursor, false)?)
+        }
+        Expr::Fallible(..) | Expr::Raise(..) | Expr::Propagate(..) | Expr::Recover(..) => {
+            return Err("typed error handling requires typed HIR".into());
         }
         Expr::NamedRecord(n, fields) => {
             if env.values.contains_key(n) {

@@ -12,9 +12,8 @@ cargo run -- examples/csv-grid.flx
 named function references, and tuple-spread application. `observations.flx`
 starts with a typed in-memory table, filters a Boolean mask, and computes a count
 and mean. No spreadsheet adapter or special worksheet operator is involved.
-`csv-grid.flx` runs the experimental raw CSV reader. Its result is a grid of
-strings, preserving the header and quoted cells; the prototype does not yet
-coerce input into a named table schema.
+`csv-grid.flx` uses raw CSV mode. Its grid of strings preserves the header
+and quoted cells. For schema-directed conversion, see `monitoring.flx`.
 
 See [the language specification](../docs/specification.md) for proposed
 adapter-based analysis, joins, reconciliation, time series, and batch workflows.
@@ -33,3 +32,13 @@ group has count 2, exact mean and median 15, and population standard deviation
 3. Execution prints the result and explicitly writes `summary.csv`; use a
 fresh output location before rerunning when the adapter refuses to overwrite.
 Use the tested implementation notes for adapter and numeric limits.
+
+## Draft 0.4.1 typed failures
+
+These scripts handle the results of executed I/O actions explicitly. The
+simple examples use `^? ! io.print ...` inside a fallible boundary; errors
+exit the script with a diagnostic and do not undo completed effects.
+The CSV examples translate `csverr` and `ioerr` into different constructors
+of a small application error, so the surrounding boundary has one consistent
+error type. `monitoring.flx` writes only a new file and reports a recoverable
+failure if the destination already exists.

@@ -68,9 +68,8 @@ impl Session {
             }
             Mode::View | Mode::Time => {
                 let start = Instant::now();
-                let out = prepared.view().map_err(diag)?;
+                let out = prepared.view_with_output(&mut io::stdout()).map_err(diag)?;
                 let elapsed = start.elapsed();
-                print!("{}", out.stdout);
                 if out.value.contains('\n') {
                     println!("{}\n: {}", out.value, inspection.type_name);
                 } else {
@@ -131,10 +130,9 @@ impl Session {
             }
             let prepared = prepare(&program, SemanticMode::Script, Policy::Compatible)
                 .map_err(|e| e.diagnostic("<repl>", &source))?;
-            let output = prepared
-                .run()
+            prepared
+                .run_with_output(&mut io::stdout())
                 .map_err(|e| e.diagnostic("<repl>", &source))?;
-            print!("{}", output.stdout);
             return Ok(());
         }
         self.expression(line, Mode::View)
@@ -267,10 +265,8 @@ fn cli() -> Result<u8, String> {
             .map_err(diagnostic)?;
             let start = Instant::now();
             if program.entry.is_some() {
-                let out = plan.run().map_err(diagnostic)?;
-                std::io::stdout()
-                    .write_all(out.stdout.as_bytes())
-                    .map_err(|e| e.to_string())?;
+                plan.run_with_output(&mut io::stdout())
+                    .map_err(diagnostic)?;
             }
             let run = start.elapsed();
             eprintln!(
@@ -301,9 +297,8 @@ eval_ns	{}",
             };
             let output = prepare(&program, SemanticMode::Script, policy)
                 .map_err(diagnostic)?
-                .run()
+                .run_with_output(&mut io::stdout())
                 .map_err(diagnostic)?;
-            print!("{}", output.stdout);
             return Ok(output.status);
         }
     }

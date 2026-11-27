@@ -143,6 +143,7 @@ pub static REGISTRY: &[Builtin] = &[
     pure!("-", 2, Arithmetic, Elementwise),
     pure!("*", 2, Arithmetic, Elementwise),
     pure!("/", 2, Division, Elementwise),
+    internal!("math.div", 2, Division, Scalar, Pure, Runtime, &[]),
     pure!("//", 2, IntegralArithmetic, Elementwise),
     pure!("%", 2, IntegralArithmetic, Elementwise),
     pure!("^", 2, Power, Elementwise),
@@ -351,7 +352,7 @@ pub static REGISTRY: &[Builtin] = &[
         Effect,
         Dependent,
         ConstructAction,
-        Recognized,
+        Runtime,
         &[]
     ),
     internal!(
@@ -360,25 +361,16 @@ pub static REGISTRY: &[Builtin] = &[
         Effect,
         Dependent,
         ConstructAction,
-        Recognized,
+        Runtime,
         &[]
     ),
     internal!(
-        "io.read_csv",
+        "io.exists",
         1,
         Effect,
         Dependent,
         ConstructAction,
-        Recognized,
-        &[]
-    ),
-    internal!(
-        "io.write_csv",
-        2,
-        Effect,
-        Dependent,
-        ConstructAction,
-        Recognized,
+        Runtime,
         &[]
     ),
     internal!(
@@ -388,7 +380,7 @@ pub static REGISTRY: &[Builtin] = &[
         Dependent,
         ConstructAction,
         Runtime,
-        &[]
+        &["io.read_csv"]
     ),
     internal!(
         "csv.write",
@@ -397,7 +389,7 @@ pub static REGISTRY: &[Builtin] = &[
         Dependent,
         ConstructAction,
         Runtime,
-        &[]
+        &["io.write_csv"]
     ),
     internal!(
         "df.agg",
@@ -443,9 +435,11 @@ const IO: &[Member] = &[
     ("println", "io.println"),
     ("read", "io.read"),
     ("write", "io.write"),
+    ("exists", "io.exists"),
     ("read_csv", "io.read_csv"),
     ("write_csv", "io.write_csv"),
 ];
+const MATH: &[Member] = &[("div", "math.div")];
 const CSV: &[Member] = &[("read", "csv.read"), ("write", "csv.write")];
 const TABLE: &[Member] = &[("agg", "df.agg"), ("extend", "df.extend")];
 const STATISTICS: &[Member] = &[
@@ -460,6 +454,7 @@ pub fn module_items(path: &str) -> Option<impl Iterator<Item = (&'static str, us
     let members = match path {
         "io" => IO,
         "csv" => CSV,
+        "math" => MATH,
         "df" | "table" => TABLE,
         "stats" | "statistics" => STATISTICS,
         _ => return None,
@@ -511,7 +506,7 @@ mod tests {
     }
     #[test]
     fn module_exports_have_registry_arity_and_legacy_unsupported_spellings() {
-        for module in ["io", "csv", "table", "df", "stats", "statistics"] {
+        for module in ["io", "csv", "table", "df", "stats", "statistics", "math"] {
             let mut names = HashSet::new();
             for (name, arity) in module_items(module).unwrap() {
                 assert!(names.insert(name));
@@ -525,7 +520,7 @@ mod tests {
         assert_eq!(prelude_arity("*?"), Some(4));
         assert_eq!(runtime_arity("*?"), None);
         assert_eq!(runtime_arity(".field"), Some(1));
-        assert_eq!(runtime_arity("io.read"), None);
+        assert_eq!(runtime_arity("io.read"), Some(1));
         assert_eq!(runtime_arity(":d"), None);
         assert_eq!(runtime_arity(":q"), Some(1));
     }

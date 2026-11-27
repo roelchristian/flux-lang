@@ -76,8 +76,8 @@ fn instantiates_each_use_of_inferred_generic() {
 << "io";
 id(x) := x;
 !{
-    ! io.print id 12;
-    ! io.print id "twelve";
+    ^= ! io.print id 12 { _ : (); };
+    ^= ! io.print id "twelve" { _ : (); };
 };
 "#,
         "12\ntwelve\n",
@@ -92,7 +92,7 @@ fn infers_higher_order_composition() {
 cp(f,g,x) := @ f (@ g x);
 inc(x:z):z := + x 1;
 show(x:z):z := * x 2;
-!{ ! io.print cp &show &inc 4; };
+!{ ^= ! io.print cp &show &inc 4 { _ : (); }; };
 "#,
         "10\n",
     );
@@ -104,7 +104,7 @@ fn infers_a_short_unannotated_lambda() {
         r#"
 << "io";
 identity := \x -> x;
-!{ ! io.print @ identity "value"; ! io.print @ identity 31; };
+!{ ^= ! io.print @ identity "value" { _ : (); }; ^= ! io.print @ identity 31 { _ : (); }; };
 "#,
         "value\n31\n",
     );
@@ -116,7 +116,7 @@ fn instantiates_signature_with_numeric_constraint() {
         r#"
 << "io";
 sq(x:'a):'a | num 'a := * x x;
-!{ ! io.print sq 2; ! io.print sq 0.5; };
+!{ ^= ! io.print sq 2 { _ : (); }; ^= ! io.print sq 0.5 { _ : (); }; };
 "#,
         "4\n1/4\n",
     );
@@ -129,8 +129,8 @@ fn infers_required_field_without_demanding_other_fields() {
 << "io";
 amount(x) := .amount x;
 !{
-    ! io.print amount .{ amount := 12; label := "test"; };
-    ! io.print amount .{ ok := 1b; amount := 0.5; };
+    ^= ! io.print amount .{ amount := 12; label := "test"; } { _ : (); };
+    ^= ! io.print amount .{ ok := 1b; amount := 0.5; } { _ : (); };
 };
 "#,
         "12\n1/2\n",
@@ -162,7 +162,7 @@ mk(k:s,t:#row) := .{{ key := k; count := # t; mean := avg .value t; }};
 summ(k:s,t:#row) := mk k t;
 input:#row := #[];
 res := df.agg &.key &summ input;
-!{{ ! csv.write "{path}" res; }};
+!{{ ^{{ ^? ! csv.write "{path}" res; () }} }};
 "#
     );
     let f = Source::new(&script);
@@ -211,7 +211,7 @@ fn rejects_invalid_elaboration() {
         ("boolean scalar ordering", "x := < 0b 1b;"),
         (
             "not executable decimal CSV",
-            r#"<< "csv"; row :: {val:d;}; !{ x:#row := ! csv.read "data.csv"; };"#,
+            r#"<< "csv"; row :: {val:d;}; !{ ^{ x:#row := ^? ! csv.read "data.csv"; () } };"#,
         ),
         ("undeclared nested Eq", ">> (f); f(x:['a]):b := == x x;"),
         (
@@ -236,7 +236,7 @@ result := even base;
 base := 4n;
 even(x:n):b := ? (= x 0) 1b (odd (- x 1));
 odd(x:n):b := ? (= x 0) 0b (even (- x 1));
-!{ ! io.print result; };
+!{ ^= ! io.print result { _ : (); }; };
 "#,
         "1b\n",
     );
@@ -250,7 +250,7 @@ fn nested_pipeline_captures_one_value_and_explicit_actions_do_not_run_early() {
 silent := io.print "must not execute";
 twice(x:z):z := + x x;
 a := |{ 4; |{ + $ 1; twice $ }; + $ 2 };
-!{ ! io.print a; };
+!{ ^= ! io.print a { _ : (); }; };
 "#,
         "12\n",
     );
@@ -259,7 +259,7 @@ a := |{ 4; |{ + $ 1; twice $ }; + $ 2 };
 #[test]
 fn generic_core_executes_through_a_typed_only_preparation() {
     use flux_lang::{parser, semantic};
-    let source = r#"<< "io"; id(x) := x; !{ ! io.print id 4; ! io.print id "x"; };"#;
+    let source = r#"<< "io"; id(x) := x; !{ ^= ! io.print id 4 { _ : (); }; ^= ! io.print id "x" { _ : (); }; };"#;
     let parsed = parser::parse(source).expect("parse");
     let prepared = semantic::prepare(&parsed, semantic::Mode::Script, semantic::Policy::TypedOnly)
         .expect("typed preparation without fallback");
@@ -271,7 +271,7 @@ fn generic_core_executes_through_a_typed_only_preparation() {
 #[test]
 fn tuple_spread_handles_a_function_returned_by_the_first_call() {
     run(
-        r#"<< "io"; f(x:z):z->z := \(y:z) -> + x y; !{ ! io.print @@ &f (1,2); };"#,
+        r#"<< "io"; f(x:z):z->z := \(y:z) -> + x y; !{ ^= ! io.print @@ &f (1,2) { _ : (); }; };"#,
         "3\n",
     );
 }
@@ -279,7 +279,7 @@ fn tuple_spread_handles_a_function_returned_by_the_first_call() {
 #[test]
 fn exact_division_and_numeric_conversion_boundaries() {
     run(
-        r#"<< "io"; !{ ! io.print / 0 -170141183460469231731687303715884105728; ! io.print / -170141183460469231731687303715884105728 -170141183460469231731687303715884105728; ! io.print :q 0.5r; ! io.print :r (/ 14949302760048185 17434334414104329); };"#,
+        r#"<< "io"; !{ ^= ! io.print / 0 -170141183460469231731687303715884105728 { _ : (); }; ^= ! io.print / -170141183460469231731687303715884105728 -170141183460469231731687303715884105728 { _ : (); }; ^= ! io.print :q 0.5r { _ : (); }; ^= ! io.print :r (/ 14949302760048185 17434334414104329) { _ : (); }; };"#,
         "0\n1\n1/2\n0.8574633481823224\n",
     );
 }

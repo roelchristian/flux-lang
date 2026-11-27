@@ -1,6 +1,6 @@
 //! Rank-one inference for the Draft 0.4 checked subset.
 use crate::{
-    parser::{Expr, Program, Stmt},
+    parser::{Expr, Program, RecoveryCase, RecoveryPattern, Stmt},
     resolve::{Resolution, SymbolId},
     types::{Class, Constraint, InferCtx, NominalId, Prim, Row, Scheme, Type},
 };
@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InferErrorKind {
     TypeError,
+    IncompatibleError,
+    ResultNeedsHandling,
     Unsupported,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +19,8 @@ pub struct InferError {
     pub start: usize,
     pub end: usize,
     pub message: String,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
 }
 impl std::fmt::Display for InferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -29,6 +33,12 @@ pub enum Operation {
     Builtin(String),
     Numeric { operator: String, result: Type },
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Constructor {
+    pub owner: NominalId,
+    pub id: SymbolId,
+    pub payload: Vec<Type>,
+}
 #[derive(Debug, Default)]
 pub struct InferResult {
     pub expressions: HashMap<usize, Type>,
@@ -36,11 +46,19 @@ pub struct InferResult {
     pub operations: HashMap<usize, Operation>,
     pub callees: HashMap<usize, Type>,
     pub schemas: HashMap<NominalId, Row>,
+    pub constructors: HashMap<SymbolId, Constructor>,
+    pub boundaries: HashMap<usize, usize>,
 }
 fn address(e: &Expr) -> usize {
     (e as *const Expr) as usize
 }
 impl InferResult {
+    pub fn constructor(&self, id: SymbolId) -> Option<&Constructor> {
+        self.constructors.get(&id)
+    }
+    pub fn boundary_of(&self, e: &Expr) -> Option<usize> {
+        self.boundaries.get(&address(e)).copied()
+    }
     pub fn nominal_schema(&self, id: &NominalId) -> Option<&Row> {
         self.schemas.get(id)
     }
@@ -64,6 +82,9 @@ fn b(t: Type) -> Box<Type> {
 }
 fn p(t: Prim) -> Type {
     Type::Prim(t)
+}
+fn result(ok: Type, err: Type) -> Type {
+    Type::Result(b(ok), b(err))
 }
 fn s(t: Type) -> Type {
     Type::Seq(b(t))
@@ -118,6 +139,13 @@ fn scan_dependencies(
     use Expr::*;
     let mut visit = |e: &Expr| scan_dependencies(e, res, local, out);
     match e {
+        Raise(x) | Propagate(x) => visit(x),
+        Recover(value, cases) => {
+            visit(value);
+            for case in cases {
+                visit(&case.body);
+            }
+        }
         Call(_, xs) | Array(xs) | Tuple(xs) | Pipeline(xs) => {
             for x in xs {
                 visit(x)
@@ -136,7 +164,7 @@ fn scan_dependencies(
                 visit(e);
             }
         }
-        Block(ds, tail) | Action(ds, tail) => {
+        Block(ds, tail) | Action(ds, tail) | Fallible(ds, tail) => {
             for d in ds {
                 if let Stmt::Def { body, .. } | Stmt::Effect { body, .. } = d {
                     visit(body);
@@ -159,7 +187,9 @@ fn type_has_nominal(t: &Type) -> bool {
     match t {
         Type::Nominal(_) => true,
         Type::Seq(t) | Type::Table(t) | Type::Optional(t) | Type::Action(t) => type_has_nominal(t),
-        Type::Fun(a, b) | Type::Dict(a, b) => type_has_nominal(a) || type_has_nominal(b),
+        Type::Fun(a, b) | Type::Dict(a, b) | Type::Result(a, b) => {
+            type_has_nominal(a) || type_has_nominal(b)
+        }
         Type::Tuple(ts) => ts.iter().any(type_has_nominal),
         Type::Record(row) => row.fields.iter().any(|(_, t)| type_has_nominal(t)),
         _ => false,
@@ -199,6 +229,13 @@ struct Engine<'r> {
     resolver: &'r Resolution,
     schemas: HashMap<NominalId, Row>,
     schema_scopes: Vec<HashMap<String, NominalId>>,
+    sums: HashMap<NominalId, Vec<SymbolId>>,
+    boundaries: Vec<(usize, Type)>,
+    discarded_results: Vec<(Type, usize, usize)>,
+    entry_natural_tail: Option<usize>,
+    entry_boundary: Option<usize>,
+    raise_payload: Option<usize>,
+    saw_result: bool,
     start: usize,
     literals: Vec<(Type, i128, usize, usize)>,
     active: Option<std::ops::Range<usize>>,
@@ -216,6 +253,8 @@ impl Engine<'_> {
                 .as_ref()
                 .filter(|s| s.start == self.start)
                 .map_or(self.start, |s| s.end),
+            expected: None,
+            actual: None,
             message: text.into(),
         }
     }
@@ -228,20 +267,68 @@ impl Engine<'_> {
                 .as_ref()
                 .filter(|s| s.start == self.start)
                 .map_or(self.start, |s| s.end),
+            expected: None,
+            actual: None,
             message: text.into(),
         }
+    }
+    fn error_conflict(&self, actual: &Type, expected: &Type) -> Option<(Type, Type)> {
+        match (actual, expected) {
+            (Type::Action(x), Type::Action(y)) => self.error_conflict(x, y),
+            (Type::Result(_, a), Type::Result(_, b))
+                if a != b && self.cx.free_vars(a).is_empty() && self.cx.free_vars(b).is_empty() =>
+            {
+                Some((a.as_ref().clone(), b.as_ref().clone()))
+            }
+            _ => None,
+        }
+    }
+    fn incompatible(&self, actual: &Type, expected: &Type) -> InferError {
+        let mut e = self.err(format!(
+            "incompatible error type: expected {expected}, found {actual}"
+        ));
+        e.kind = InferErrorKind::IncompatibleError;
+        e.expected = Some(expected.to_string());
+        e.actual = Some(actual.to_string());
+        e
     }
     fn unify(&mut self, x: &Type, y: &Type) -> R<()> {
         // The generic unifier cannot resolve nominal schema names. Check any
         // pending class obligations that are about to take on a nominal type.
-        let has_nominal =
-            type_has_nominal(&self.cx.resolve(x)) || type_has_nominal(&self.cx.resolve(y));
+        let left = self.cx.resolve(x);
+        let right = self.cx.resolve(y);
+        let action_result = matches!((&left, &right), (Type::Action(a), Type::Action(b))
+            if matches!(a.as_ref(), Type::Result(..))
+                && !matches!(b.as_ref(), Type::Result(..) | Type::Var(_) | Type::Never));
+        if action_result
+            || (matches!(left, Type::Result(..))
+                && !matches!(right, Type::Result(..) | Type::Var(_) | Type::Never))
+        {
+            let mut e = self.err(format!(
+                "a fallible result cannot be used as {right} without handling its error"
+            ));
+            e.kind = InferErrorKind::ResultNeedsHandling;
+            e.expected = Some(right.to_string());
+            e.actual = Some(left.to_string());
+            return Err(e);
+        }
+        let has_nominal = type_has_nominal(&left) || type_has_nominal(&right);
+        let error_conflict = if self.saw_result {
+            self.error_conflict(&left, &right)
+        } else {
+            None
+        };
         let pending = if has_nominal {
             self.cx.constraints()
         } else {
             Vec::new()
         };
-        self.cx.unify_committing(x, y).map_err(|e| self.err(e))?;
+        self.cx
+            .unify_committing(x, y)
+            .map_err(|e| match error_conflict {
+                Some((actual, expected)) => self.incompatible(&actual, &expected),
+                None => self.err(e),
+            })?;
         for c in pending {
             self.nominal_evidence(c.class, &c.ty, &mut HashSet::new())?;
         }
@@ -263,22 +350,37 @@ impl Engine<'_> {
                         self.err(format!("nominal record {} does not satisfy hash", n.name))
                     );
                 }
-                let row = self
-                    .schemas
-                    .get(&n)
-                    .cloned()
-                    .ok_or_else(|| self.err(format!("unknown schema {}", n.name)))?;
-                for (field, t) in row.fields {
-                    self.nominal_evidence(c, &t, seen)?;
-                    self.cx
-                        .require(c, &t)
-                        .map_err(|text| self.err(format!("field {}.{field}: {text}", n.name)))?;
+                if let Some(ids) = self.sums.get(&n).cloned() {
+                    for id in ids {
+                        let payload = self.result.constructors[&id].payload.clone();
+                        for t in payload {
+                            self.nominal_evidence(c, &t, seen)?;
+                            self.cx.require(c, &t).map_err(|text| {
+                                self.err(format!(
+                                    "constructor {} payload: {text}",
+                                    self.resolver.symbol(id).name
+                                ))
+                            })?;
+                        }
+                    }
+                } else {
+                    let row = self
+                        .schemas
+                        .get(&n)
+                        .cloned()
+                        .ok_or_else(|| self.err(format!("unknown schema {}", n.name)))?;
+                    for (field, t) in row.fields {
+                        self.nominal_evidence(c, &t, seen)?;
+                        self.cx.require(c, &t).map_err(|text| {
+                            self.err(format!("field {}.{field}: {text}", n.name))
+                        })?;
+                    }
                 }
             }
             Type::Seq(x) | Type::Table(x) | Type::Optional(x) => {
                 self.nominal_evidence(c, &x, seen)?
             }
-            Type::Dict(k, v) => {
+            Type::Dict(k, v) | Type::Result(k, v) => {
                 self.nominal_evidence(c, &k, seen)?;
                 self.nominal_evidence(c, &v, seen)?;
             }
@@ -314,19 +416,38 @@ impl Engine<'_> {
         ends: &[&str],
     ) -> R<Type> {
         let next = |i: usize| t.get(i).map(|x| x.text.as_str()).unwrap_or("");
-        let mut args = vec![self.type_atom(t, i, v)?];
+        let mut args = vec![self.type_result(t, i, v)?];
         while !next(*i).is_empty() && !ends.contains(&next(*i)) {
             if next(*i) == "->" {
                 *i += 1;
                 return Ok(function(args.into_iter(), self.type_arrow(t, i, v, ends)?));
             }
-            args.push(self.type_atom(t, i, v)?)
+            args.push(self.type_result(t, i, v)?)
         }
         if args.len() == 1 {
             Ok(args.remove(0))
         } else {
             Err(self.err("multiple type components need an arrow"))
         }
+    }
+    fn type_result(
+        &mut self,
+        t: &[crate::lexer::Token],
+        i: &mut usize,
+        v: &mut HashMap<String, Type>,
+    ) -> R<Type> {
+        let lhs = self.type_atom(t, i, v)?;
+        let next = |i: usize| t.get(i).map(|x| x.text.as_str()).unwrap_or("");
+        if next(*i) != "^" {
+            return Ok(lhs);
+        }
+        *i += 1;
+        self.saw_result = true;
+        let rhs = self.type_atom(t, i, v)?;
+        if next(*i) == "^" {
+            return Err(self.err("result caret chains need explicit parentheses"));
+        }
+        Ok(result(lhs, rhs))
     }
     fn type_atom(
         &mut self,
@@ -370,7 +491,7 @@ impl Engine<'_> {
             "#[" => {
                 let mut xs = Vec::new();
                 while next(*i) != "]" {
-                    xs.push(self.type_atom(t, i, v)?);
+                    xs.push(self.type_result(t, i, v)?);
                     if next(*i) == "," {
                         *i += 1;
                     }
@@ -462,6 +583,64 @@ impl Engine<'_> {
             qualifiers: vec![],
         })
     }
+    fn standard_type(name: &str) -> Type {
+        Type::Nominal(NominalId {
+            id: crate::errors041::owner_id(name).expect("known standard error type"),
+            name: name.to_owned(),
+        })
+    }
+    fn install_standard_errors(&mut self, imports: &[String]) -> R<()> {
+        for &name in crate::errors041::OWNERS {
+            if !imports
+                .iter()
+                .any(|module| crate::parser::standard_owners(module).contains(&name))
+            {
+                continue;
+            }
+            let Type::Nominal(id) = Self::standard_type(name) else {
+                unreachable!()
+            };
+            self.schema_scopes[0].insert(name.into(), id);
+        }
+        for &name in crate::errors041::OWNERS {
+            let Type::Nominal(owner) = Self::standard_type(name) else {
+                unreachable!()
+            };
+            let mut ids = Vec::new();
+            for v in crate::errors041::variants(name) {
+                if let Some(id) = self.resolver.standard_constructor(name, v.name) {
+                    let mut payload = Vec::new();
+                    for t in v.payload {
+                        payload.push(if crate::errors041::owner_id(t).is_some() {
+                            Self::standard_type(t)
+                        } else {
+                            self.annotation(t, &mut HashMap::new())?
+                        });
+                    }
+                    self.result.bindings.insert(
+                        id,
+                        mono(function(
+                            payload.iter().cloned(),
+                            Type::Nominal(owner.clone()),
+                        )),
+                    );
+                    self.result.constructors.insert(
+                        id,
+                        Constructor {
+                            owner: owner.clone(),
+                            id,
+                            payload,
+                        },
+                    );
+                    ids.push(id);
+                }
+            }
+            if !ids.is_empty() {
+                self.sums.insert(owner, ids);
+            }
+        }
+        Ok(())
+    }
     fn schema_id(&self, name: &str) -> Option<&NominalId> {
         self.schema_scopes
             .iter()
@@ -470,7 +649,7 @@ impl Engine<'_> {
     }
     fn schema_headers(&mut self, defs: &[Stmt]) -> R<()> {
         for stmt in defs {
-            if let Stmt::Schema { name, start, .. } = stmt {
+            if let Stmt::Schema { name, start, .. } | Stmt::Sum { name, start, .. } = stmt {
                 self.start = *start;
                 if matches!(name.as_str(), "n" | "z" | "q" | "d" | "r" | "b" | "s" | "c") {
                     return Err(self.err(format!("{name} is reserved in the type namespace")));
@@ -491,21 +670,179 @@ impl Engine<'_> {
             }
         }
         for stmt in defs {
-            if let Stmt::Schema {
-                name,
-                fields,
-                start,
-            } = stmt
-            {
-                self.start = *start;
-                let id = self
-                    .schema_id(name)
-                    .expect("schema header installed")
-                    .clone();
-                self.install_schema(id, fields)?;
+            match stmt {
+                Stmt::Schema {
+                    name,
+                    fields,
+                    start,
+                } => {
+                    self.start = *start;
+                    let id = self
+                        .schema_id(name)
+                        .expect("schema header installed")
+                        .clone();
+                    self.install_schema(id, fields)?;
+                }
+                Stmt::Sum {
+                    name,
+                    variants,
+                    start,
+                } => {
+                    self.start = *start;
+                    let owner = self.schema_id(name).expect("sum header installed").clone();
+                    let mut ids = Vec::new();
+                    for variant in variants {
+                        self.start = variant.start;
+                        let id = self.resolver.variant(variant).ok_or_else(|| {
+                            self.err(format!("missing constructor identity for {}", variant.name))
+                        })?;
+                        let mut payload = Vec::new();
+                        for spelling in &variant.payload {
+                            let mut vars = HashMap::new();
+                            let t = self.annotation(spelling, &mut vars)?;
+                            if !vars.is_empty() || !self.cx.free_vars(&t).is_empty() {
+                                return Err(
+                                    self.err("sum constructor payload requires a closed type")
+                                );
+                            }
+                            payload.push(t);
+                        }
+                        let ty = function(payload.iter().cloned(), Type::Nominal(owner.clone()));
+                        self.result.bindings.insert(id, mono(ty));
+                        self.result.constructors.insert(
+                            id,
+                            Constructor {
+                                owner: owner.clone(),
+                                id,
+                                payload,
+                            },
+                        );
+                        ids.push(id);
+                    }
+                    self.sums.insert(owner, ids);
+                }
+                _ => {}
             }
         }
         Ok(())
+    }
+    fn constructor_type(&self, e: &Expr) -> Option<Type> {
+        let c = self.result.constructors.get(&self.resolver.reference(e)?)?;
+        Some(function(
+            c.payload.iter().cloned(),
+            Type::Nominal(c.owner.clone()),
+        ))
+    }
+    fn at_boundary(&mut self, e: &Expr) -> R<Type> {
+        let (id, err) = self
+            .boundaries
+            .last()
+            .ok_or_else(|| self.err("no lexically enclosing fallible boundary"))?
+            .clone();
+        self.result.boundaries.insert(address(e), id);
+        Ok(err)
+    }
+    fn recover(
+        &mut self,
+        env: &Env,
+        value: &Expr,
+        cases: &[RecoveryCase],
+        want: Option<&Type>,
+        effects: bool,
+    ) -> R<Type> {
+        let ok = want.cloned().unwrap_or_else(|| self.cx.fresh());
+        let err = self.cx.fresh();
+        let v = self.expr(env, value, Some(&result(ok.clone(), err.clone())), effects)?;
+        if cases.is_empty() {
+            return Err(self.err("recovery needs at least one case"));
+        }
+        let mut seen = HashSet::new();
+        let mut catchall = false;
+        for case in cases {
+            let previous = self.start;
+            self.start = case.start;
+            if catchall {
+                return Err(self.err("unreachable recovery case after catchall"));
+            }
+            if let Type::Nominal(owner) = self.cx.resolve(&err) {
+                if self
+                    .sums
+                    .get(&owner)
+                    .is_some_and(|ids| !ids.is_empty() && ids.iter().all(|id| seen.contains(id)))
+                {
+                    return Err(
+                        self.err("unreachable recovery case; all constructors are already covered")
+                    );
+                }
+            }
+            let mut nested = env.clone();
+            if let Some(id) = self.resolver.recovery_constructor(case) {
+                let c = self
+                    .result
+                    .constructors
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(|| self.err("unknown recovery constructor"))?;
+                if !seen.insert(id) {
+                    return Err(self.err("duplicate recovery constructor case"));
+                }
+                self.unify(&err, &Type::Nominal(c.owner))?;
+                let names = match &case.pattern {
+                    RecoveryPattern::Constructor(_, xs) => xs.as_slice(),
+                    _ => &[],
+                };
+                if names.len() != c.payload.len() {
+                    return Err(self.err("wrong recovery constructor arity"));
+                }
+                let ids = self.resolver.recovery_bindings(case);
+                for ((name, ty), id) in names
+                    .iter()
+                    .zip(c.payload)
+                    .filter(|(n, _)| n.as_str() != "_")
+                    .zip(ids)
+                {
+                    nested.insert(name.clone(), mono(ty.clone()));
+                    self.result.bindings.insert(*id, mono(ty));
+                }
+            } else {
+                catchall = true;
+                match &case.pattern {
+                    RecoveryPattern::Bind(name) => {
+                        nested.insert(name.clone(), mono(err.clone()));
+                        if let Some(id) = self.resolver.recovery_bindings(case).first() {
+                            self.result.bindings.insert(*id, mono(err.clone()));
+                        }
+                    }
+                    RecoveryPattern::Wildcard => {}
+                    RecoveryPattern::Constructor(..) => {
+                        return Err(self.err("unknown recovery constructor"))
+                    }
+                }
+            }
+            self.expr(&nested, &case.body, Some(&ok), effects)?;
+            self.start = previous;
+        }
+        if !catchall {
+            let Type::Nominal(owner) = self.cx.resolve(&err) else {
+                return Err(self.err("nonexhaustive recovery; add a catchall"));
+            };
+            let variants = self
+                .sums
+                .get(&owner)
+                .ok_or_else(|| self.err("nonexhaustive recovery; add a catchall"))?;
+            let missed = variants
+                .iter()
+                .filter(|id| !seen.contains(id))
+                .map(|id| self.resolver.symbol(*id).name.as_str())
+                .collect::<Vec<_>>();
+            if !missed.is_empty() {
+                return Err(self.err(format!(
+                    "nonexhaustive recovery; missing {}",
+                    missed.join(", ")
+                )));
+            }
+        }
+        Ok(if v == Type::Never { Type::Never } else { ok })
     }
     fn install_schema(&mut self, id: NominalId, fields: &[(String, String)]) -> R<()> {
         let mut row = Row {
@@ -555,6 +892,8 @@ impl Engine<'_> {
                         kind: InferErrorKind::TypeError,
                         start,
                         end,
+                        expected: None,
+                        actual: None,
                         message: "negative integer literal cannot have type n".into(),
                     })
                 }
@@ -573,6 +912,42 @@ impl Engine<'_> {
         }
         Ok(t)
     }
+    fn reset_boundary<T>(&mut self, op: impl FnOnce(&mut Self) -> R<T>) -> R<T> {
+        let saved = std::mem::take(&mut self.boundaries);
+        let outcome = op(self);
+        self.boundaries = saved;
+        outcome
+    }
+    fn block_body(
+        &mut self,
+        env: &Env,
+        defs: &[Stmt],
+        tail: Option<&Expr>,
+        want: Option<&Type>,
+        effects: bool,
+    ) -> R<Type> {
+        let mut nested = env.clone();
+        self.schema_scopes.push(HashMap::new());
+        let checked = (|| {
+            self.schema_headers(defs)?;
+            self.local_defs(defs, &mut nested, effects)?;
+            let terminal = defs.iter().any(|stmt| match stmt {
+                Stmt::Def { params, body, .. } if params.is_empty() => {
+                    self.result.type_of(body) == Some(&Type::Never)
+                }
+                Stmt::Effect { body, .. } => self.result.type_of(body) == Some(&Type::Never),
+                _ => false,
+            });
+            let t = if let Some(ex) = tail {
+                self.expr(&nested, ex, (!terminal).then_some(want).flatten(), effects)?
+            } else {
+                p(Prim::Unit)
+            };
+            Ok(if terminal { Type::Never } else { t })
+        })();
+        self.schema_scopes.pop();
+        checked
+    }
     fn expr(&mut self, env: &Env, e: &Expr, want: Option<&Type>, effects: bool) -> R<Type> {
         let previous_start = self.start;
         let previous_span = self.active.take();
@@ -588,6 +963,9 @@ impl Engine<'_> {
     fn expr_inner(&mut self, env: &Env, e: &Expr, want: Option<&Type>, effects: bool) -> R<Type> {
         use Prim::*;
         let t = match e {
+            Expr::Int(n) if self.entry_natural_tail == Some(address(e)) => {
+                self.int(*n, Some(&p(N)))?
+            }
             Expr::Int(n) => self.int(*n, want)?,
             Expr::Num(raw) => {
                 let k = match raw.as_bytes().last() {
@@ -611,9 +989,14 @@ impl Engine<'_> {
             Expr::Char(_) => p(C),
             Expr::Bool(_) => p(B),
             Expr::Unit => p(Unit),
-            Expr::Name(n) => self.lookup(env, n)?,
+            Expr::Name(n) => match self.constructor_type(e) {
+                Some(t) => t,
+                None => self.lookup(env, n)?,
+            },
             Expr::Ref(n) => {
-                if env.contains_key(n) {
+                if let Some(t) = self.constructor_type(e) {
+                    t
+                } else if env.contains_key(n) {
                     self.lookup(env, n)?
                 } else {
                     self.builtin_ref(n, want)?
@@ -625,12 +1008,16 @@ impl Engine<'_> {
                     Some(Type::Tuple(xs)) if xs.len() == es.len() => Some(xs),
                     _ => None,
                 };
-                Type::Tuple(
-                    es.iter()
-                        .enumerate()
-                        .map(|(i, x)| self.expr(env, x, xs.map(|ts| &ts[i]), effects))
-                        .collect::<crate::infer::R<Vec<_>>>()?,
-                )
+                let ts = es
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| self.expr(env, x, xs.map(|ts| &ts[i]), effects))
+                    .collect::<crate::infer::R<Vec<_>>>()?;
+                if ts.contains(&Type::Never) {
+                    Type::Never
+                } else {
+                    Type::Tuple(ts)
+                }
             }
             Expr::Array(es) => {
                 let element = match want.map(|t| self.cx.resolve(t)) {
@@ -642,10 +1029,15 @@ impl Engine<'_> {
                     self.empty_sequences
                         .push((element.clone(), self.start, end));
                 }
+                let mut bottom = false;
                 for e in es {
-                    self.expr(env, e, Some(&element), effects)?;
+                    bottom |= self.expr(env, e, Some(&element), effects)? == Type::Never;
                 }
-                s(element)
+                if bottom {
+                    Type::Never
+                } else {
+                    s(element)
+                }
             }
             Expr::Record(fs) | Expr::NamedRecord(_, fs) => {
                 let nominal = if let Expr::NamedRecord(name, _) = e {
@@ -682,7 +1074,9 @@ impl Engine<'_> {
                         .and_then(|r| r.fields.iter().find(|(name, _)| name == n).map(|(_, t)| t));
                     fields.push((n.clone(), self.expr(env, ex, typ, effects)?));
                 }
-                if let Some(id) = nominal {
+                if fields.iter().any(|(_, t)| t == &Type::Never) {
+                    Type::Never
+                } else if let Some(id) = nominal {
                     let typ = Type::Record(expected.expect("nominal schema"));
                     self.unify(&Type::Record(Row { fields, tail: None }), &typ)?;
                     Type::Nominal(id)
@@ -692,12 +1086,24 @@ impl Engine<'_> {
             }
             Expr::Cases(cases, alt) => {
                 let t = want.cloned().unwrap_or_else(|| self.cx.fresh());
+                let mut normal = false;
+                let mut reachable = true;
                 for (cond, body) in cases {
-                    self.expr(env, cond, Some(&p(B)), effects)?;
-                    self.expr(env, body, Some(&t), effects)?;
+                    let c = self.expr(env, cond, Some(&p(B)), effects)?;
+                    if c == Type::Never {
+                        reachable = false;
+                    }
+                    let ty = self.expr(env, body, Some(&t), effects)?;
+                    if reachable && ty != Type::Never {
+                        normal = true;
+                    }
                 }
-                self.expr(env, alt, Some(&t), effects)?;
-                t
+                let other = self.expr(env, alt, Some(&t), effects)?;
+                if normal || (reachable && other != Type::Never) {
+                    t
+                } else {
+                    Type::Never
+                }
             }
             Expr::Lambda(ps, body) | Expr::TypedLambda(ps, _, body) => {
                 let anns = match e {
@@ -722,37 +1128,62 @@ impl Engine<'_> {
                 for (name, t) in ps.iter().zip(sig.args) {
                     nested.insert(name.clone(), mono(t));
                 }
-                self.expr(&nested, body, Some(&sig.out), false)?;
+                self.reset_boundary(|this| this.expr(&nested, body, Some(&sig.out), false))?;
                 t
             }
-            Expr::Block(defs, tail) | Expr::Action(defs, tail) => {
-                let action = matches!(e, Expr::Action(..));
-                let desired = if action {
-                    match want.map(|x| self.cx.resolve(x)) {
-                        Some(Type::Action(t)) => Some(*t),
-                        _ => None,
-                    }
-                } else {
-                    want.cloned()
+            Expr::Block(defs, tail) => self.block_body(env, defs, tail.as_deref(), want, false)?,
+            Expr::Action(defs, tail) => {
+                let expected = match want.map(|x| self.cx.resolve(x)) {
+                    Some(Type::Action(t)) => Some(*t),
+                    _ => None,
                 };
-                let mut nested = env.clone();
-                self.schema_scopes.push(HashMap::new());
-                let scoped = (|| {
-                    self.schema_headers(defs)?;
-                    self.local_defs(defs, &mut nested, action)?;
-                    if let Some(ex) = tail {
-                        self.expr(&nested, ex, desired.as_ref(), action)
-                    } else {
-                        Ok(p(Unit))
-                    }
-                })();
-                self.schema_scopes.pop();
-                let t = scoped?;
-                if action {
-                    a(t)
-                } else {
-                    t
+                a(self.reset_boundary(|this| {
+                    this.block_body(env, defs, tail.as_deref(), expected.as_ref(), true)
+                })?)
+            }
+            Expr::Fallible(defs, tail) => {
+                self.saw_result = true;
+                let (ok, err) = match want.map(|x| self.cx.resolve(x)) {
+                    Some(Type::Result(ok, err)) => (*ok, *err),
+                    _ => (self.cx.fresh(), self.cx.fresh()),
+                };
+                let id = address(e);
+                self.result.boundaries.insert(id, id);
+                self.boundaries.push((id, err.clone()));
+                let output = self.block_body(env, defs, tail.as_deref(), Some(&ok), effects);
+                self.boundaries.pop();
+                let output = output?;
+                if output != Type::Never {
+                    self.unify(&ok, &output)?;
+                } else if self.entry_boundary == Some(id)
+                    && matches!(self.cx.resolve(&ok), Type::Var(_))
+                {
+                    // A top-level boundary with no successful control-flow
+                    // path has a trivially valid unit process success type.
+                    self.unify(&ok, &p(Unit))?;
                 }
+                result(ok, err)
+            }
+            Expr::Raise(value) => {
+                let err = self.at_boundary(e)?;
+                let old = self.raise_payload.replace(address(value));
+                let typed = self.expr(env, value, Some(&err), effects);
+                self.raise_payload = old;
+                typed?;
+                Type::Never
+            }
+            Expr::Propagate(value) => {
+                let err = self.at_boundary(e)?;
+                let ok = want.cloned().unwrap_or_else(|| self.cx.fresh());
+                if self.expr(env, value, Some(&result(ok.clone(), err)), effects)? == Type::Never {
+                    Type::Never
+                } else {
+                    ok
+                }
+            }
+            Expr::Recover(value, cases) => {
+                self.saw_result = true;
+                self.recover(env, value, cases, want, effects)?
             }
             Expr::Pipeline(stages) => {
                 let Some((head, tail)) = stages.split_first() else {
@@ -765,19 +1196,48 @@ impl Engine<'_> {
                     effects,
                 )?;
                 let mut nested = env.clone();
+                let mut prev = head;
+                let mut terminal = t == Type::Never;
                 for (i, ex) in tail.iter().enumerate() {
+                    let possibly_result =
+                        matches!(self.cx.resolve(&t), Type::Result(..) | Type::Var(_));
+                    let used = !possibly_result
+                        || self.resolver.placeholder(ex).is_some_and(|id| {
+                            let mut found = HashSet::new();
+                            scan_dependencies(ex, self.resolver, &HashSet::from([id]), &mut found);
+                            found.contains(&id)
+                        });
+                    if !used {
+                        let at = self.resolver.offset(prev).unwrap_or(self.start);
+                        let span = self.resolver.span(prev).unwrap_or(at..at);
+                        self.discarded_results
+                            .push((t.clone(), span.start, span.end));
+                    }
                     nested.insert("$".into(), mono(t.clone()));
                     t = self.expr(
                         &nested,
                         ex,
-                        if i + 1 == tail.len() { want } else { None },
+                        if !terminal && i + 1 == tail.len() {
+                            want
+                        } else {
+                            None
+                        },
                         effects,
                     )?;
+                    terminal |= t == Type::Never;
+                    prev = ex;
                 }
-                t
+                if terminal {
+                    Type::Never
+                } else {
+                    t
+                }
             }
             Expr::Call(n, args) => {
-                if env.contains_key(n) {
+                if let Some(callee) = self.constructor_type(e) {
+                    self.result.callees.insert(address(e), callee.clone());
+                    self.apply(env, callee, args, want, effects)?
+                } else if env.contains_key(n) {
                     let callee = self.lookup(env, n)?;
                     self.result.callees.insert(address(e), callee.clone());
                     self.apply(env, callee, args, want, effects)?
@@ -787,7 +1247,19 @@ impl Engine<'_> {
             }
         };
         if let Some(w) = want {
-            self.unify(&t, w)?;
+            if t != Type::Never {
+                if self.raise_payload == Some(address(e)) {
+                    let target = self.cx.resolve(w);
+                    let actual = self.cx.resolve(&t);
+                    if target != actual
+                        && self.cx.free_vars(&target).is_empty()
+                        && self.cx.free_vars(&actual).is_empty()
+                    {
+                        return Err(self.incompatible(&actual, &target));
+                    }
+                }
+                self.unify(&t, w)?;
+            }
         }
         self.result.expressions.insert(address(e), t.clone());
         Ok(t)
@@ -800,18 +1272,22 @@ impl Engine<'_> {
         want: Option<&Type>,
         effects: bool,
     ) -> R<Type> {
+        let mut bottom = false;
+        // Check strict operands before the final contextual return type when
+        // an argument contains an immediate lexical escape.
+        let delay = !self.boundaries.is_empty() && args.iter().any(immediate_raise);
         for (i, ex) in args.iter().enumerate() {
             let arg = self.cx.fresh();
-            let out = if i + 1 == args.len() {
+            let out = if !delay && i + 1 == args.len() {
                 want.cloned().unwrap_or_else(|| self.cx.fresh())
             } else {
                 self.cx.fresh()
             };
             self.unify(&callee, &f(arg.clone(), out.clone()))?;
-            self.expr(env, ex, Some(&arg), effects)?;
+            bottom |= self.expr(env, ex, Some(&arg), effects)? == Type::Never;
             callee = out;
         }
-        Ok(callee)
+        Ok(if bottom { Type::Never } else { callee })
     }
     fn select(&mut self, sel: &str, src: &Type) -> R<Type> {
         let src = self.cx.resolve(src);
@@ -1038,6 +1514,9 @@ impl Engine<'_> {
     }
     fn builtin_ref(&mut self, n: &str, want: Option<&Type>) -> R<Type> {
         use Prim::*;
+        if fallible_builtin(n) {
+            self.saw_result = true;
+        }
         if n.starts_with('.') && n != ".:" && n != ".." {
             let src = self.cx.fresh();
             let out = self.cx.fresh();
@@ -1080,7 +1559,13 @@ impl Engine<'_> {
             "&&" | "||" => f(p(B), f(p(B), p(B))),
             "?+" => f(o(x), p(B)),
             "?!" => f(o(x.clone()), x),
-            "io.print" | "io.println" => f(x, a(p(Unit))),
+            "io.print" | "io.println" => f(x, a(result(p(Unit), Self::standard_type("ioerr")))),
+            "io.read" => f(p(S), a(result(p(S), Self::standard_type("ioerr")))),
+            "io.exists" => f(p(S), a(result(p(B), Self::standard_type("ioerr")))),
+            "io.write" => f(
+                p(S),
+                f(p(S), a(result(p(Unit), Self::standard_type("ioerr")))),
+            ),
             "?1" => f(x.clone(), o(x)),
             "+/" | "*/" => {
                 self.req(Class::Num, &x)?;
@@ -1105,6 +1590,9 @@ impl Engine<'_> {
         use Prim::*;
         let canonical = crate::builtins::lookup(n).map_or(n, |b| b.canonical);
         let n = canonical;
+        if fallible_builtin(n) {
+            self.saw_result = true;
+        }
         let result = match n {
             "@" => {
                 let arg = self.cx.fresh();
@@ -1272,30 +1760,45 @@ impl Engine<'_> {
                     return Err(self.err("cannot execute an action in a pure context"));
                 }
                 let out = want.cloned().unwrap_or_else(|| self.cx.fresh());
-                self.expr(env, &args[0], Some(&a(out.clone())), effect)?;
-                out
+                if self.expr(env, &args[0], Some(&a(out.clone())), effect)? == Type::Never {
+                    Type::Never
+                } else {
+                    out
+                }
             }
             "csv.read" => {
-                self.expr(env, &args[0], Some(&p(S)), effect)?;
-                match want.map(|t| self.cx.resolve(t)) {
-                    Some(Type::Action(out)) if matches!(out.as_ref(), Type::Table(_)) => {
-                        let Type::Table(row) = out.as_ref() else {
-                            unreachable!()
-                        };
-                        self.csv_row(row)?;
-                        a(*out)
-                    }
-                    _ => a(s(s(p(S)))),
+                let path = self.expr(env, &args[0], Some(&p(S)), effect)?;
+                let ok = match want.map(|t| self.cx.resolve(t)) {
+                    Some(Type::Action(t)) => match *t {
+                        Type::Result(t, _) => match *t {
+                            Type::Table(row) => {
+                                self.csv_row(&row)?;
+                                Type::Table(row)
+                            }
+                            _ => s(s(p(S))),
+                        },
+                        _ => s(s(p(S))),
+                    },
+                    _ => s(s(p(S))),
+                };
+                if path == Type::Never {
+                    Type::Never
+                } else {
+                    a(result(ok, Self::standard_type("csverr")))
                 }
             }
             "csv.write" => {
-                self.expr(env, &args[0], Some(&p(S)), effect)?;
+                let path = self.expr(env, &args[0], Some(&p(S)), effect)?;
                 let tt = self.expr(env, &args[1], None, effect)?;
-                let Type::Table(row) = self.cx.resolve(&tt) else {
-                    return Err(self.err("csv.write expects a named or structural table"));
-                };
-                self.csv_row(&row)?;
-                a(p(Unit))
+                if path == Type::Never || tt == Type::Never {
+                    Type::Never
+                } else {
+                    let Type::Table(row) = self.cx.resolve(&tt) else {
+                        return Err(self.err("csv.write expects a named or structural table"));
+                    };
+                    self.csv_row(&row)?;
+                    a(result(p(Unit), Self::standard_type("csverr")))
+                }
             }
             "?0" => {
                 let x = self.cx.fresh();
@@ -1357,7 +1860,11 @@ impl Engine<'_> {
                         self.expr(env, x, context.as_ref(), effect)
                     })
                     .collect::<crate::infer::R<Vec<_>>>()?;
-                self.builtin_types(n, &xs, want)?
+                if xs.contains(&Type::Never) {
+                    Type::Never
+                } else {
+                    self.builtin_types(n, &xs, want)?
+                }
             }
         };
         self.result.operations.insert(
@@ -1524,7 +2031,24 @@ impl Engine<'_> {
                     t
                 }
             }
-            "io.print" | "io.println" => a(p(Unit)),
+            "io.print" | "io.println" => a(result(p(Unit), Self::standard_type("ioerr"))),
+            "io.read" | "io.exists" | "io.write" => {
+                for path in xs {
+                    self.unify(path, &p(S))?;
+                }
+                let ok = match n {
+                    "io.read" => p(S),
+                    "io.exists" => p(B),
+                    _ => p(Unit),
+                };
+                a(result(ok, Self::standard_type("ioerr")))
+            }
+            "math.div" => {
+                for x in xs {
+                    self.require_exact_numeric(x, "math.div")?;
+                }
+                result(p(Q), Self::standard_type("numerr"))
+            }
             "take" | "[:" | "drop" | "slice" | "rev" => {
                 let (ns, last) = xs.split_at(xs.len() - 1);
                 for i in ns {
@@ -1612,7 +2136,7 @@ impl Engine<'_> {
                 self.result.bindings.insert(*id, mono(t.clone()));
             }
         }
-        self.expr(&nested, body, Some(&sig.out), effect && params.is_empty())
+        self.reset_boundary(|this| this.expr(&nested, body, Some(&sig.out), false))
             .map_err(|mut e| {
                 e.message = format!("{name}: {}", e.message);
                 e
@@ -1791,7 +2315,7 @@ impl Engine<'_> {
         let literals = self.literals.len();
         for stmt in defs {
             match stmt {
-                Stmt::Schema { .. } => {}
+                Stmt::Schema { .. } | Stmt::Sum { .. } => {}
                 Stmt::Def { name, params, .. } => {
                     let sig = self.def_signature(stmt)?;
                     if !params.is_empty() {
@@ -1802,12 +2326,15 @@ impl Engine<'_> {
                 }
                 Stmt::Effect { name, body, start } => {
                     self.start = *start;
-                    if !effect {
+                    if !effect && self.boundaries.is_empty() {
                         return Err(self.err("expression statement in pure block"));
                     }
                     let t = self.expr(env, body, None, effect)?;
                     if let Some(n) = name {
                         self.bind(env, stmt, n, mono(t));
+                    } else {
+                        let span = self.resolver.span(body).unwrap_or(*start..*start);
+                        self.discarded_results.push((t, span.start, span.end));
                     }
                 }
             }
@@ -1861,7 +2388,7 @@ impl Engine<'_> {
         let mut deps = HashMap::new();
         for stmt in defs {
             match stmt {
-                Stmt::Schema { .. } => {}
+                Stmt::Schema { .. } | Stmt::Sum { .. } => {}
                 Stmt::Def {
                     name, params, body, ..
                 } if !params.is_empty() => {
@@ -1941,12 +2468,110 @@ impl Engine<'_> {
                         }
                     }
                 }
-                Stmt::Schema { .. } => {}
+                Stmt::Schema { .. } | Stmt::Sum { .. } => {}
                 _ => self.group(vec![stmt], env, effect)?,
             }
         }
         Ok(())
     }
+}
+fn visit_inference_exprs(p: &Program, mut f: impl FnMut(&Expr) -> R<()>) -> R<()> {
+    fn defs(ds: &[Stmt], f: &mut impl FnMut(&Expr) -> R<()>) -> R<()> {
+        for s in ds {
+            if let Stmt::Def { body, .. } | Stmt::Effect { body, .. } = s {
+                visit(body, f)?;
+            }
+        }
+        Ok(())
+    }
+    fn visit(e: &Expr, f: &mut impl FnMut(&Expr) -> R<()>) -> R<()> {
+        use Expr::*;
+        f(e)?;
+        match e {
+            Call(_, xs) | Tuple(xs) | Array(xs) | Pipeline(xs) => {
+                for x in xs {
+                    visit(x, f)?;
+                }
+            }
+            Record(fs) | NamedRecord(_, fs) => {
+                for (_, x) in fs {
+                    visit(x, f)?;
+                }
+            }
+            Block(ss, tail) | Action(ss, tail) | Fallible(ss, tail) => {
+                defs(ss, f)?;
+                if let Some(x) = tail {
+                    visit(x, f)?;
+                }
+            }
+            Cases(cs, x) => {
+                for (c, b) in cs {
+                    visit(c, f)?;
+                    visit(b, f)?;
+                }
+                visit(x, f)?;
+            }
+            Lambda(_, x) | TypedLambda(_, _, x) | Raise(x) | Propagate(x) => visit(x, f)?,
+            Recover(x, cs) => {
+                visit(x, f)?;
+                for c in cs {
+                    visit(&c.body, f)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    defs(&p.defs, &mut f)?;
+    if let Some(e) = &p.entry {
+        visit(e, &mut f)?;
+    }
+    Ok(())
+}
+fn immediate_raise(e: &Expr) -> bool {
+    use Expr::*;
+    match e {
+        Raise(_) => true,
+        Call(_, xs) | Tuple(xs) | Array(xs) | Pipeline(xs) => xs.iter().any(immediate_raise),
+        Record(fs) | NamedRecord(_, fs) => fs.iter().any(|(_, x)| immediate_raise(x)),
+        Block(ss, tail) => {
+            ss.iter().any(|s| match s {
+                Stmt::Def { params, body, .. } if params.is_empty() => immediate_raise(body),
+                Stmt::Effect { body, .. } => immediate_raise(body),
+                _ => false,
+            }) || tail.as_deref().is_some_and(immediate_raise)
+        }
+        Cases(cs, x) => {
+            cs.iter()
+                .any(|(c, b)| immediate_raise(c) || immediate_raise(b))
+                || immediate_raise(x)
+        }
+        Recover(x, cs) => immediate_raise(x) || cs.iter().any(|c| immediate_raise(&c.body)),
+        Propagate(x) => immediate_raise(x),
+        _ => false,
+    }
+}
+fn fallible_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "io.print"
+            | "io.println"
+            | "io.read"
+            | "io.write"
+            | "io.exists"
+            | "csv.read"
+            | "csv.write"
+            | "math.div"
+    )
+}
+fn find_entry_natural_tail(p: &Program) -> Option<usize> {
+    let Expr::Action(_, Some(tail)) = p.entry.as_ref()? else {
+        return None;
+    };
+    let Expr::Fallible(_, Some(final_)) = tail.as_ref() else {
+        return None;
+    };
+    matches!(final_.as_ref(),Expr::Int(x) if *x>=0).then(|| address(final_))
 }
 pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
     let mut e = Engine {
@@ -1955,6 +2580,19 @@ pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
         resolver,
         schemas: HashMap::new(),
         schema_scopes: vec![HashMap::new()],
+        sums: HashMap::new(),
+        boundaries: vec![],
+        discarded_results: vec![],
+        entry_natural_tail: find_entry_natural_tail(p),
+        entry_boundary: p.entry.as_ref().and_then(|e| {
+            if let Expr::Action(_, Some(tail)) = e {
+                matches!(tail.as_ref(), Expr::Fallible(..)).then(|| address(tail))
+            } else {
+                None
+            }
+        }),
+        raise_payload: None,
+        saw_result: false,
         start: 0,
         literals: vec![],
         active: None,
@@ -1963,6 +2601,7 @@ pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
         qualifiers: &p.constraints,
     };
     let mut env = Env::new();
+    e.install_standard_errors(&p.imports)?;
     e.schema_headers(&p.defs)?;
     for group in &resolver.groups {
         e.group(group.iter().map(|i| &p.defs[*i]).collect(), &mut env, false)?;
@@ -1972,6 +2611,40 @@ pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
         let pos = e.literals.len();
         e.expr(&env, entry, None, false)?;
         e.default_literals(pos)?;
+    }
+    if e.saw_result {
+        for (t, start, end) in &e.discarded_results {
+            if matches!(e.cx.resolve(t), Type::Result(..)) {
+                return Err(InferError{kind:InferErrorKind::TypeError,start:*start,end:*end,expected:None,actual:None,message:"result-valued statement would discard a failure; propagate, recover, or bind its result".into()});
+            }
+        }
+        let quantified = e
+            .result
+            .bindings
+            .values()
+            .flat_map(|sc| sc.vars.iter().copied())
+            .collect::<HashSet<_>>();
+        visit_inference_exprs(p, |ex| {
+            if let Some(t @ (Type::Var(_) | Type::Result(..))) = e.result.type_of(ex) {
+                let t = e.cx.resolve(t);
+                if matches!(t, Type::Result(..))
+                    && e.cx.free_vars(&t).iter().any(|id| !quantified.contains(id))
+                {
+                    let at = resolver.offset(ex).unwrap_or(0);
+                    let span = resolver.span(ex).unwrap_or(at..at);
+                    return Err(InferError {
+                        kind: InferErrorKind::TypeError,
+                        start: span.start,
+                        end: span.end,
+                        expected: None,
+                        actual: None,
+                        message: "ambiguous fallible result: annotate the success and error types"
+                            .into(),
+                    });
+                }
+            }
+            Ok(())
+        })?;
     }
     for (element, start, end) in &e.empty_sequences {
         if e.cx
@@ -1983,6 +2656,8 @@ pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
                 kind: InferErrorKind::TypeError,
                 start: *start,
                 end: *end,
+                expected: None,
+                actual: None,
                 message: "empty sequence has an ambiguous element type; add an annotation".into(),
             });
         }
@@ -2180,5 +2855,62 @@ mod tests {
             r.callee_type(body(5)),
             Some(&f(Type::Prim(Prim::Q), Type::Prim(Prim::Q)))
         );
+    }
+    #[test]
+    fn result_boundaries_skips_and_handler_types() {
+        let src = r#"
+            fail :: { | code z; | other; };
+            div(x:z):z^fail := ^{ ? 1b (^: code x) x };
+            value := ^= div 7 { code x : x; other : 1; };
+            !{ ^{ ^? div 0; () } };
+        "#;
+        let p = crate::parser::parse(src).unwrap();
+        let names = crate::resolve::resolve(&p).unwrap();
+        let r = infer(&p, &names).unwrap();
+        assert_eq!(r.boundaries.len(), 4);
+        assert_eq!(
+            r.boundaries.values().copied().collect::<HashSet<_>>().len(),
+            2
+        );
+        assert_eq!(
+            r.constructors
+                .values()
+                .filter(|c| c.owner.name == "fail")
+                .count(),
+            2
+        );
+        let err =
+            check("fail :: { | a; | b; }; f(x:z):z^fail := ^{ ^: a }; s := ^= f 0 { a : 0; };")
+                .unwrap_err();
+        assert!(err.message.contains("nonexhaustive"), "{err:?}");
+        let err =
+            check("fail :: { | a; }; f(x:z):z^fail := ^{ ^: a }; s := ^= f 0 { a : 0; _ : 1; };")
+                .unwrap_err();
+        assert!(err.message.contains("unreachable"), "{err:?}");
+    }
+
+    #[test]
+    fn rejects_executable_result_ambiguity_and_unconsumed_pipeline() {
+        check("make(x) := ^{ x };").unwrap();
+        let e = check("make(x) := ^{ x }; !{ n := make 1; () };").unwrap_err();
+        assert!(e.message.contains("ambiguous"), "{e:?}");
+        let e = check("err :: { | bad; }; fail(x:z):z^err := ^{ ^: bad }; !{ |{ fail 0z; () } };")
+            .unwrap_err();
+        assert!(e.message.contains("discard"), "{e:?}");
+        check("err :: { | bad; }; fail(x:z):z^err := ^{ ^: bad }; !{ |{ fail 0z; ^= $ { bad : 0z; }; () } };").unwrap();
+    }
+
+    #[test]
+    fn resets_lexical_error_boundary_at_closures_functions_and_actions() {
+        for source in [
+            r#"e :: { | wrong; }; f(x:z):z^e := ^{ f2 := \u -> ^: wrong; x };"#,
+            "e :: { | wrong; }; f(x:z):z^e := ^{ f2(u:()):z := ^: wrong; x };",
+            "e :: { | wrong; }; f(x:z):z^e := ^{ suspended := !{ ^: wrong }; x };",
+        ] {
+            let err = check(source).unwrap_err();
+            assert!(err.message.contains("boundary"), "{err:?}");
+        }
+        let err = check("f(x:z):z^s := ^{ ^: x };").unwrap_err();
+        assert_eq!(err.kind, InferErrorKind::IncompatibleError);
     }
 }

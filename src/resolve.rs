@@ -1,6 +1,6 @@
 //! Lexical identities and dependency ordering for a parsed Flux program.
-use crate::parser::{Expr, Program, Stmt};
-use crate::{builtins, Error};
+use crate::parser::{standard_owners, Expr, Program, RecoveryCase, RecoveryPattern, Stmt, Variant};
+use crate::{builtins, errors041, Error};
 use std::{
     collections::{BTreeSet, HashMap},
     ops::Range,
@@ -14,6 +14,7 @@ pub struct SymbolId(pub usize);
 pub enum SymbolKind {
     Value,
     Callable(usize),
+    Constructor(usize),
     Schema,
     Parameter,
     Stage,
@@ -42,6 +43,11 @@ pub struct Resolution {
     placeholders: HashMap<usize, SymbolId>,
     offsets: HashMap<usize, usize>,
     spans: HashMap<usize, Range<usize>>,
+    owners: HashMap<SymbolId, SymbolId>,
+    variants: HashMap<usize, SymbolId>,
+    recovery_symbols: HashMap<usize, Vec<SymbolId>>,
+    recovery_ctors: HashMap<usize, SymbolId>,
+    standard: Vec<(&'static str, &'static str, SymbolId)>,
 }
 
 impl Resolution {
@@ -61,6 +67,34 @@ impl Resolution {
     /// Symbol for the preceding stage's value, visible within this stage.
     pub fn placeholder(&self, stage: &Expr) -> Option<SymbolId> {
         self.placeholders.get(&key(stage)).copied()
+    }
+    pub fn constructor_owner(&self, id: SymbolId) -> Option<SymbolId> {
+        self.owners.get(&id).copied()
+    }
+    pub fn variant(&self, variant: &Variant) -> Option<SymbolId> {
+        self.variants.get(&key(variant)).copied()
+    }
+    pub fn recovery_bindings(&self, arm: &RecoveryCase) -> &[SymbolId] {
+        self.recovery_symbols
+            .get(&key(arm))
+            .map_or(&[], Vec::as_slice)
+    }
+    pub fn recovery_constructor(&self, arm: &RecoveryCase) -> Option<SymbolId> {
+        self.recovery_ctors.get(&key(arm)).copied()
+    }
+    pub fn standard_owner(&self, owner: &str) -> Option<SymbolId> {
+        errors041::owner_id(owner).map(SymbolId)
+    }
+    pub fn standard_constructor(&self, owner: &str, name: &str) -> Option<SymbolId> {
+        self.standard
+            .iter()
+            .find(|(o, n, _)| *o == owner && *n == name)
+            .map(|x| x.2)
+    }
+    pub fn standard_constructors(
+        &self,
+    ) -> impl Iterator<Item = (&'static str, &'static str, SymbolId)> + '_ {
+        self.standard.iter().copied()
     }
     pub fn symbol(&self, id: SymbolId) -> &Symbol {
         &self.symbols[id.0]
@@ -88,6 +122,7 @@ pub fn resolve(p: &Program) -> Result<Resolution, Error> {
         out: Resolution::default(),
         scopes: Vec::new(),
         external: HashMap::new(),
+        standard_visible: HashMap::new(),
         roots: HashMap::new(),
         deps: vec![BTreeSet::new(); p.defs.len()],
         root: None,
@@ -98,11 +133,31 @@ pub fn resolve(p: &Program) -> Result<Resolution, Error> {
         .into_iter()
         .map(|(expr, span)| (key(expr), span))
         .collect();
+    for &owner in errors041::OWNERS {
+        if !p
+            .imports
+            .iter()
+            .any(|m| standard_owners(m).contains(&owner))
+        {
+            continue;
+        }
+        let owner_id = SymbolId(errors041::owner_id(owner).expect("known standard error type"));
+        for v in errors041::variants(owner) {
+            let id = r.fresh(v.name, SymbolKind::Constructor(v.payload.len()), 0);
+            r.out.owners.insert(id, owner_id);
+            r.out.standard.push((owner, v.name, id));
+            r.standard_visible.insert(v.name.to_owned(), id);
+        }
+    }
     r.scopes.push(HashMap::new());
     for (i, decl) in p.defs.iter().enumerate() {
         let id = r.allocate_decl(decl);
         if let Some(id) = id {
-            r.bind(id)?;
+            if let Stmt::Sum { variants, .. } = decl {
+                r.register_variants(id, variants)?;
+            } else {
+                r.bind(id)?;
+            }
             r.roots.insert(id, i);
         }
         r.out.top.push(id);
@@ -125,6 +180,7 @@ struct Resolver {
     out: Resolution,
     scopes: Vec<HashMap<String, SymbolId>>,
     external: HashMap<String, SymbolId>,
+    standard_visible: HashMap<String, SymbolId>,
     roots: HashMap<SymbolId, usize>,
     deps: Vec<BTreeSet<usize>>,
     root: Option<usize>,
@@ -147,7 +203,9 @@ fn decl_name(s: &Stmt) -> Option<(&str, SymbolKind, usize)> {
             },
             *start,
         )),
-        Stmt::Schema { name, start, .. } => Some((name, SymbolKind::Schema, *start)),
+        Stmt::Schema { name, start, .. } | Stmt::Sum { name, start, .. } => {
+            Some((name, SymbolKind::Schema, *start))
+        }
         Stmt::Effect {
             name: Some(name),
             start,
@@ -158,7 +216,10 @@ fn decl_name(s: &Stmt) -> Option<(&str, SymbolKind, usize)> {
 }
 fn stmt_offset(s: &Stmt) -> usize {
     match s {
-        Stmt::Def { start, .. } | Stmt::Schema { start, .. } | Stmt::Effect { start, .. } => *start,
+        Stmt::Def { start, .. }
+        | Stmt::Schema { start, .. }
+        | Stmt::Sum { start, .. }
+        | Stmt::Effect { start, .. } => *start,
     }
 }
 
@@ -179,6 +240,19 @@ impl Resolver {
         self.out.defs.insert(key(stmt), id);
         Some(id)
     }
+    fn register_variants(&mut self, owner: SymbolId, variants: &[Variant]) -> Result<(), Error> {
+        for variant in variants {
+            let id = self.fresh(
+                &variant.name,
+                SymbolKind::Constructor(variant.payload.len()),
+                variant.start,
+            );
+            self.bind(id)?;
+            self.out.owners.insert(id, owner);
+            self.out.variants.insert(key(variant), id);
+        }
+        Ok(())
+    }
     fn bind(&mut self, id: SymbolId) -> Result<(), Error> {
         let sym = self.out.symbol(id);
         let top = self.scopes.last_mut().expect("resolver scope");
@@ -192,9 +266,14 @@ impl Resolver {
         Ok(())
     }
     fn lookup(&self, n: &str) -> Option<SymbolId> {
-        self.scopes.iter().rev().find_map(|s| s.get(n).copied())
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.get(n).copied())
+            .or_else(|| self.standard_visible.get(n).copied())
     }
     fn edge(&mut self, id: SymbolId) {
+        let id = self.out.constructor_owner(id).unwrap_or(id);
         if let (Some(owner), Some(&dependency)) = (self.root, self.roots.get(&id)) {
             self.deps[owner].insert(dependency);
         }
@@ -207,9 +286,13 @@ impl Resolver {
                 (Usage::Plain, SymbolKind::Value | SymbolKind::Parameter | SymbolKind::Stage) => {
                     true
                 }
-                (Usage::Ref, SymbolKind::Callable(_)) => true,
+                (Usage::Plain, SymbolKind::Constructor(0)) => true,
+                (Usage::Ref, SymbolKind::Callable(_) | SymbolKind::Constructor(1..)) => true,
                 (Usage::Record, SymbolKind::Schema) => true,
-                (Usage::Call(actual), SymbolKind::Callable(expected)) => actual == expected,
+                (
+                    Usage::Call(actual),
+                    SymbolKind::Callable(expected) | SymbolKind::Constructor(expected),
+                ) => actual == expected,
                 _ => false,
             };
             if !valid {
@@ -275,7 +358,7 @@ impl Resolver {
         let outer = self.offset;
         self.offset = stmt_offset(s);
         match s {
-            Stmt::Schema { .. } => {}
+            Stmt::Schema { .. } | Stmt::Sum { .. } => {}
             Stmt::Def { params, body, .. } if !params.is_empty() => {
                 let ids = self.parameter_scope(params)?;
                 self.out.params.insert(key(s), ids);
@@ -293,7 +376,9 @@ impl Resolver {
         // and schemas enter scope before the declaration site.
         for s in stmts {
             if let Some(id) = self.allocate_decl(s) {
-                if matches!(
+                if let Stmt::Sum { variants, .. } = s {
+                    self.register_variants(id, variants)?;
+                } else if matches!(
                     self.out.symbol(id).kind,
                     SymbolKind::Callable(_) | SymbolKind::Schema
                 ) {
@@ -368,7 +453,35 @@ impl Resolver {
                     self.expression(v)?;
                 }
             }
-            Expr::Block(stmts, tail) | Expr::Action(stmts, tail) => {
+            Expr::Raise(body) | Expr::Propagate(body) => self.expression(body)?,
+            Expr::Recover(body, arms) => {
+                self.expression(body)?;
+                for arm in arms {
+                    let bindings = match &arm.pattern {
+                        RecoveryPattern::Wildcard => Vec::new(),
+                        RecoveryPattern::Bind(name) => vec![name.clone()],
+                        RecoveryPattern::Constructor(name, slots) => {
+                            let id=self.lookup(name).filter(|&id|matches!(self.out.symbol(id).kind,SymbolKind::Constructor(n) if n==slots.len()))
+                                .ok_or_else(||Error::new(arm.start,format!("unknown recovery constructor or arity mismatch for `{name}`")))?;
+                            self.edge(id);
+                            self.out.recovery_ctors.insert(key(arm), id);
+                            slots
+                                .iter()
+                                .filter(|s| s.as_str() != "_")
+                                .cloned()
+                                .collect()
+                        }
+                    };
+                    let saved = self.offset;
+                    self.offset = arm.start;
+                    let ids = self.parameter_scope(&bindings)?;
+                    self.offset = saved;
+                    self.out.recovery_symbols.insert(key(arm), ids);
+                    self.expression(&arm.body)?;
+                    self.scopes.pop();
+                }
+            }
+            Expr::Block(stmts, tail) | Expr::Action(stmts, tail) | Expr::Fallible(stmts, tail) => {
                 self.block(stmts, tail.as_deref())?
             }
             Expr::Int(_)
@@ -463,13 +576,13 @@ impl<'a> EagerIndex<'a> {
                     }
                     self.gather_expr(body);
                 }
-                Stmt::Schema { .. } => {}
+                Stmt::Schema { .. } | Stmt::Sum { .. } => {}
             }
         }
     }
     fn gather_expr(&mut self, e: &'a Expr) {
         match e {
-            Expr::Block(ss, tail) | Expr::Action(ss, tail) => {
+            Expr::Block(ss, tail) | Expr::Action(ss, tail) | Expr::Fallible(ss, tail) => {
                 self.blocks.push((ss, tail.as_deref()));
                 self.gather_stmts(ss);
                 if let Some(e) = tail {
@@ -479,6 +592,13 @@ impl<'a> EagerIndex<'a> {
             Expr::Call(_, es) | Expr::Tuple(es) | Expr::Array(es) | Expr::Pipeline(es) => {
                 for x in es {
                     self.gather_expr(x);
+                }
+            }
+            Expr::Raise(body) | Expr::Propagate(body) => self.gather_expr(body),
+            Expr::Recover(body, arms) => {
+                self.gather_expr(body);
+                for arm in arms {
+                    self.gather_expr(&arm.body);
                 }
             }
             Expr::Cases(pairs, tail) => {
@@ -726,7 +846,18 @@ impl<'a> EagerWalk<'a, '_> {
                     fallback
                 }
             }
-            Expr::Block(ss, tail) => self.block(ss, tail.as_deref())?,
+            Expr::Raise(body) | Expr::Propagate(body) => {
+                self.expression(body)?;
+                Known::Unknown
+            }
+            Expr::Recover(body, arms) => {
+                self.expression(body)?;
+                for arm in arms {
+                    self.expression(&arm.body)?;
+                }
+                Known::Unknown
+            }
+            Expr::Block(ss, tail) | Expr::Fallible(ss, tail) => self.block(ss, tail.as_deref())?,
             Expr::Array(es) | Expr::Tuple(es) | Expr::Pipeline(es) => {
                 for x in es {
                     self.expression(x)?;
@@ -1023,5 +1154,65 @@ mod tests {
             let p = parse(source).unwrap();
             assert!(resolve(&p).is_ok(), "{source}: {:?}", resolve(&p));
         }
+    }
+
+    #[test]
+    fn sums_hoist_constructor_arity_and_recover_lexical_binders() {
+        let src = "use(u:()):q^err := ^{ ^: bad 7 \"oops\" }; err :: { | empty; | bad n s; }; result := ^= (use ()) { bad x _ : x; empty : 0; };";
+        let p = parse(src).unwrap();
+        let r = resolve(&p).unwrap();
+        assert_eq!(r.groups[0], vec![1]);
+        let Stmt::Sum { variants, .. } = &p.defs[1] else {
+            panic!()
+        };
+        let ctor = r.variant(&variants[1]).unwrap();
+        assert_eq!(r.symbol(ctor).kind, SymbolKind::Constructor(2));
+        assert_eq!(r.constructor_owner(ctor), r.declaration(&p.defs[1]));
+        let Stmt::Def {
+            body: Expr::Recover(_, arms),
+            ..
+        } = &p.defs[2]
+        else {
+            panic!()
+        };
+        assert_eq!(r.recovery_constructor(&arms[0]), Some(ctor));
+        assert_eq!(
+            r.recovery_bindings(&arms[0]),
+            &[r.reference(&arms[0].body).unwrap()]
+        );
+        assert_eq!(r.span(&arms[0].body).map(|range| &src[range]), Some("x"));
+        assert_eq!(r.recovery_constructor(&arms[1]), r.variant(&variants[0]));
+        assert!(parse("e :: { | b n; }; x := b;").is_err());
+        assert!(parse("e :: { | b n n; }; x := ^= ^{0} { b y y : 1; };").is_err());
+    }
+
+    #[test]
+    fn standard_variants_require_import_and_are_shadowable() {
+        let alias = parse(r#"<< "io" : fs; e := fileerr (missing "path");"#).unwrap();
+        let alias_res = resolve(&alias).unwrap();
+        let Stmt::Def { body, .. } = &alias.defs[0] else {
+            panic!()
+        };
+        assert_eq!(
+            alias_res.reference(body),
+            alias_res.standard_constructor("csverr", "fileerr")
+        );
+        assert!(parse("x := missing \"x\";").is_err());
+        let p = parse("<< csv; x := missing \"x\"; y := { missing := 2; missing };").unwrap();
+        let r = resolve(&p).unwrap();
+        let Stmt::Def { body, .. } = &p.defs[0] else {
+            panic!()
+        };
+        let id = r.reference(body);
+        assert_eq!(id, r.standard_constructor("ioerr", "missing"));
+        assert_eq!(r.constructor_owner(id.unwrap()), r.standard_owner("ioerr"));
+        let Stmt::Def {
+            body: Expr::Block(ss, Some(tail)),
+            ..
+        } = &p.defs[1]
+        else {
+            panic!()
+        };
+        assert_eq!(r.reference(tail), r.declaration(&ss[0]));
     }
 }

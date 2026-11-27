@@ -3,6 +3,7 @@ pub mod builtins;
 pub mod check;
 mod csv;
 pub mod diagnostic;
+mod errors041;
 pub mod eval;
 pub mod hir;
 pub mod hir_eval;
@@ -12,6 +13,8 @@ pub mod parser;
 pub mod resolve;
 pub mod semantic;
 pub mod types;
+
+pub use csv::{FsInput, OpenedInput, RuntimeInput};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Error {
@@ -61,6 +64,24 @@ impl Error {
                     &source[line_start..line_end],
                     " ".repeat(column - 1),
                     "^".repeat(mark.chars().count().min(120)),
+                ));
+            }
+            for (kind, value) in [
+                ("expected", &detail.expected),
+                ("actual", &detail.actual),
+                ("constraint", &detail.constraint),
+            ] {
+                if let Some(value) = value {
+                    result.push_str(&format!("\n  {kind}: {value}"));
+                }
+            }
+            for related in &detail.related {
+                let prefix = source.get(..related.span.start).unwrap_or("");
+                let line = prefix.bytes().filter(|b| *b == b'\n').count() + 1;
+                let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+                result.push_str(&format!(
+                    "\n  note: {path}:{line}:{column}: {}",
+                    related.label
                 ));
             }
             if let Some(suggestion) = &detail.suggestion {

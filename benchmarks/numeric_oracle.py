@@ -7,6 +7,8 @@ from random import Random
 import subprocess
 from tempfile import TemporaryDirectory
 
+from migration import fallible_io
+
 
 def specimens():
     maximum = (1 << 127) - 1
@@ -36,7 +38,7 @@ def main():
         source = '<< "io";\n!{\n' + ''.join(
             f"    ! io.print ({op});\n" for op, _, _ in ops
         ) + '};\n'
-        path.write_text(source, encoding="ascii")
+        path.write_text(fallible_io(source), encoding="ascii")
         proc = subprocess.run([binary, "run-hir", path], text=True, capture_output=True, check=False)
         if proc.returncode:
             raise SystemExit(proc.stderr)

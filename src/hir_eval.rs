@@ -1,18 +1,51 @@
 //! Executable core for owned typed HIR. This backend never dispatches on surface AST.
 use crate::{
+    diagnostic::{Category, Diagnostic, Related},
     eval::Output,
     hir::{
-        CoreOp, Definition, ExprId, ExprKind, HirProgram, LiftMode, Literal, Span, Step,
-        TableSchema, Target,
+        BoundaryId, CoreOp, Definition, ExprId, ExprKind, HirProgram, LiftMode, Literal, Pattern,
+        Span, Step, TableSchema, Target,
     },
     resolve::SymbolId,
     types::{Prim, Type},
     Error,
 };
-use std::{cmp::Ordering, collections::HashMap, rc::Rc};
+use std::{cmp::Ordering, collections::HashMap, io::Write, rc::Rc};
+mod operations041;
+pub use crate::csv::{FsInput, OpenedInput, RuntimeInput};
 
-type R<T> = Result<T, Error>;
+type R<T> = Result<T, Control>;
 type NumericResult<T> = Result<T, &'static str>;
+#[derive(Clone)]
+struct Failure {
+    payload: Rc<V>,
+    origin: Span,
+    propagations: Vec<Span>,
+    diagnostic: Option<String>,
+}
+enum Control {
+    Fatal(Error),
+    Raise {
+        boundary: BoundaryId,
+        failure: Rc<Failure>,
+    },
+}
+impl Control {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Fatal(e) => e,
+            Self::Raise { failure, .. } => Diagnostic::new(
+                Category::RuntimeInvariant,
+                failure.origin,
+                "checked caret transfer escaped its lexical boundary",
+            )
+            .into_error(),
+        }
+    }
+}
+fn succeeded(value: V) -> V {
+    V::Outcome(Ok(Rc::new(value)))
+}
 const OVERFLOW: &str = "exact arithmetic exceeds the prototype's i128 bound";
 const DIV_BY_ZERO: &str = "division by zero";
 const COLLECTION_LIMIT: usize = 100_000;
@@ -340,9 +373,19 @@ enum V {
     Table(Rc<[V]>, Rc<TableSchema>),
     Dict(Rc<[(V, V)]>),
     Optional(Option<Rc<V>>),
+    Variant(Rc<VariantValue>),
+    // Keep exceptional provenance off all ordinary numeric/collection values.
+    Outcome(Result<Rc<V>, Rc<Failure>>),
     Fun(Rc<Fun>),
     Action(Rc<Action>),
 }
+/// Keep sums off the hot path for ordinary sequence element layouts.
+struct VariantValue {
+    constructor: SymbolId,
+    name: Rc<str>,
+    fields: Rc<[V]>,
+}
+
 #[derive(Clone)]
 enum Function {
     User {
@@ -352,6 +395,7 @@ enum Function {
         declared: Type,
     },
     Core(CoreOp, Type, Option<Rc<TableSchema>>),
+    Constructor(SymbolId, usize),
     Projection(Box<str>),
 }
 #[derive(Clone)]
@@ -366,6 +410,10 @@ struct Fun {
 enum Action {
     Block { expr: ExprId, env: usize },
     Print(V),
+    IoRead(Rc<str>),
+    IoWrite(Rc<str>, Rc<str>),
+    IoExists(Rc<str>),
+    IoPrint(V),
     CsvRead(Rc<str>, Option<Rc<TableSchema>>),
     CsvWrite(Rc<str>, V),
 }
@@ -379,13 +427,48 @@ struct Frame {
 struct Eval<'a> {
     p: &'a HirProgram,
     frames: Vec<Frame>,
-    stdout: String,
+    input: &'a mut dyn RuntimeInput,
+    output: &'a mut dyn Write,
     fuel: usize,
     depth: u16,
     effects: u16,
 }
-fn error(span: Span, message: impl Into<String>) -> Error {
-    Error::new(span.start, message)
+fn error(span: Span, message: impl Into<String>) -> Control {
+    Control::Fatal(Diagnostic::new(Category::RuntimeDomain, span, message).into_error())
+}
+fn invariant(span: Span, message: impl Into<String>) -> Control {
+    Control::Fatal(Diagnostic::new(Category::RuntimeInvariant, span, message).into_error())
+}
+fn uncaught(program: &HirProgram, f: &Failure) -> Error {
+    let declared = program.entry.and_then(|id| {
+        let ty = &program.node(id).ty;
+        let Type::Action(value) = ty else { return None };
+        let Type::Result(_, err) = value.as_ref() else {
+            return None;
+        };
+        Some(err.as_ref())
+    });
+    let shown = declared
+        .map(|t| format!("{t}: {}", repr(&f.payload)))
+        .unwrap_or_else(|| repr(&f.payload));
+    let mut d = Diagnostic::new(
+        Category::RuntimeOperational,
+        f.origin,
+        format!("uncaught operational failure: {shown}"),
+    );
+    if let Some(detail) = &f.diagnostic {
+        d.related.push(Related {
+            span: f.origin,
+            label: detail.clone(),
+        });
+    }
+    for &at in &f.propagations {
+        d.related.push(Related {
+            span: at,
+            label: "propagated here".into(),
+        });
+    }
+    d.into_error()
 }
 fn repr(v: &V) -> String {
     match v {
@@ -415,6 +498,19 @@ fn repr(v: &V) -> String {
         ),
         V::Optional(None) => "?0".into(),
         V::Optional(Some(x)) => format!("?1 {}", repr(x)),
+        V::Variant(variant) => {
+            let VariantValue { name, fields, .. } = variant.as_ref();
+            if fields.is_empty() {
+                name.to_string()
+            } else {
+                format!(
+                    "{name} {}",
+                    fields.iter().map(repr).collect::<Vec<_>>().join(" ")
+                )
+            }
+        }
+        V::Outcome(Ok(v)) => format!("ok {}", repr(v)),
+        V::Outcome(Err(f)) => format!("err {}", repr(&f.payload)),
         V::Fun(_) => "<function>".into(),
         V::Action(_) => "<action>".into(),
     }
@@ -444,6 +540,16 @@ fn equal(a: &V, b: &V) -> bool {
                 && a.iter()
                     .all(|(k, v)| b.iter().any(|(l, w)| equal(k, l) && equal(v, w)))
         }
+        (V::Variant(a), V::Variant(b)) => {
+            a.constructor == b.constructor
+                && a.fields.len() == b.fields.len()
+                && a.fields
+                    .iter()
+                    .zip(b.fields.iter())
+                    .all(|(x, y)| equal(x, y))
+        }
+        (V::Outcome(Ok(a)), V::Outcome(Ok(b))) => equal(a, b),
+        (V::Outcome(Err(a)), V::Outcome(Err(b))) => equal(&a.payload, &b.payload),
         _ => false,
     }
 }
@@ -501,12 +607,6 @@ fn named(v: &V, span: Span) -> R<&[(Box<str>, V)]> {
     } else {
         Err(error(span, "expected a record"))
     }
-}
-fn named_cell<'a>(fs: &'a [(Box<str>, V)], key: &str, span: Span) -> R<&'a V> {
-    fs.iter()
-        .find(|(k, _)| k.as_ref() == key)
-        .map(|(_, v)| v)
-        .ok_or_else(|| error(span, format!("record lacks column {key}")))
 }
 type RowCells = Vec<(Box<str>, V)>;
 fn column_rows(v: &V, span: Span) -> R<Vec<RowCells>> {
@@ -599,7 +699,9 @@ fn fit_instance(pattern: &Type, actual: &Type, vars: &mut HashMap<u32, Type>) {
         | (Type::Table(a), Type::Table(b))
         | (Type::Optional(a), Type::Optional(b))
         | (Type::Action(a), Type::Action(b)) => fit_instance(a, b, vars),
-        (Type::Dict(a, b), Type::Dict(c, d)) | (Type::Fun(a, b), Type::Fun(c, d)) => {
+        (Type::Dict(a, b), Type::Dict(c, d))
+        | (Type::Fun(a, b), Type::Fun(c, d))
+        | (Type::Result(a, b), Type::Result(c, d)) => {
             fit_instance(a, c, vars);
             fit_instance(b, d, vars);
         }
@@ -795,7 +897,8 @@ fn operation_arity(op: CoreOp) -> usize {
     match op {
         Absent => 0,
         Aggregate => 3,
-        TableRows | TableFrom | Rows | CsvRead | Mean | Median | StdDev => 1,
+        TableRows | TableFrom | Rows | CsvRead | Mean | Median | StdDev | IoRead | IoExists
+        | IoPrint | Sqrt => 1,
         Negate | Abs | Not | Sum | Product | Count | Execute | Print | Present | Has | Unwrap
         | ToNatural | ToInteger | ToRational | ToReal => 1,
         _ => 2,
@@ -841,6 +944,7 @@ impl Eval<'_> {
                 Type::Action(t) => Type::Action(Box::new(recur(t))),
                 Type::Tuple(ts) => Type::Tuple(ts.iter().map(recur).collect()),
                 Type::Fun(a, b) => Type::Fun(Box::new(recur(a)), Box::new(recur(b))),
+                Type::Result(a, b) => Type::Result(Box::new(recur(a)), Box::new(recur(b))),
                 Type::Dict(a, b) => Type::Dict(Box::new(recur(a)), Box::new(recur(b))),
                 Type::Record(r) => {
                     let mut r = r.clone();
@@ -900,6 +1004,21 @@ impl Eval<'_> {
             })),
         );
     }
+    fn make_variant(&self, id: SymbolId, fields: Vec<V>, span: Span) -> R<V> {
+        let info = self
+            .p
+            .constructors
+            .get(&id)
+            .ok_or_else(|| invariant(span, "checked constructor identity is absent"))?;
+        if fields.len() != info.payload.len() {
+            return Err(invariant(span, "checked constructor payload arity differs"));
+        }
+        Ok(V::Variant(Rc::new(VariantValue {
+            constructor: id,
+            name: info.name.clone(),
+            fields: fields.into(),
+        })))
+    }
     fn tick(&mut self, span: Span) -> R<()> {
         self.fuel = self
             .fuel
@@ -957,6 +1076,24 @@ impl Eval<'_> {
             },
             ExprKind::Load(sid) => self.load(env, *sid, s)?,
             ExprKind::Reference(Target::Symbol(sid)) => self.load(env, *sid, s)?,
+            ExprKind::Reference(Target::Constructor(id)) => {
+                let arity = p
+                    .constructors
+                    .get(id)
+                    .ok_or_else(|| invariant(s, "checked constructor is absent"))?
+                    .payload
+                    .len();
+                if arity == 0 {
+                    self.make_variant(*id, Vec::new(), s)?
+                } else {
+                    V::Fun(Rc::new(Fun {
+                        code: Function::Constructor(*id, arity),
+                        bound: Vec::new(),
+                        bound_types: Vec::new(),
+                        instance: None,
+                    }))
+                }
+            }
             ExprKind::Reference(Target::Projection(field)) => V::Fun(Rc::new(Fun {
                 code: Function::Projection(field.clone()),
                 bound: Vec::new(),
@@ -982,7 +1119,7 @@ impl Eval<'_> {
             ExprKind::Call(target, ids) => {
                 let f = match target {
                     Target::Symbol(sid) => Some(self.load(env, *sid, s)?),
-                    Target::Builtin(_) | Target::Projection(_) => None,
+                    Target::Builtin(_) | Target::Projection(_) | Target::Constructor(_) => None,
                 };
                 let args = ids
                     .iter()
@@ -1029,6 +1166,7 @@ impl Eval<'_> {
                         let ty = self.type_at(ty, env);
                         self.core(*op, args, &ty, n.table_schema.as_ref(), n.lift_mode, s)?
                     }
+                    Target::Constructor(id) => self.make_variant(*id, args, s)?,
                     Target::Projection(field) => {
                         let [v]: [V; 1] = args
                             .try_into()
@@ -1111,6 +1249,82 @@ impl Eval<'_> {
                 }
                 value
             }
+            ExprKind::Fallible {
+                boundary,
+                steps,
+                tail,
+            } => match self.block(steps, *tail, env) {
+                Ok(v) => succeeded(v),
+                Err(Control::Raise {
+                    boundary: target,
+                    failure,
+                }) if target == *boundary => V::Outcome(Err(failure)),
+                Err(other) => return Err(other),
+            },
+            ExprKind::Raise { boundary, payload } => {
+                let v = self.eval(*payload, env)?;
+                return Err(Control::Raise {
+                    boundary: *boundary,
+                    failure: Rc::new(Failure {
+                        payload: Rc::new(v),
+                        origin: s,
+                        propagations: Vec::new(),
+                        diagnostic: None,
+                    }),
+                });
+            }
+            ExprKind::Propagate { boundary, result } => match self.eval(*result, env)? {
+                V::Outcome(Ok(v)) => v.as_ref().clone(),
+                V::Outcome(Err(mut f)) => {
+                    Rc::make_mut(&mut f).propagations.push(s);
+                    return Err(Control::Raise {
+                        boundary: *boundary,
+                        failure: f,
+                    });
+                }
+                _ => return Err(invariant(s, "checked propagation operand was not Result")),
+            },
+            ExprKind::Recover { result, arms } => match self.eval(*result, env)? {
+                V::Outcome(Ok(v)) => v.as_ref().clone(),
+                V::Outcome(Err(f)) => {
+                    for arm in arms {
+                        let bindings = match &arm.pattern {
+                            Pattern::Wildcard => Vec::new(),
+                            Pattern::Bind(id) => vec![(*id, f.payload.as_ref().clone())],
+                            Pattern::Constructor { id, fields } => {
+                                let V::Variant(variant) = f.payload.as_ref() else {
+                                    continue;
+                                };
+                                let payload = &variant.fields;
+                                if variant.constructor != *id {
+                                    continue;
+                                }
+                                if fields.len() != payload.len() {
+                                    return Err(invariant(
+                                        arm.span,
+                                        "checked recovery pattern arity differs",
+                                    ));
+                                }
+                                fields
+                                    .iter()
+                                    .zip(payload.iter())
+                                    .filter_map(|(id, v)| id.map(|i| (i, v.clone())))
+                                    .collect()
+                            }
+                        };
+                        let local = self.frame(env);
+                        for (id, v) in bindings {
+                            self.put(local, id, v);
+                        }
+                        return self.eval(arm.body, local);
+                    }
+                    return Err(invariant(
+                        s,
+                        "checked recovery did not cover the failure variant",
+                    ));
+                }
+                _ => return Err(invariant(s, "checked recovery operand was not Result")),
+            },
             ExprKind::Block {
                 suspended: true, ..
             } => V::Action(Rc::new(Action::Block { expr: id, env })),
@@ -1162,7 +1376,7 @@ impl Eval<'_> {
         let n = f.bound.len();
         let sig = match &f.code {
             Function::User { declared, .. } | Function::Core(_, declared, _) => Some(declared),
-            Function::Projection(_) => None,
+            Function::Projection(_) | Function::Constructor(..) => None,
         };
         let suggested = f.instance.as_ref();
         let out = out_type.or_else(|| suggested.map(|sig| result_type(sig, args.len()).clone()));
@@ -1188,6 +1402,7 @@ impl Eval<'_> {
             Function::User { formals, .. } => formals.len(),
             Function::Core(op, ..) => operation_arity(*op),
             Function::Projection(_) => 1,
+            Function::Constructor(_, arity) => *arity,
         };
         if f.bound.len() < arity {
             f.instance = out;
@@ -1227,6 +1442,7 @@ impl Eval<'_> {
                 let mode = callable_lift(op, &f.bound_types).map_err(|m| error(span, m))?;
                 self.core(op, f.bound, out, schema.as_ref(), mode, span)
             }
+            Function::Constructor(id, _) => self.make_variant(id, f.bound, span),
             Function::Projection(field) => {
                 projection(&field, f.bound.pop().expect("checked arity"), span)
             }
@@ -1236,16 +1452,20 @@ impl Eval<'_> {
         let V::Action(action) = v else {
             return Err(error(span, "expected a suspended action"));
         };
+        if let Some(result) = operations041::apply_action(&action, self, span) {
+            return result;
+        }
         match action.as_ref() {
             Action::Print(v) => {
-                self.stdout.push_str(&repr(v));
-                self.stdout.push('\n');
+                writeln!(self.output, "{}", repr(v))
+                    .map_err(|e| error(span, format!("could not write output: {e}")))?;
                 Ok(V::Unit)
             }
-            Action::CsvRead(path, schema) => read_csv(path, schema.as_ref(), span),
-            Action::CsvWrite(path, data) => {
-                write_csv(path, data, span)?;
-                Ok(V::Unit)
+            Action::IoRead(_) | Action::IoWrite(..) | Action::IoExists(_) | Action::IoPrint(_) => {
+                Err(invariant(span, "fallible I/O action has no implementation"))
+            }
+            Action::CsvRead(..) | Action::CsvWrite(..) => {
+                Err(invariant(span, "fallible CSV action has no implementation"))
             }
             Action::Block { expr, env } => {
                 let p = self.p;
@@ -1300,6 +1520,9 @@ impl Eval<'_> {
         if args.len() != operation_arity(op) {
             return Err(error(span, "invalid typed HIR operator arity"));
         }
+        if let Some(result) = operations041::apply_core(op, &args, ty, span, self.p) {
+            return result;
+        }
         let mut args = args.into_iter();
         let mut a = || args.next().expect("arity checked");
         let fail = |message| error(span, message);
@@ -1308,6 +1531,22 @@ impl Eval<'_> {
             | Gt | Ge | And | Or => lift(a(), a(), mode, &|x, y| {
                 scalar_binary(op, x, y, inner_type(ty))
             }),
+            Sqrt => {
+                let v = a();
+                let x = match v {
+                    V::Real(r) => r,
+                    V::Exact(n) => n.real(),
+                    _ => return Err(invariant(span, "checked square root expects a number")),
+                };
+                if x < 0.0 {
+                    Err("square root of a negative number")
+                } else {
+                    finite(x.sqrt())
+                }
+            }
+            IoRead | IoWrite | IoExists | IoPrint | CheckedDiv => {
+                return Err(invariant(span, "checked operation has no implementation"))
+            }
             EqualWhole => Ok(V::Bool(equal(&a(), &a()))),
             Negate | Abs | Not => lift_one(a(), mode, &|v| {
                 if op == Not {
@@ -1705,46 +1944,6 @@ fn read_cell(s: &str, ty: &Type) -> NumericResult<V> {
         _ => return Err("CSV schema contains an unsupported column type"),
     })
 }
-fn read_csv(path: &str, shape: Option<&Rc<TableSchema>>, span: Span) -> R<V> {
-    let data = crate::csv::read(path).map_err(|m| error(span, m))?;
-    let Some(shape) = shape else {
-        let xs =
-            crate::csv::decode(&data).map_err(|m| error(span, format!("CSV {path:?}: {m}")))?;
-        let rows = xs
-            .into_iter()
-            .map(|row| {
-                V::Sequence(
-                    row.into_iter()
-                        .map(|s| V::String(Rc::from(s)))
-                        .collect::<Vec<_>>()
-                        .into(),
-                )
-            })
-            .collect::<Vec<_>>();
-        return Ok(V::Sequence(rows.into()));
-    };
-    let TableSchema::Named(schema) = shape.as_ref() else {
-        return Err(error(span, "typed CSV requires a named row schema"));
-    };
-    let keys = schema.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
-    let cells = crate::csv::typed_rows(&data, &keys)
-        .map_err(|m| error(span, format!("CSV {path:?}: {m}")))?;
-    let mut rows = Vec::with_capacity(cells.len());
-    for (i, cells) in cells.into_iter().enumerate() {
-        let mut row = Vec::with_capacity(schema.len());
-        for ((name, ty), value) in schema.iter().zip(cells) {
-            let decoded = read_cell(&value, ty).map_err(|m| {
-                error(
-                    span,
-                    format!("CSV {path:?}: row {}, column {name}: {m}", i + 2),
-                )
-            })?;
-            row.push((name.as_str().into(), decoded));
-        }
-        rows.push(V::Record(row.into()));
-    }
-    Ok(V::Table(rows.into(), shape.clone()))
-}
 fn write_cell(v: &V) -> NumericResult<String> {
     Ok(match v {
         V::String(s) => s.to_string(),
@@ -1762,33 +1961,12 @@ fn write_cell(v: &V) -> NumericResult<String> {
         _ => return Err("unsupported CSV output cell type"),
     })
 }
-fn write_csv(path: &str, value: &V, span: Span) -> R<()> {
-    let V::Table(rows, shape) = value else {
-        return Err(error(span, "CSV write expects a table"));
-    };
-    let TableSchema::Named(schema) = shape.as_ref() else {
-        return Err(error(span, "CSV write needs a table with named columns"));
-    };
-    let mut data = vec![schema.iter().map(|(k, _)| k.clone()).collect()];
-    for (i, row) in rows.iter().enumerate() {
-        let row = named(row, span)?;
-        let cells = schema
-            .iter()
-            .map(|(name, _)| {
-                write_cell(named_cell(row, name, span)?)
-                    .map_err(|m| error(span, format!("CSV row {}, column {name}: {m}", i + 2)))
-            })
-            .collect::<R<Vec<_>>>()?;
-        data.push(cells);
-    }
-    crate::csv::write(path, &data).map_err(|m| error(span, m))
-}
-
-fn evaluate(program: &HirProgram) -> R<(String, V)> {
+fn evaluate(program: &HirProgram, input: &mut dyn RuntimeInput, output: &mut dyn Write) -> R<V> {
     let mut eval = Eval {
         p: program,
         frames: vec![Frame::default()],
-        stdout: String::new(),
+        input,
+        output,
         fuel: 1_000_000,
         depth: 0,
         effects: 0,
@@ -1796,7 +1974,7 @@ fn evaluate(program: &HirProgram) -> R<(String, V)> {
     for group in &program.groups {
         for d in group {
             if !d.formals.is_empty() {
-                eval.define_fun(d, 0)
+                eval.define_fun(d, 0);
             }
         }
         for d in group {
@@ -1806,34 +1984,55 @@ fn evaluate(program: &HirProgram) -> R<(String, V)> {
             }
         }
     }
-    let value = if let Some(id) = program.entry {
-        let value = eval.eval(id, 0)?;
-        eval.execute(value, program.node(id).span)?
+    if let Some(id) = program.entry {
+        let v = eval.eval(id, 0)?;
+        eval.execute(v, program.node(id).span)
     } else {
-        V::Unit
-    };
-    Ok((eval.stdout, value))
+        Ok(V::Unit)
+    }
 }
 
-pub fn run(program: &HirProgram) -> R<Output> {
-    let (stdout, value) = evaluate(program)?;
+pub fn run_with_io(
+    program: &HirProgram,
+    input: &mut dyn RuntimeInput,
+    sink: &mut dyn Write,
+) -> Result<Output, Error> {
+    let mut value = evaluate(program, input, sink).map_err(Control::into_error)?;
     let span = program
         .entry
         .map(|id| program.node(id).span)
-        .unwrap_or(Span { start: 0, end: 0 });
+        .unwrap_or_default();
+    if let V::Outcome(v) = value {
+        value = match v {
+            Ok(v) => v.as_ref().clone(),
+            Err(f) => return Err(uncaught(program, &f)),
+        };
+    }
     let status = match value {
         V::Unit => 0,
-        V::Exact(n) if n.d == 1 => {
-            u8::try_from(n.n).map_err(|_| error(span, "entry exit status must be from 0 to 255"))?
-        }
+        V::Exact(n) if n.d == 1 => u8::try_from(n.n)
+            .map_err(|_| error(span, "entry exit status must be from 0 to 255").into_error())?,
         _ => {
-            return Err(error(
-                span,
-                "entry must return unit or a natural exit status",
-            ))
+            return Err(
+                invariant(span, "entry must return unit or a natural exit status").into_error(),
+            )
         }
     };
-    Ok(Output { stdout, status })
+    Ok(Output {
+        stdout: String::new(),
+        status,
+    })
+}
+pub fn run_with_output(program: &HirProgram, sink: &mut dyn Write) -> Result<Output, Error> {
+    run_with_io(program, &mut FsInput, sink)
+}
+
+pub fn run(program: &HirProgram) -> Result<Output, Error> {
+    let mut sink = Vec::new();
+    let mut out = run_with_output(program, &mut sink)?;
+    out.stdout = String::from_utf8(sink)
+        .map_err(|_| invariant(Span::default(), "output sink was not UTF-8").into_error())?;
+    Ok(out)
 }
 
 fn table_view(rows: &[V], schema: &TableSchema) -> String {
@@ -1911,8 +2110,12 @@ fn table_view(rows: &[V], schema: &TableSchema) -> String {
     out.join("\n")
 }
 
-pub fn view_entry(program: &HirProgram) -> R<crate::eval::ReplOutput> {
-    let (stdout, value) = evaluate(program)?;
+pub fn view_with_io(
+    program: &HirProgram,
+    input: &mut dyn RuntimeInput,
+    sink: &mut dyn Write,
+) -> Result<crate::eval::ReplOutput, Error> {
+    let value = evaluate(program, input, sink).map_err(Control::into_error)?;
     fn inspect(v: &V) -> String {
         match v {
             V::String(s) => format!("{s:?}"),
@@ -1939,14 +2142,41 @@ pub fn view_entry(program: &HirProgram) -> R<crate::eval::ReplOutput> {
                     .collect::<Vec<_>>()
                     .join("; ")
             ),
+            V::Outcome(Ok(v)) => format!("ok {}", inspect(v)),
+            V::Outcome(Err(f)) => format!("err {}", inspect(&f.payload)),
+            V::Variant(variant) if !variant.fields.is_empty() => format!(
+                "{} {}",
+                variant.name,
+                variant
+                    .fields
+                    .iter()
+                    .map(inspect)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
             V::Optional(Some(x)) => format!("?1 {}", inspect(x)),
             v => repr(v),
         }
     }
     Ok(crate::eval::ReplOutput {
         value: inspect(&value),
-        stdout,
+        stdout: String::new(),
     })
+}
+
+pub fn view_with_output(
+    program: &HirProgram,
+    sink: &mut dyn Write,
+) -> Result<crate::eval::ReplOutput, Error> {
+    view_with_io(program, &mut FsInput, sink)
+}
+
+pub fn view_entry(program: &HirProgram) -> Result<crate::eval::ReplOutput, Error> {
+    let mut sink = Vec::new();
+    let mut out = view_with_output(program, &mut sink)?;
+    out.stdout = String::from_utf8(sink)
+        .map_err(|_| invariant(Span::default(), "output sink was not UTF-8").into_error())?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1964,13 +2194,13 @@ mod tests {
     fn owned_typed_hir_runs_after_surface_tree_is_dropped() {
         let ir = compile(
             r#"
-            << "io";
+            << "io"; emit(x) := !{ ^= ! io.print x { _ : (); } };
             id(x) := x;
             f := |{ 4; \y -> + $ y };
             !{
-                ! io.print id 9;
-                ! io.print id "polymorphic";
-                ! io.print @ f 5;
+                ! emit id 9;
+                ! emit id "polymorphic";
+                ! emit @ f 5;
             };
         "#,
         );
@@ -1983,11 +2213,11 @@ mod tests {
     fn typed_pipeline_and_lexical_closures() {
         let ir = compile(
             r#"
-            << "io";
+            << "io"; emit(x) := !{ ^= ! io.print x { _ : (); } };
             twice(x:z):z := + x x;
             !{
-                x := |{ ! !{ ! io.print "once"; 4 }; + $ $; @ &twice $ };
-                ! io.print x;
+                x := |{ ! !{ ! emit "once"; 4 }; + $ $; @ &twice $ };
+                ! emit x;
             };
         "#,
         );
@@ -1996,7 +2226,9 @@ mod tests {
 
     #[test]
     fn typed_hir_runtime_domain_error_and_lazy_branches() {
-        let good = compile(r#" << "io"; !{ ! io.print ? 1b (/ 3 2) (/ 1 0); }; "#);
+        let good = compile(
+            r#" << "io"; emit(x) := !{ ^= ! io.print x { _ : (); } }; !{ ! emit ? 1b (/ 3 2) (/ 1 0); }; "#,
+        );
         assert_eq!(run(&good).unwrap().stdout, "3/2\n");
         let bad = compile("a := 1;\nb := / a 0;\n!{ (); };");
         let error = run(&bad).err().unwrap();
@@ -2007,11 +2239,11 @@ mod tests {
     fn typed_row_generalization_runs_without_legacy() {
         let ir = compile(
             r#"
-            << "io";
+            << "io"; emit(x) := !{ ^= ! io.print x { _ : (); } };
             amount(x) := .amount x;
             !{
-                ! io.print amount .{ amount:=12; label:="kept"; };
-                ! io.print amount .{ amount:=9; approved:=1b; };
+                ! emit amount .{ amount:=12; label:="kept"; };
+                ! emit amount .{ amount:=9; approved:=1b; };
             };
         "#,
         );
@@ -2043,12 +2275,12 @@ mod tests {
         use LiftMode::*;
         let ir = compile(
             r#"
-            << "io";
+            << "io"; emit(x) := !{ ^= ! io.print x { _ : (); } };
             x := + 1 2;
             y := - [4 6] 1;
             z := - 9 [1 2];
             w := * [1 2] [2 3];
-            !{ ! io.print (x,y,z,w); };
+            !{ ! emit (x,y,z,w); };
         "#,
         );
         let found = ir
@@ -2070,7 +2302,7 @@ mod tests {
     fn checked_instances_cover_numeric_closures_and_indirect_broadcast() {
         let ir = compile(
             r#"
-            << "io";
+            << "io"; emit(x) := !{ ^= ! io.print x { _ : (); } };
             twice(x) := + x x;
             through(f,x) := @ f x;
             twice_with(f,x) := @ (@ f x) x;
@@ -2081,15 +2313,15 @@ mod tests {
             pair:[z] [z]->[z] := &-;
             f := factory 0.5q;
             !{
-                ! io.print twice 4z;
-                ! io.print twice 0.25q;
-                ! io.print twice 0.25r;
-                ! io.print through &twice 0.25r;
-                ! io.print twice_with plus 0.25q;
-                ! io.print @ f 0.25q;
-                ! io.print @@ add ([1 2],4);
-                ! io.print @ (@ scale 2) [4 5];
-                ! io.print @@ pair ([9 8],[3 2]);
+                ! emit twice 4z;
+                ! emit twice 0.25q;
+                ! emit twice 0.25r;
+                ! emit through &twice 0.25r;
+                ! emit twice_with plus 0.25q;
+                ! emit @ f 0.25q;
+                ! emit @@ add ([1 2],4);
+                ! emit @ (@ scale 2) [4 5];
+                ! emit @@ pair ([9 8],[3 2]);
             };
         "#,
         );
@@ -2115,5 +2347,99 @@ mod tests {
             .unwrap()
             .message
             .contains("natural subtraction underflow"));
+    }
+    #[test]
+    fn failure_provenance_is_not_part_of_result_equality() {
+        let ir = compile(
+            r#"
+            first(x:z):z^z := ^{ ^: x };
+            second(x:z):z^z := ^{ ^? first x };
+            !{ == (first 3z) (second 3z) };
+        "#,
+        );
+        assert_eq!(view_entry(&ir).unwrap().value, "1b");
+    }
+
+    #[test]
+    fn recover_selects_one_arm_once_and_wildcard_payload_slots_do_not_bind() {
+        let ir = compile(
+            r#"
+            trouble :: { | other; | both z z; };
+            raise_two(x:z):z^trouble := ^{ ^: both 9z x };
+            !{ ^= raise_two 3z { other : // 2z 0z; both _ y : y; } };
+        "#,
+        );
+        assert_eq!(view_entry(&ir).unwrap().value, "3");
+    }
+
+    #[test]
+    fn uncaught_result_contains_original_span_and_each_propagation() {
+        let source = "first(x:z):z^z := ^{ ^: x };
+second(x:z):z^z := ^{ ^? first x };
+!{ ^{ lost := ^? second 5z; () } };";
+        let ir = compile(source);
+        let err = match run(&ir) {
+            Ok(_) => panic!("failure became successful"),
+            Err(e) => e,
+        };
+        let d = err.structured().unwrap();
+        assert_eq!(d.category, Category::RuntimeOperational);
+        assert!(d.message.contains("z: 5"), "{}", d.message);
+        assert_eq!(d.primary.start, source.find("^:").unwrap());
+        assert_eq!(
+            d.related
+                .iter()
+                .map(|note| note.span.start)
+                .collect::<Vec<_>>(),
+            source
+                .match_indices("^?")
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn runtime_result_instantiation_is_polymorphic() {
+        let ir = compile(
+            r#"
+            keep(x:'a):'a^z := ^{ x };
+            get(fallback:'a,wrapped:'a^z):'a := ^= wrapped { _ : fallback; };
+            !{ (get 1z (keep 8z), get "stale" (keep "fresh")) };
+        "#,
+        );
+        assert_eq!(view_entry(&ir).unwrap().value, "(8, \"fresh\")");
+    }
+    #[test]
+    fn injectable_reader_drives_action_and_does_not_reexecute_it() {
+        struct Host {
+            reads: Vec<String>,
+        }
+        impl RuntimeInput for Host {
+            fn open(&mut self, path: &str) -> std::io::Result<OpenedInput> {
+                self.reads.push(path.into());
+                let bytes = b"injected data";
+                Ok(OpenedInput {
+                    reader: Box::new(std::io::Cursor::new(bytes)),
+                    byte_len: Some(bytes.len() as u64),
+                })
+            }
+        }
+        let ir = compile(
+            r#"
+            << "io";
+            !{ ^{
+                data := ^? ! io.read "virtual-fixture";
+                ^? ! io.print data;
+                ()
+            } };
+        "#,
+        );
+        let mut host = Host { reads: vec![] };
+        let mut output = Vec::new();
+        let status = run_with_io(&ir, &mut host, &mut output).unwrap();
+        assert_eq!(status.status, 0);
+        assert_eq!(status.stdout, "");
+        assert_eq!(host.reads, ["virtual-fixture"]);
+        assert_eq!(output, b"injected data\n");
     }
 }

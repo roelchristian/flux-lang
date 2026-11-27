@@ -35,7 +35,7 @@ fn symbol_at(bytes: &[u8]) -> Option<&'static str> {
         b'[' => &["[:", "["],
         b'\\' => &["\\:", "\\"],
         b']' => &["]"],
-        b'^' => &["^/", "^"],
+        b'^' => &["^{", "^:", "^?", "^=", "^/", "^"],
         b'{' => &["{.", "{"],
         b'|' => &["||/", "|{", "||", "|"],
         b'}' => &["}"],
@@ -305,5 +305,16 @@ mod tests {
         for bad in [r#""\u{d800}""#, r#""\x""#, "'xy'", "_name", "\"no close"] {
             assert!(lex(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn caret_forms_preserve_power_root_and_spans() {
+        let input = "^{ ^: ^? ^= ^/ ^";
+        let t = lex(input).unwrap();
+        assert_eq!(
+            t.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+            ["^{", "^:", "^?", "^=", "^/", "^"]
+        );
+        assert!(t.iter().all(|t| input[t.start..t.end] == t.text));
     }
 }
