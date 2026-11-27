@@ -2,7 +2,7 @@
 use crate::{
     parser::{Expr, Program, Stmt},
     resolve::{Resolution, SymbolId},
-    types::{Class, Constraint, InferCtx, Prim, Row, Scheme, Type},
+    types::{Class, Constraint, InferCtx, NominalId, Prim, Row, Scheme, Type},
 };
 use std::collections::{HashMap, HashSet};
 
@@ -34,20 +34,24 @@ pub struct InferResult {
     pub expressions: HashMap<usize, Type>,
     pub bindings: HashMap<SymbolId, Scheme>,
     pub operations: HashMap<usize, Operation>,
-    pub schemas: HashMap<String, Row>,
+    pub callees: HashMap<usize, Type>,
+    pub schemas: HashMap<NominalId, Row>,
 }
 fn address(e: &Expr) -> usize {
     (e as *const Expr) as usize
 }
 impl InferResult {
-    pub fn nominal_schema(&self, name: &str) -> Option<&Row> {
-        self.schemas.get(name)
+    pub fn nominal_schema(&self, id: &NominalId) -> Option<&Row> {
+        self.schemas.get(id)
     }
     pub fn type_of(&self, e: &Expr) -> Option<&Type> {
         self.expressions.get(&address(e))
     }
     pub fn binding_type(&self, id: SymbolId) -> Option<&Scheme> {
         self.bindings.get(&id)
+    }
+    pub fn callee_type(&self, e: &Expr) -> Option<&Type> {
+        self.callees.get(&address(e))
     }
     pub fn operation_of(&self, e: &Expr) -> Option<&Operation> {
         self.operations.get(&address(e))
@@ -193,10 +197,13 @@ struct Engine<'r> {
     cx: InferCtx,
     result: InferResult,
     resolver: &'r Resolution,
-    schemas: HashMap<String, Row>,
+    schemas: HashMap<NominalId, Row>,
+    schema_scopes: Vec<HashMap<String, NominalId>>,
     start: usize,
     literals: Vec<(Type, i128, usize, usize)>,
     active: Option<std::ops::Range<usize>>,
+    empty_sequences: Vec<(Type, usize, usize)>,
+    explicit_variables: HashSet<u32>,
     qualifiers: &'r std::collections::BTreeMap<usize, Vec<(String, String)>>,
 }
 impl Engine<'_> {
@@ -244,7 +251,7 @@ impl Engine<'_> {
         self.nominal_evidence(c, t, &mut HashSet::new())?;
         self.cx.require(c, t).map_err(|e| self.err(e))
     }
-    fn nominal_evidence(&mut self, c: Class, t: &Type, seen: &mut HashSet<String>) -> R<()> {
+    fn nominal_evidence(&mut self, c: Class, t: &Type, seen: &mut HashSet<NominalId>) -> R<()> {
         if !matches!(c, Class::Eq | Class::Hash) {
             return Ok(());
         }
@@ -252,18 +259,20 @@ impl Engine<'_> {
             Type::Nominal(n) if seen.insert(n.clone()) => {
                 // Hash remains intentionally unavailable for nominal records.
                 if c == Class::Hash {
-                    return Err(self.err(format!("nominal record {n} does not satisfy hash")));
+                    return Err(
+                        self.err(format!("nominal record {} does not satisfy hash", n.name))
+                    );
                 }
                 let row = self
                     .schemas
                     .get(&n)
                     .cloned()
-                    .ok_or_else(|| self.err(format!("unknown schema {n}")))?;
+                    .ok_or_else(|| self.err(format!("unknown schema {}", n.name)))?;
                 for (field, t) in row.fields {
                     self.nominal_evidence(c, &t, seen)?;
                     self.cx
                         .require(c, &t)
-                        .map_err(|text| self.err(format!("field {n}.{field}: {text}")))?;
+                        .map_err(|text| self.err(format!("field {}.{field}: {text}", n.name)))?;
                 }
             }
             Type::Seq(x) | Type::Table(x) | Type::Optional(x) => {
@@ -423,7 +432,7 @@ impl Engine<'_> {
             x if x.starts_with('\'') => {
                 v.entry(x.into()).or_insert_with(|| self.cx.fresh()).clone()
             }
-            x if self.schemas.contains_key(x) => Type::Nominal(x.into()),
+            x if self.schema_id(x).is_some() => Type::Nominal(self.schema_id(x).unwrap().clone()),
             _ => return Err(self.err(format!("unknown type {tok}"))),
         })
     }
@@ -453,19 +462,68 @@ impl Engine<'_> {
             qualifiers: vec![],
         })
     }
-    fn install_schema(&mut self, name: &str, fields: &[(String, String)]) -> R<()> {
+    fn schema_id(&self, name: &str) -> Option<&NominalId> {
+        self.schema_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+    }
+    fn schema_headers(&mut self, defs: &[Stmt]) -> R<()> {
+        for stmt in defs {
+            if let Stmt::Schema { name, start, .. } = stmt {
+                self.start = *start;
+                if matches!(name.as_str(), "n" | "z" | "q" | "d" | "r" | "b" | "s" | "c") {
+                    return Err(self.err(format!("{name} is reserved in the type namespace")));
+                }
+                let symbol = self
+                    .resolver
+                    .declaration(stmt)
+                    .ok_or_else(|| self.err("missing nominal declaration identity"))?;
+                let id = NominalId {
+                    id: symbol.0,
+                    name: name.clone(),
+                };
+                self.schema_scopes
+                    .last_mut()
+                    .expect("lexical schema scope")
+                    .insert(name.clone(), id.clone());
+                self.result.bindings.insert(symbol, mono(Type::Nominal(id)));
+            }
+        }
+        for stmt in defs {
+            if let Stmt::Schema {
+                name,
+                fields,
+                start,
+            } = stmt
+            {
+                self.start = *start;
+                let id = self
+                    .schema_id(name)
+                    .expect("schema header installed")
+                    .clone();
+                self.install_schema(id, fields)?;
+            }
+        }
+        Ok(())
+    }
+    fn install_schema(&mut self, id: NominalId, fields: &[(String, String)]) -> R<()> {
         let mut row = Row {
             fields: vec![],
             tail: None,
         };
         for (name, t) in fields {
-            let x = self.annotation(t, &mut HashMap::new())?;
+            let mut vars = HashMap::new();
+            let x = self.annotation(t, &mut vars)?;
+            if !vars.is_empty() {
+                return Err(self.err(format!("nominal field {name} requires a closed type")));
+            }
             if row.fields.iter().any(|(k, _)| k == name) {
                 return Err(self.err(format!("duplicate field {name}")));
             }
             row.fields.push((name.clone(), x));
         }
-        self.schemas.insert(name.to_owned(), row);
+        self.schemas.insert(id, row);
         Ok(())
     }
     fn int(&mut self, n: i128, want: Option<&Type>) -> R<Type> {
@@ -579,18 +637,35 @@ impl Engine<'_> {
                     Some(Type::Seq(t)) => *t,
                     _ => self.cx.fresh(),
                 };
+                if es.is_empty() {
+                    let end = self.active.as_ref().map_or(self.start, |span| span.end);
+                    self.empty_sequences
+                        .push((element.clone(), self.start, end));
+                }
                 for e in es {
                     self.expr(env, e, Some(&element), effects)?;
                 }
                 s(element)
             }
             Expr::Record(fs) | Expr::NamedRecord(_, fs) => {
-                let expected = match e {
-                    Expr::NamedRecord(n, _) => Some(
+                let nominal = if let Expr::NamedRecord(name, _) = e {
+                    let id = self
+                        .resolver
+                        .reference(e)
+                        .ok_or_else(|| self.err(format!("missing identity for schema {name}")))?;
+                    Some(NominalId {
+                        id: id.0,
+                        name: name.clone(),
+                    })
+                } else {
+                    None
+                };
+                let expected = match nominal.as_ref() {
+                    Some(id) => Some(
                         self.schemas
-                            .get(n)
+                            .get(id)
                             .cloned()
-                            .ok_or_else(|| self.err(format!("unknown schema {n}")))?,
+                            .ok_or_else(|| self.err(format!("unknown schema {}", id.name)))?,
                     ),
                     _ => match want.map(|t| self.cx.resolve(t)) {
                         Some(Type::Record(r)) => Some(r),
@@ -607,10 +682,10 @@ impl Engine<'_> {
                         .and_then(|r| r.fields.iter().find(|(name, _)| name == n).map(|(_, t)| t));
                     fields.push((n.clone(), self.expr(env, ex, typ, effects)?));
                 }
-                if let Expr::NamedRecord(n, _) = e {
+                if let Some(id) = nominal {
                     let typ = Type::Record(expected.expect("nominal schema"));
                     self.unify(&Type::Record(Row { fields, tail: None }), &typ)?;
-                    Type::Nominal(n.clone())
+                    Type::Nominal(id)
                 } else {
                     Type::Record(Row { fields, tail: None })
                 }
@@ -661,12 +736,18 @@ impl Engine<'_> {
                     want.cloned()
                 };
                 let mut nested = env.clone();
-                self.local_defs(defs, &mut nested, action)?;
-                let t = if let Some(ex) = tail {
-                    self.expr(&nested, ex, desired.as_ref(), action)?
-                } else {
-                    p(Unit)
-                };
+                self.schema_scopes.push(HashMap::new());
+                let scoped = (|| {
+                    self.schema_headers(defs)?;
+                    self.local_defs(defs, &mut nested, action)?;
+                    if let Some(ex) = tail {
+                        self.expr(&nested, ex, desired.as_ref(), action)
+                    } else {
+                        Ok(p(Unit))
+                    }
+                })();
+                self.schema_scopes.pop();
+                let t = scoped?;
                 if action {
                     a(t)
                 } else {
@@ -698,6 +779,7 @@ impl Engine<'_> {
             Expr::Call(n, args) => {
                 if env.contains_key(n) {
                     let callee = self.lookup(env, n)?;
+                    self.result.callees.insert(address(e), callee.clone());
                     self.apply(env, callee, args, want, effects)?
                 } else {
                     self.builtin_call(env, e, n, args, want, effects)?
@@ -748,7 +830,7 @@ impl Engine<'_> {
                 .get(&n)
                 .and_then(|r| r.fields.iter().find(|(k, _)| k == sel))
                 .map(|(_, t)| t.clone())
-                .ok_or_else(|| self.err(format!("schema {n} has no field {sel}"))),
+                .ok_or_else(|| self.err(format!("schema {} has no field {sel}", n.name))),
             Type::Record(r) => {
                 if let Some((_, t)) = r.fields.iter().find(|(n, _)| n == sel) {
                     return Ok(t.clone());
@@ -950,7 +1032,7 @@ impl Engine<'_> {
                 .schemas
                 .get(&n)
                 .cloned()
-                .ok_or_else(|| self.err(format!("unknown schema {n}"))),
+                .ok_or_else(|| self.err(format!("unknown schema {}", n.name))),
             x => Err(self.err(format!("expected a record, found {x}"))),
         }
     }
@@ -1537,20 +1619,30 @@ impl Engine<'_> {
             })?;
         Ok(())
     }
-    fn validate_signature(&self, sig: &Signature) -> R<()> {
+    fn finish_signature(&mut self, sig: &Signature, outer: &Env) -> R<()> {
         if sig.explicit.is_empty() {
             return Ok(());
         }
-        let mut variables = HashSet::new();
-        for (name, t) in &sig.explicit {
-            let resolved = self.cx.resolve(t);
-            if !matches!(resolved, Type::Var(_)) || !variables.insert(resolved) {
-                return Err(self.err(format!("signature variable {name} was specialized; an annotated type variable must remain distinct and general")));
-            }
+        let ids = sig
+            .explicit
+            .values()
+            .filter_map(|t| {
+                if let Type::Var(id) = t {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let outer_types = outer.values().cloned().collect::<Vec<_>>();
+        if self.cx.rigid_escapes(&ids, &outer_types) {
+            return Err(
+                self.err("a quantified signature variable escapes into a captured outer binding")
+            );
         }
         for c in self.cx.constraints() {
             let t = self.cx.resolve(&c.ty);
-            if variables.contains(&t)
+            if self.cx.free_vars(&t).iter().any(|id| ids.contains(id))
                 && !sig
                     .qualifiers
                     .iter()
@@ -1558,6 +1650,9 @@ impl Engine<'_> {
             {
                 return Err(self.err(format!("annotated signature lacks {:?} {t}", c.class)));
             }
+        }
+        for id in ids {
+            self.cx.unmark_rigid(id)
         }
         Ok(())
     }
@@ -1593,6 +1688,12 @@ impl Engine<'_> {
                 sig.qualifiers.push(Constraint { class, ty });
             }
         }
+        for t in sig.explicit.values() {
+            if let Type::Var(id) = t {
+                self.cx.mark_rigid(*id);
+                self.explicit_variables.insert(*id);
+            }
+        }
         for c in &sig.qualifiers {
             self.req(c.class, &c.ty)?;
         }
@@ -1609,6 +1710,47 @@ impl Engine<'_> {
         let others = env.values().cloned().collect::<Vec<_>>();
         self.cx.generalize(typ, &others, &self.cx.constraints())
     }
+    fn closed_integer_type(&mut self, e: &Expr, env: &Env) -> Option<Type> {
+        // This is equivalent to defaulting each connected literal metavariable to
+        // z. Only recognize closed scalar integer terms whose operators preserve z.
+        // Stage metadata until the entire term has been classified.
+        fn collect<'a>(e: &'a Expr, env: &Env, out: &mut Vec<&'a Expr>) -> bool {
+            match e {
+                Expr::Int(_) => {}
+                Expr::Call(n, args)
+                    if matches!(n.as_str(), "+" | "-" | "*")
+                        && args.len() == 2
+                        && !env.contains_key(n) =>
+                {
+                    if !args.iter().all(|x| collect(x, env, out)) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+            out.push(e);
+            true
+        }
+        let mut nodes = Vec::with_capacity(8);
+        if !collect(e, env, &mut nodes) {
+            return None;
+        }
+        let z = p(Prim::Z);
+        for node in nodes {
+            let addr = address(node);
+            self.result.expressions.insert(addr, z.clone());
+            if let Expr::Call(op, _) = node {
+                self.result.operations.insert(
+                    addr,
+                    Operation::Numeric {
+                        operator: op.clone(),
+                        result: z.clone(),
+                    },
+                );
+            }
+        }
+        Some(z)
+    }
     fn group(&mut self, defs: Vec<&Stmt>, env: &mut Env, effect: bool) -> R<()> {
         // Ordinary immutable values do not add a recursive header. Infer them
         // against the existing environment instead of cloning every prior value.
@@ -1616,17 +1758,24 @@ impl Engine<'_> {
             name,
             params,
             body,
+            result_type,
             start,
             ..
         }] = defs.as_slice()
         {
             if params.is_empty() {
+                if result_type.is_none() && !self.qualifiers.contains_key(start) {
+                    if let Some(ty) = self.closed_integer_type(body, env) {
+                        self.bind(env, stmt, name, mono(ty));
+                        return Ok(());
+                    }
+                }
                 let sig = self.def_signature(stmt)?;
                 let pos = self.literals.len();
                 self.body(env, stmt, &sig, effect)?;
                 self.default_literals(pos)?;
                 self.start = *start;
-                self.validate_signature(&sig)?;
+                self.finish_signature(&sig, env)?;
                 if matches!(body,Expr::Array(es) if es.is_empty())
                     && matches!(self.cx.resolve(&sig.out),Type::Seq(x) if matches!(*x,Type::Var(_)))
                 {
@@ -1642,19 +1791,7 @@ impl Engine<'_> {
         let literals = self.literals.len();
         for stmt in defs {
             match stmt {
-                Stmt::Schema {
-                    name,
-                    fields,
-                    start,
-                } => {
-                    self.start = *start;
-                    self.install_schema(name, fields)?;
-                    if let Some(id) = self.resolver.declaration(stmt) {
-                        self.result
-                            .bindings
-                            .insert(id, mono(Type::Nominal(name.clone())));
-                    }
-                }
+                Stmt::Schema { .. } => {}
                 Stmt::Def { name, params, .. } => {
                     let sig = self.def_signature(stmt)?;
                     if !params.is_empty() {
@@ -1691,7 +1828,7 @@ impl Engine<'_> {
                 unreachable!()
             };
             self.start = *start;
-            self.validate_signature(&sig)?;
+            self.finish_signature(&sig, &outer)?;
             let t = function(sig.args.iter().cloned(), sig.out.clone());
             if params.is_empty()
                 && matches!(body,Expr::Array(es) if es.is_empty())
@@ -1724,14 +1861,7 @@ impl Engine<'_> {
         let mut deps = HashMap::new();
         for stmt in defs {
             match stmt {
-                Stmt::Schema {
-                    name,
-                    fields,
-                    start,
-                } => {
-                    self.start = *start;
-                    self.install_schema(name, fields)?;
-                }
+                Stmt::Schema { .. } => {}
                 Stmt::Def {
                     name, params, body, ..
                 } if !params.is_empty() => {
@@ -1804,7 +1934,7 @@ impl Engine<'_> {
                                 unreachable!()
                             };
                             self.start = *start;
-                            self.validate_signature(&sig)?;
+                            self.finish_signature(&sig, &visible)?;
                             let t = function(sig.args.into_iter(), sig.out);
                             let sc = self.scheme(&visible, &t, true);
                             self.bind(env, stmt, name, sc);
@@ -1824,35 +1954,16 @@ pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
         result: InferResult::default(),
         resolver,
         schemas: HashMap::new(),
+        schema_scopes: vec![HashMap::new()],
         start: 0,
         literals: vec![],
         active: None,
+        empty_sequences: vec![],
+        explicit_variables: HashSet::new(),
         qualifiers: &p.constraints,
     };
     let mut env = Env::new();
-    // Header names make forward nominal schemas visible without pretending their fields exist.
-    for stmt in &p.defs {
-        if let Stmt::Schema { name, .. } = stmt {
-            e.schemas.insert(
-                name.clone(),
-                Row {
-                    fields: vec![],
-                    tail: None,
-                },
-            );
-        }
-    }
-    for stmt in &p.defs {
-        if let Stmt::Schema {
-            name,
-            fields,
-            start,
-        } = stmt
-        {
-            e.start = *start;
-            e.install_schema(name, fields)?;
-        }
-    }
+    e.schema_headers(&p.defs)?;
     for group in &resolver.groups {
         e.group(group.iter().map(|i| &p.defs[*i]).collect(), &mut env, false)?;
     }
@@ -1862,7 +1973,24 @@ pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
         e.expr(&env, entry, None, false)?;
         e.default_literals(pos)?;
     }
+    for (element, start, end) in &e.empty_sequences {
+        if e.cx
+            .free_vars(element)
+            .iter()
+            .any(|id| !e.explicit_variables.contains(id))
+        {
+            return Err(InferError {
+                kind: InferErrorKind::TypeError,
+                start: *start,
+                end: *end,
+                message: "empty sequence has an ambiguous element type; add an annotation".into(),
+            });
+        }
+    }
     for typ in e.result.expressions.values_mut() {
+        *typ = e.cx.resolve(typ);
+    }
+    for typ in e.result.callees.values_mut() {
         *typ = e.cx.resolve(typ);
     }
     for scheme in e.result.bindings.values_mut() {
@@ -1942,7 +2070,16 @@ mod tests {
     fn value_restriction_and_empty_ambiguity() {
         assert!(check(r#"id(x) := x; x := ? 1b &id &id; a := @ x 1; b := @ x "s";"#).is_err());
         assert!(check("empty := [];").is_err());
+        assert!(check("bad(x) := == [] [];")
+            .unwrap_err()
+            .message
+            .contains("ambiguous"));
+        assert!(check("bad(x) := { y := ([],x); x };")
+            .unwrap_err()
+            .message
+            .contains("ambiguous"));
         check("empty:[z] := [];").unwrap();
+        check("f(x:['a]):b | eq 'a := == x [];").unwrap();
     }
     #[test]
     fn local_functions_generalize_after_acyclic_and_recursive_groups() {
@@ -1966,5 +2103,82 @@ mod tests {
         let e = check(source).unwrap_err();
         assert_eq!(e.start, source.find('*').unwrap());
         assert_eq!(e.end, source.len() - 1);
+    }
+    #[test]
+    fn schemas_keep_lexical_identity_and_fields() {
+        let inferred = check(
+            r#"
+            rr :: { x:z; };
+            take_outer(v:rr):z := .x v;
+            outer:rr := rr { x:=7; };
+            val:s := {
+                rr :: { y:s; };
+                inner:rr := rr { y:="inside"; };
+                seen:z := take_outer outer;
+                .y inner
+            };
+            after:rr := rr { x:=8; };
+            next:z := take_outer after;
+        "#,
+        )
+        .unwrap();
+        let shapes = inferred
+            .schemas
+            .iter()
+            .filter(|(id, _)| id.name == "rr")
+            .collect::<Vec<_>>();
+        assert_eq!(shapes.len(), 2);
+        assert_ne!(shapes[0].0.id, shapes[1].0.id);
+        let e = check("rr :: { v:z; }; bad:rr := { rr :: { v:z; }; rr { v:=1; } };").unwrap_err();
+        assert_eq!(e.kind, InferErrorKind::TypeError);
+    }
+
+    #[test]
+    fn rejects_skolem_escape_from_nested_signature() {
+        let e = check(
+            r#"
+            outer(f) := {
+                pretend(x:'a):'a := @ f x;
+                pretend "s"
+            };
+        "#,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("escapes"), "{e:?}");
+        check(r#"id(x:'a):'a := x; i := id 7; s := id "s";"#).unwrap();
+        check("sq(x:'a):'a | num 'a := * x x; a := sq 4;").unwrap();
+    }
+    #[test]
+    fn closed_default_integer_terms_preserve_context_and_evidence() {
+        let p=crate::parser::parse(
+            "u := * (+ 2 3) 4; n:n := + 2 3; q:q := + 2 3; r := + n 4; fnn(x:q):q := + x 1; x := fnn 5;"
+        ).unwrap();
+        let names = crate::resolve::resolve(&p).unwrap();
+        let r = infer(&p, &names).unwrap();
+        let body = |i: usize| match &p.defs[i] {
+            Stmt::Def { body, .. } => body,
+            _ => unreachable!(),
+        };
+        let z = Type::Prim(Prim::Z);
+        assert_eq!(r.type_of(body(0)), Some(&z));
+        assert_eq!(
+            r.operation_of(body(0)),
+            Some(&Operation::Numeric {
+                operator: "*".into(),
+                result: z.clone()
+            })
+        );
+        let Expr::Call(_, xs) = body(0) else {
+            unreachable!()
+        };
+        assert_eq!(r.type_of(&xs[0]), Some(&z));
+        assert_eq!(r.type_of(&xs[1]), Some(&z));
+        assert_eq!(r.type_of(body(1)), Some(&Type::Prim(Prim::N)));
+        assert_eq!(r.type_of(body(2)), Some(&Type::Prim(Prim::Q)));
+        assert_eq!(r.type_of(body(3)), Some(&Type::Prim(Prim::N)));
+        assert_eq!(
+            r.callee_type(body(5)),
+            Some(&f(Type::Prim(Prim::Q), Type::Prim(Prim::Q)))
+        );
     }
 }

@@ -77,9 +77,10 @@ spent 0.93 ms in evaluation; declaration-only cases skip execution.
   operations. Keep the oracle until parity is established. The registry owns
   names, arities and numeric promotion; not every rule is a declarative
   constraint generator yet.
-- Carry concrete evidence through indirect uses of overloaded built-ins and
-  generic numeric bodies. The current solver rejects some numeric-family and
-  collection-shape ambiguities rather than attempting arbitrary promotion.
+- Continue auditing evidence at higher-order boundaries. Typed calls now pass
+  checked argument and result types through instantiation and partial
+  application. This is not general overloading: the solver still rejects some
+  ambiguous numeric-family and collection-shape combinations.
 - Replace all textual type annotations in the parser with a canonical
   annotation AST. HIR uses canonical types, but the parser still stores
   tokenized annotation text for the frontend and compatibility checker.
@@ -110,28 +111,71 @@ the CSV test deliberately made the summarizer fail if ever executed.
   when saturation returns another function.
 - The CSV no-clobber test uses a Windows-valid temporary directory name.
 
-### Do not merge until these are addressed
+### Follow-up fixes and release gates
 
-1. **Local eager initialization is not dependency-checked.**
-   `!{ a := f (); f(x:()):z := a; ( ) };` passes checking and fails in
-   typed execution with “value used before initialization.” Local closure
-   dependencies need a static initialization-order check distinct from
-   top-level SCC ordering and latent captures.
-2. **Nominal schema identity is not lexical end to end.**
-   A nested schema named `rr` overwrites the outer `rr` in the inference
-   table. An outer `rr { a := 3; }` used after a block declaring
-   `rr :: { b:s; };` can fail with “missing row field a.” Use the resolved
-   type-definition ID rather than strings in the schema map and nominal types.
-3. **Check rigidity and ambiguity at all binding boundaries.**
-   `outer(x) := { pretend(y:'a):'a := x; &pretend };` currently accepts an
-   explicit variable that can be equated with a captured monotype.
-   `bad(x) := == [] [];` also passes without fixing the element type. Add
-   rigid scoped variables and reject generalized-away internal ambiguities.
-4. **Some polymorphic operation evidence is still reconstructed.**
-   Direct numeric calls contain explicit scalar and broadcast modes with
-   shape checks. Indirect built-in references still select shape from values,
-   and generic numeric bodies still infer concrete domains from value tags.
-   Carry evidence at instantiation/partial application boundaries instead.
-5. **Large-file checking remains materially slower.** Profile the
-   4,000-declaration workload before merging; the runtime wins do not offset
-   an unreviewed check-path regression.
+- **Local initialization:** the resolver rejects eager reads reached by direct,
+  mutually recursive and statically tracked callable aliases, including
+  known tuple and record projections, while allowing
+  closure creation, latent capture and safe forward calls. This is not a
+  theorem about arbitrary higher-order calls: a callable that escapes the
+  static analysis still needs the runtime initialization guard.
+- **Scoped nominal identity:** the typed frontend preserves a schema's
+  resolved identity independently of its display name. Nested declarations
+  are compile-time only in HIR; two same-spelling schemas are not
+  interchangeable. Compatibility execution has not been upgraded to all
+  typed scoping rules.
+- **Signature rigidity and empty ambiguity:** an explicit type variable
+  cannot specialize to a concrete type or escape into a captured monotype.
+  Unconstrained empty sequences are rejected even inside larger expressions;
+  contextually typed empties and explicitly polymorphic empty sequences
+  remain legal. Explicit open-row annotation syntax stays out of scope.
+- **Checked calls:** typed argument and result information is preserved across
+  supported user-function and builtin instantiations, including escaping
+  closures and indirect partial applications. HIR stores ordered schema
+  metadata for table-producing operations independently of row data.
+- **Large-file checking:** contextual literal metavariables were the largest
+  measured cost on the 4,000-declaration fixture. An unannotated closed scalar
+  integer expression can take the language's default `z` without allocating
+  those variables. References, contextual annotations, lifted shapes and
+  other operations still use the solver. The checker still builds resolved
+  metadata and validates HIR. The renewed benchmark below shows remaining cost.
+
+### Follow-up verification
+
+The independent regressions are in `tests/review_fixes.rs`. They use
+`check` for static acceptance or rejection and `run-hir` for executable
+controls, not compatibility fallback. They pair failing cases with legal
+forward calls and latent captures, same-spelling nominal declarations in
+separate lexical scopes, a locally polymorphic explicit identity, and
+contextually typed empty sequences. A schema assertion inspects the
+aggregate HIR node; the executable counterpart writes a header-only CSV
+when the aggregate is reached through a function and a local summarizer
+alias. Numeric runtime tests exercise an escaping constrained closure
+and a partially applied built-in reference. Those runtime tests alone
+cannot establish that an evaluator never reconstructs evidence from
+runtime value tags.
+
+
+### Recheck after the implementation fixes
+
+Nine paired release runs on the same Linux host, Rust 1.85. These are
+end-to-end medians, not the separate per-phase timings.
+
+| Workload | Draft 0.3 (ms) | Review fixes (ms) |
+|---|---:|---:|
+| numeric pipeline (100,000 values) | 39.49 | 34.45 |
+| lex/parse/check (4,000 declarations) | 11.61 | 27.65 |
+| typed CSV + aggregate (6,000 rows, 32 keys) | 11.40 | 6.53 |
+| typed CSV + aggregate (6,000 rows, 6,000 keys) | 31.72 | 20.73 |
+
+The 4,000-declaration check fell from roughly 53 ms before the fixes to 28 ms,
+but remains about 2.4x slower than Draft 0.3. On the 4,000-declaration phase
+fixture, parsing was 6.9 ms, resolution 5.5 ms, inference 5.7 ms, and validated
+HIR elaboration 7.5 ms. The residual cost is still a decision to review before
+merging; it is not removed by bypassing HIR validation.
+
+Linux formatting, all 123 tests, Clippy, and a locked release build passed.
+The enhanced differential harness compares static check status and executes
+Draft 0.4 in strict typed mode; all ten common specimens matched Draft 0.3.
+The independent numeric oracle checked 469 bounded rational/binary64
+conversions against Python's Fraction.

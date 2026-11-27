@@ -17,7 +17,7 @@ SPECIMENS = {
 }
 
 
-def invoke(executable, name, source):
+def invoke(executable, name, source, *, typed=False):
     with TemporaryDirectory(prefix="flux-diff-") as name_of_directory:
         directory = Path(name_of_directory)
         shutil.copytree(ROOT / "examples", directory / "examples")
@@ -26,9 +26,17 @@ def invoke(executable, name, source):
         else:
             script = name + ".flx"
             (directory / script).write_text(source, encoding="ascii")
-        process = subprocess.run([executable, script], cwd=directory, capture_output=True, check=False)
+        checked = subprocess.run(
+            [executable, "check", script], cwd=directory, capture_output=True, check=False
+        )
+        process = subprocess.run(
+            [executable, *(["run-hir"] if typed else []), script],
+            cwd=directory, capture_output=True, check=False
+        )
         response = directory / "summary.csv"
         return (
+            checked.returncode,
+            checked.stdout,
             process.returncode,
             process.stdout.replace(b"\r\n", b"\n"),
             response.read_bytes() if response.exists() else None,
@@ -41,7 +49,7 @@ def main():
     oracle, candidate = (Path(arg).resolve(strict=True) for arg in sys.argv[1:])
     for name, source in [*((n, None) for n in EXAMPLES), *SPECIMENS.items()]:
         expected = invoke(oracle, name, source)
-        actual = invoke(candidate, name, source)
+        actual = invoke(candidate, name, source, typed=True)
         if expected != actual:
             print(f"{name}: oracle={expected!r}, candidate={actual!r}", file=sys.stderr)
             return 1

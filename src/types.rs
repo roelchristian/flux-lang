@@ -26,8 +26,15 @@ pub enum Type {
     Action(Box<Type>),
     Fun(Box<Type>, Box<Type>),
     Table(Box<Type>),
-    Nominal(String),
+    Nominal(NominalId),
     Record(Row),
+}
+
+/// Identity and user-facing spelling of a lexical schema declaration.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NominalId {
+    pub id: usize,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -141,7 +148,7 @@ impl fmt::Display for Type {
                 f.write_str("#")?;
                 operand(t, f)
             }
-            Self::Nominal(n) => f.write_str(n),
+            Self::Nominal(n) => f.write_str(&n.name),
             Self::Record(row) => write!(f, "{row}"),
         }
     }
@@ -188,6 +195,7 @@ impl fmt::Display for Scheme {
 pub struct InferCtx {
     next: u32,
     types: BTreeMap<u32, Type>,
+    rigid: BTreeSet<u32>,
     rows: BTreeMap<u32, Row>,
     lacks: BTreeMap<u32, BTreeSet<String>>,
     pending: Vec<Constraint>,
@@ -260,6 +268,44 @@ impl InferCtx {
     pub fn fresh(&mut self) -> Type {
         Type::Var(self.fresh_id())
     }
+    /// Abstract variable from an explicitly quantified signature.
+    pub fn fresh_rigid(&mut self) -> Type {
+        let id = self.fresh_id();
+        self.mark_rigid(id);
+        Type::Var(id)
+    }
+
+    pub fn mark_rigid(&mut self, id: u32) {
+        self.next = self.next.max(
+            id.checked_add(1)
+                .expect("type variable identifier space exhausted"),
+        );
+        self.rigid.insert(id);
+    }
+
+    pub fn unmark_rigid(&mut self, id: u32) {
+        self.rigid.remove(&id);
+    }
+
+    pub fn free_vars(&self, t: &Type) -> BTreeSet<u32> {
+        let mut vars = BTreeSet::new();
+        free(&self.resolve(t), &mut vars);
+        vars
+    }
+
+    /// Look for skolems in pre-existing bindings after checking a nested signature.
+    /// Quantified variables in an existing scheme are abstract, not outer captures.
+    pub fn rigid_escapes(&self, ids: &[u32], outer: &[Scheme]) -> bool {
+        outer.iter().any(|s| {
+            let vars = self.free_vars(&s.ty);
+            let leaked = |v: &u32| !s.vars.contains(v) && ids.contains(v);
+            vars.iter().any(leaked)
+                || s.constraints
+                    .iter()
+                    .any(|c| self.free_vars(&c.ty).iter().any(leaked))
+        })
+    }
+
     pub fn fresh_row(&mut self) -> u32 {
         self.fresh_id()
     }
@@ -313,6 +359,19 @@ impl InferCtx {
     }
 
     fn register(&mut self, t: &Type) -> R<()> {
+        match t {
+            Type::Prim(_) | Type::Nominal(_) => return Ok(()),
+            Type::Var(id) if !self.types.contains_key(id) => {
+                // Public callers may construct Var IDs without calling fresh.
+                if *id >= self.next {
+                    self.next = id
+                        .checked_add(1)
+                        .ok_or("type variable identifier space exhausted")?;
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
         let mut vars = BTreeSet::new();
         free(t, &mut vars);
         if let Some(max) = vars.last() {
@@ -364,7 +423,14 @@ impl InferCtx {
         use Type::*;
         match (&a, &b) {
             (Var(x), Var(y)) if x == y => Ok(()),
+            (Var(x), Var(y)) if self.rigid.contains(x) && !self.rigid.contains(y) => {
+                self.types.insert(*y, a.clone());
+                Ok(())
+            }
             (Var(v), t) | (t, Var(v)) => {
+                if self.rigid.contains(v) {
+                    return Err(format!("annotated type variable 't{v} must remain distinct and general; cannot unify with {t}"));
+                }
                 let mut vars = BTreeSet::new();
                 free(t, &mut vars);
                 if vars.contains(v) {
@@ -396,6 +462,9 @@ impl InferCtx {
         let row = self.resolve_row(&row);
         if row.tail == Some(id) && row.fields.is_empty() {
             return Ok(());
+        }
+        if self.rigid.contains(&id) {
+            return Err(format!("annotated row variable 'r{id} must remain distinct and general; cannot unify with {row}"));
         }
         let mut vars = BTreeSet::new();
         free(&Type::Record(row.clone()), &mut vars);
@@ -468,6 +537,28 @@ impl InferCtx {
                     ))
                 }
             }
+            (Some(x), Some(y))
+                if self.rigid.contains(&x) && !self.rigid.contains(&y) && only_b.is_empty() =>
+            {
+                self.bind_row(
+                    y,
+                    Row {
+                        fields: only_a,
+                        tail: Some(x),
+                    },
+                )
+            }
+            (Some(x), Some(y))
+                if self.rigid.contains(&y) && !self.rigid.contains(&x) && only_a.is_empty() =>
+            {
+                self.bind_row(
+                    x,
+                    Row {
+                        fields: only_b,
+                        tail: Some(y),
+                    },
+                )
+            }
             (Some(x), Some(y)) if only_a.is_empty() && only_b.is_empty() => self.bind_row(
                 x,
                 Row {
@@ -510,6 +601,9 @@ impl InferCtx {
     }
 
     fn check_pending(&mut self) -> R<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
         let mut keep = Vec::new();
         for c in &self.pending {
             Self::class_obligations(c.class, &self.resolve(&c.ty), &mut keep)?;
@@ -874,6 +968,81 @@ mod tests {
             .unify(&b, &action)
             .unwrap_err()
             .contains("does not satisfy eq"));
+    }
+
+    #[test]
+    fn rigid_variables_reject_specialization_and_cannot_escape_as_outer_bindings() {
+        let mut cx = InferCtx::new();
+        let outer = cx.fresh();
+        let fresh = cx.fresh();
+        let rigid = cx.fresh_rigid();
+        let other_rigid = cx.fresh_rigid();
+        let Type::Var(rid) = rigid else { panic!() };
+        assert!(cx.unify(&rigid, &other_rigid).is_err());
+        assert!(cx.unify(&rigid, &t(Prim::Z)).is_err());
+        assert!(cx
+            .unify(&Type::Optional(Box::new(t(Prim::Z))), &rigid)
+            .is_err());
+        cx.unify(&rigid, &fresh).unwrap();
+        assert_eq!(cx.resolve(&fresh), rigid);
+        assert!(!cx.rigid_escapes(&[rid], &[Scheme::mono(outer.clone())]));
+        cx.unify(&outer, &rigid).unwrap();
+        assert!(cx.rigid_escapes(&[rid], &[Scheme::mono(outer)]));
+        let scheme = cx.generalize(&rigid, &[], &[]);
+        assert_eq!(scheme.vars, vec![rid]);
+        assert_ne!(cx.instantiate(&scheme).0, rigid);
+        cx.unmark_rigid(rid);
+        cx.unify(&rigid, &t(Prim::Z)).unwrap();
+    }
+
+    #[test]
+    fn rigid_row_tails_can_be_used_but_not_closed_or_strengthened() {
+        let mut cx = InferCtx::new();
+        let skolem = cx.fresh_row();
+        cx.mark_rigid(skolem);
+        let observed = row(&[("k", t(Prim::S)), ("v", t(Prim::Z))], Some(skolem));
+        let flex = cx.fresh_row();
+        let wanted = row(&[("k", t(Prim::S))], Some(flex));
+        cx.unify(&observed, &wanted).unwrap();
+        assert_eq!(cx.resolve(&wanted), observed);
+        let closed = row(&[("k", t(Prim::S)), ("v", t(Prim::Z))], None);
+        assert!(cx
+            .unify(&observed, &closed)
+            .unwrap_err()
+            .contains("annotated row variable"));
+        let extra = row(&[("new", t(Prim::Z))], Some(cx.fresh_row()));
+        assert!(cx.unify(&observed, &extra).is_err());
+    }
+
+    #[test]
+    fn nominal_identity_is_not_shared_by_shadowed_spelling() {
+        let mut cx = InferCtx::new();
+        let nominal = |id| {
+            Type::Nominal(NominalId {
+                id,
+                name: "row".into(),
+            })
+        };
+        assert_eq!(nominal(1).to_string(), nominal(2).to_string());
+        assert!(cx.unify(&nominal(1), &nominal(2)).is_err());
+        cx.unify(&nominal(1), &nominal(1)).unwrap();
+    }
+
+    #[test]
+    fn registering_public_unallocated_ids_reserves_them_and_rolls_back_on_failure() {
+        let mut cx = InferCtx::new();
+        cx.unify(&Type::Var(101), &t(Prim::Z)).unwrap();
+        assert_eq!(cx.fresh(), Type::Var(102));
+        assert!(cx.unify(&Type::Var(u32::MAX), &t(Prim::Z)).is_err());
+        assert_eq!(cx.fresh(), Type::Var(103));
+        let tail = 141;
+        let open = row(&[("k", Type::Var(140))], Some(tail));
+        let alias = Type::Var(131);
+        cx.unify(&alias, &open).unwrap();
+        let tailless = row(&[("k", t(Prim::Z)), ("v", t(Prim::B))], None);
+        cx.unify(&alias, &tailless).unwrap();
+        assert_eq!(cx.resolve(&alias), tailless);
+        assert_eq!(cx.fresh(), Type::Var(142));
     }
 
     #[test]

@@ -56,14 +56,6 @@ impl Exact {
         };
         Ok(Self { n, d, domain })
     }
-    fn common(a: Domain, b: Domain) -> Domain {
-        use Domain::*;
-        match (a, b) {
-            (Rational, _) | (_, Rational) => Rational,
-            (Integer, _) | (_, Integer) => Integer,
-            _ => Natural,
-        }
-    }
     fn integral(self) -> NumericResult<i128> {
         if self.d == 1 {
             Ok(self.n)
@@ -169,10 +161,9 @@ impl Exact {
         }
         Ok(Self { domain, ..self })
     }
-    fn compute(self, op: CoreOp, b: Self, chosen: Option<Domain>) -> NumericResult<Self> {
+    fn compute(self, op: CoreOp, b: Self, domain: Domain) -> NumericResult<Self> {
         use CoreOp::*;
         use Domain::*;
-        let domain = chosen.unwrap_or(Self::common(self.domain, b.domain));
         let mul = |a: i128, b: i128| a.checked_mul(b).ok_or(OVERFLOW);
         match op {
             Add | Sub => {
@@ -239,11 +230,11 @@ impl Exact {
                 let mut e = exp as u128;
                 while e != 0 {
                     if e & 1 == 1 {
-                        out = out.compute(Mul, a, Some(domain))?;
+                        out = out.compute(Mul, a, domain)?;
                     }
                     e >>= 1;
                     if e != 0 {
-                        a = a.compute(Mul, a, Some(domain))?;
+                        a = a.compute(Mul, a, domain)?;
                     }
                 }
                 Ok(out)
@@ -358,6 +349,7 @@ enum Function {
         formals: Rc<[SymbolId]>,
         body: ExprId,
         env: usize,
+        declared: Type,
     },
     Core(CoreOp, Type, Option<Rc<TableSchema>>),
     Projection(Box<str>),
@@ -366,6 +358,9 @@ enum Function {
 struct Fun {
     code: Function,
     bound: Vec<V>,
+    // Types come from checked expressions/signatures, never from Value tags.
+    bound_types: Vec<Type>,
+    instance: Option<Type>,
 }
 #[derive(Clone)]
 enum Action {
@@ -378,6 +373,8 @@ enum Action {
 struct Frame {
     parent: Option<usize>,
     ready: HashMap<SymbolId, V>,
+    type_scope: Option<usize>,
+    substs: HashMap<u32, Type>,
 }
 struct Eval<'a> {
     p: &'a HirProgram,
@@ -593,6 +590,70 @@ fn finite(v: f64) -> NumericResult<V> {
         Err("nonfinite real result")
     }
 }
+fn fit_instance(pattern: &Type, actual: &Type, vars: &mut HashMap<u32, Type>) {
+    match (pattern, actual) {
+        (Type::Var(i), t) if !matches!(t, Type::Var(_)) => {
+            vars.entry(*i).or_insert_with(|| t.clone());
+        }
+        (Type::Seq(a), Type::Seq(b))
+        | (Type::Table(a), Type::Table(b))
+        | (Type::Optional(a), Type::Optional(b))
+        | (Type::Action(a), Type::Action(b)) => fit_instance(a, b, vars),
+        (Type::Dict(a, b), Type::Dict(c, d)) | (Type::Fun(a, b), Type::Fun(c, d)) => {
+            fit_instance(a, c, vars);
+            fit_instance(b, d, vars);
+        }
+        (Type::Tuple(a), Type::Tuple(b)) => {
+            for (a, b) in a.iter().zip(b) {
+                fit_instance(a, b, vars);
+            }
+        }
+        (Type::Record(a), Type::Record(b)) => {
+            for (n, a) in &a.fields {
+                if let Some((_, b)) = b.fields.iter().find(|(m, _)| n == m) {
+                    fit_instance(a, b, vars);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+fn fun_arg(mut sig: &Type, i: usize) -> Option<&Type> {
+    for _ in 0..i {
+        if let Type::Fun(_, next) = sig {
+            sig = next
+        } else {
+            return None;
+        }
+    }
+    if let Type::Fun(arg, _) = sig {
+        Some(arg)
+    } else {
+        None
+    }
+}
+fn concrete_shape(ty: &Type) -> NumericResult<bool> {
+    match ty {
+        Type::Var(_) => Err("numeric lift shape is unresolved at indirect application"),
+        Type::Seq(_) => Ok(true),
+        _ => Ok(false),
+    }
+}
+fn callable_lift(op: CoreOp, operands: &[Type]) -> NumericResult<Option<LiftMode>> {
+    let Some(arity) = op.lift_arity() else {
+        return Ok(None);
+    };
+    if operands.len() != arity {
+        return Err("invalid typed lifting argument count");
+    }
+    let l = concrete_shape(&operands[0])?;
+    let r = if arity == 2 {
+        concrete_shape(&operands[1])?
+    } else {
+        false
+    };
+    Ok(Some(LiftMode::from_shapes(l, r)))
+}
 fn inner_type(t: &Type) -> &Type {
     if let Type::Seq(x) = t {
         x
@@ -619,15 +680,7 @@ fn lift(
 ) -> NumericResult<V> {
     // Indirect callable references are not specialized yet. Direct calls carry
     // an explicit static mode and never use these value tags for selection.
-    let mode = match mode {
-        Some(typed) => typed,
-        None => match (&a, &b) {
-            (V::Sequence(_), V::Sequence(_)) => LiftMode::Pairwise,
-            (V::Sequence(_), _) => LiftMode::LeftSequence,
-            (_, V::Sequence(_)) => LiftMode::RightSequence,
-            _ => LiftMode::Scalar,
-        },
-    };
+    let mode = mode.ok_or("direct or indirect call lacks checked lifting shape")?;
     Ok(match mode {
         LiftMode::Scalar => f(a, b)?,
         LiftMode::LeftSequence => {
@@ -668,11 +721,7 @@ fn lift(
 }
 
 fn lift_one(a: V, mode: Option<LiftMode>, f: &impl Fn(V) -> NumericResult<V>) -> NumericResult<V> {
-    let mode = match mode {
-        Some(typed) => typed,
-        None if matches!(a, V::Sequence(_)) => LiftMode::LeftSequence,
-        None => LiftMode::Scalar,
-    };
+    let mode = mode.ok_or("direct or indirect call lacks checked lifting shape")?;
     match mode {
         LiftMode::Scalar => f(a),
         LiftMode::LeftSequence => Ok(V::Sequence(
@@ -691,7 +740,7 @@ fn scalar_binary(op: CoreOp, a: V, b: V, ty: &Type) -> NumericResult<V> {
     use CoreOp::*;
     Ok(match op {
         Add | Sub | Mul | Div | Quotient | Remainder | Pow => {
-            if matches!((&a, &b), (V::Real(_), V::Real(_))) || matches!(ty, Type::Prim(Prim::R)) {
+            if matches!(ty, Type::Prim(Prim::R)) {
                 let r = |v| match v {
                     V::Real(n) => Ok(n),
                     V::Exact(n) => Ok(n.real()),
@@ -727,7 +776,8 @@ fn scalar_binary(op: CoreOp, a: V, b: V, ty: &Type) -> NumericResult<V> {
                     _ => return Err("real operator not supported"),
                 });
             }
-            V::Exact(as_exact(&a)?.compute(op, as_exact(&b)?, domain(ty))?)
+            let k = domain(ty).ok_or("numeric domain is unresolved at typed execution")?;
+            V::Exact(as_exact(&a)?.compute(op, as_exact(&b)?, k)?)
         }
         Equal => V::Bool(equal(&a, &b)),
         NotEqual => V::Bool(!equal(&a, &b)),
@@ -757,8 +807,67 @@ impl Eval<'_> {
         self.frames.push(Frame {
             parent: Some(parent),
             ready: HashMap::new(),
+            type_scope: self.frames[parent].type_scope,
+            substs: HashMap::new(),
         });
         id
+    }
+    fn type_at(&self, ty: &Type, env: usize) -> Type {
+        fn subst(e: &Eval<'_>, ty: &Type, scope: Option<usize>, fuel: usize) -> Type {
+            if scope.is_none() || fuel == 0 {
+                return ty.clone();
+            }
+            let recur = |t: &Type| subst(e, t, scope, fuel - 1);
+            match ty {
+                Type::Var(id) => {
+                    let mut cursor = scope;
+                    while let Some(i) = cursor {
+                        let frame = &e.frames[i];
+                        if let Some(t) = frame.substs.get(id) {
+                            return subst(
+                                e,
+                                t,
+                                frame.parent.and_then(|p| e.frames[p].type_scope),
+                                fuel - 1,
+                            );
+                        }
+                        cursor = frame.parent.and_then(|p| e.frames[p].type_scope);
+                    }
+                    ty.clone()
+                }
+                Type::Seq(t) => Type::Seq(Box::new(recur(t))),
+                Type::Table(t) => Type::Table(Box::new(recur(t))),
+                Type::Optional(t) => Type::Optional(Box::new(recur(t))),
+                Type::Action(t) => Type::Action(Box::new(recur(t))),
+                Type::Tuple(ts) => Type::Tuple(ts.iter().map(recur).collect()),
+                Type::Fun(a, b) => Type::Fun(Box::new(recur(a)), Box::new(recur(b))),
+                Type::Dict(a, b) => Type::Dict(Box::new(recur(a)), Box::new(recur(b))),
+                Type::Record(r) => {
+                    let mut r = r.clone();
+                    for (_, t) in &mut r.fields {
+                        *t = recur(t);
+                    }
+                    Type::Record(r)
+                }
+                _ => ty.clone(),
+            }
+        }
+        subst(self, ty, self.frames[env].type_scope, 64)
+    }
+    fn specialize_fun(&self, v: V, ty: &Type, env: usize) -> V {
+        if let V::Fun(f) = v {
+            if matches!(ty, Type::Fun(..) | Type::Var(_)) {
+                let ty = self.type_at(ty, env);
+                if matches!(ty, Type::Fun(..)) && f.instance.as_ref() != Some(&ty) {
+                    let mut f = Rc::unwrap_or_clone(f);
+                    f.instance = Some(ty);
+                    return V::Fun(Rc::new(f));
+                }
+            }
+            V::Fun(f)
+        } else {
+            v
+        }
     }
     fn put(&mut self, env: usize, s: SymbolId, v: V) {
         self.frames[env].ready.insert(s, v);
@@ -778,6 +887,7 @@ impl Eval<'_> {
             formals: d.formals.clone().into(),
             body: d.body,
             env,
+            declared: d.scheme.ty.clone(),
         };
         self.put(
             env,
@@ -785,6 +895,8 @@ impl Eval<'_> {
             V::Fun(Rc::new(Fun {
                 code,
                 bound: Vec::new(),
+                bound_types: Vec::new(),
+                instance: None,
             })),
         );
     }
@@ -808,7 +920,7 @@ impl Eval<'_> {
         self.depth += 1;
         let r = self.eval_kind(id, env);
         self.depth -= 1;
-        r
+        r.map(|v| self.specialize_fun(v, &node.ty, env))
     }
     fn eval_kind(&mut self, id: ExprId, env: usize) -> R<V> {
         let p = self.p;
@@ -818,20 +930,24 @@ impl Eval<'_> {
         Ok(match &n.kind {
             ExprKind::Literal(v) => match v {
                 Literal::Integer(i) => {
-                    if n.ty == Type::Prim(Prim::R) {
+                    let ty = self.type_at(&n.ty, env);
+                    if ty == Type::Prim(Prim::R) {
                         finite(*i as f64).map_err(convert)?
                     } else {
-                        let d = domain(&n.ty).unwrap_or(Domain::Integer);
+                        let d = domain(&ty).ok_or_else(|| {
+                            error(s, "integer literal has no checked numeric domain")
+                        })?;
                         V::Exact(Exact::integer(*i, d).as_domain(d).map_err(convert)?)
                     }
                 }
                 Literal::Numeric(text) => {
-                    if text.ends_with('r') || n.ty == Type::Prim(Prim::R) {
+                    let ty = self.type_at(&n.ty, env);
+                    if text.ends_with('r') || ty == Type::Prim(Prim::R) {
                         let raw = text.strip_suffix('r').unwrap_or(text);
                         finite(raw.parse().map_err(|_| error(s, "invalid real literal"))?)
                             .map_err(convert)?
                     } else {
-                        V::Exact(parse_exact(text, &n.ty).map_err(convert)?)
+                        V::Exact(parse_exact(text, &ty).map_err(convert)?)
                     }
                 }
                 Literal::Bool(b) => V::Bool(*b),
@@ -844,10 +960,14 @@ impl Eval<'_> {
             ExprKind::Reference(Target::Projection(field)) => V::Fun(Rc::new(Fun {
                 code: Function::Projection(field.clone()),
                 bound: Vec::new(),
+                bound_types: Vec::new(),
+                instance: None,
             })),
             ExprKind::Reference(Target::Builtin(op)) => V::Fun(Rc::new(Fun {
-                code: Function::Core(*op, n.ty.clone(), n.table_schema.clone()),
+                code: Function::Core(*op, self.type_at(&n.ty, env), n.table_schema.clone()),
                 bound: Vec::new(),
+                bound_types: Vec::new(),
+                instance: None,
             })),
             ExprKind::Call(Target::Builtin(CoreOp::Default), args) => {
                 let [fallback, stored] = args.as_slice() else {
@@ -859,22 +979,55 @@ impl Eval<'_> {
                     _ => return Err(error(s, "fallback requires an optional second operand")),
                 }
             }
-            ExprKind::Call(target, args) => {
+            ExprKind::Call(target, ids) => {
                 let f = match target {
                     Target::Symbol(sid) => Some(self.load(env, *sid, s)?),
                     Target::Builtin(_) | Target::Projection(_) => None,
                 };
-                let args = args
+                let args = ids
                     .iter()
                     .map(|id| self.eval(*id, env))
                     .collect::<R<Vec<_>>>()?;
                 match target {
+                    Target::Builtin(CoreOp::Apply | CoreOp::ApplyTuple) => {
+                        let [f, arg]: [V; 2] = args
+                            .try_into()
+                            .map_err(|_| error(s, "invalid typed application"))?;
+                        let input = self.type_at(&p.node(ids[1]).ty, env);
+                        let output = self.type_at(&n.ty, env);
+                        if matches!(target, Target::Builtin(CoreOp::ApplyTuple)) {
+                            let (V::Tuple(v), Type::Tuple(types)) = (arg, input) else {
+                                return Err(error(s, "@@ expects a checked tuple bundle"));
+                            };
+                            let mut f = f;
+                            let sig = self.type_at(&p.node(ids[0]).ty, env);
+                            for (i, (operand, actual)) in v.iter().zip(types).enumerate() {
+                                let next = result_type(&sig, i + 1);
+                                let result = if i + 1 == v.len() {
+                                    output.clone()
+                                } else {
+                                    next.clone()
+                                };
+                                f = self.apply_checked(
+                                    f,
+                                    vec![operand.clone()],
+                                    Some(vec![actual]),
+                                    Some(result),
+                                    s,
+                                )?;
+                            }
+                            f
+                        } else {
+                            self.apply_checked(f, vec![arg], Some(vec![input]), Some(output), s)?
+                        }
+                    }
                     Target::Builtin(op) => {
                         let ty = match &n.evidence {
                             Some(crate::infer::Operation::Numeric { result, .. }) => result,
                             _ => &n.ty,
                         };
-                        self.core(*op, args, ty, n.table_schema.as_ref(), n.lift_mode, s)?
+                        let ty = self.type_at(ty, env);
+                        self.core(*op, args, &ty, n.table_schema.as_ref(), n.lift_mode, s)?
                     }
                     Target::Projection(field) => {
                         let [v]: [V; 1] = args
@@ -882,7 +1035,25 @@ impl Eval<'_> {
                             .map_err(|_| error(s, "invalid projection operand count"))?;
                         projection(field, v, s)?
                     }
-                    Target::Symbol(_) => self.apply(f.expect("callee loaded"), args, s)?,
+                    Target::Symbol(_) => {
+                        if let Some(sig) = n.callee_type.as_ref() {
+                            let f = self.specialize_fun(f.expect("callee loaded"), sig, env);
+                            self.apply(f, args, s)?
+                        } else {
+                            let types = ids
+                                .iter()
+                                .map(|i| self.type_at(&p.node(*i).ty, env))
+                                .collect();
+                            let out = self.type_at(&n.ty, env);
+                            self.apply_checked(
+                                f.expect("callee loaded"),
+                                args,
+                                Some(types),
+                                Some(out),
+                                s,
+                            )?
+                        }
+                    }
                 }
             }
             ExprKind::Tuple(ids) | ExprKind::Sequence(ids) => {
@@ -920,8 +1091,11 @@ impl Eval<'_> {
                     formals: formals.clone().into(),
                     body: *body,
                     env,
+                    declared: n.ty.clone(),
                 },
                 bound: Vec::new(),
+                bound_types: Vec::new(),
+                instance: None,
             })),
             ExprKind::Pipeline(stages) => {
                 let mut value = V::Unit;
@@ -970,39 +1144,89 @@ impl Eval<'_> {
         tail.map(|id| self.eval(id, env)).unwrap_or(Ok(V::Unit))
     }
     fn apply(&mut self, f: V, args: Vec<V>, span: Span) -> R<V> {
+        self.apply_checked(f, args, None, None, span)
+    }
+    fn apply_checked(
+        &mut self,
+        f: V,
+        args: Vec<V>,
+        supplied_types: Option<Vec<Type>>,
+        out_type: Option<Type>,
+        span: Span,
+    ) -> R<V> {
         self.tick(span)?;
         let V::Fun(f) = f else {
             return Err(error(span, "expected a callable function value"));
         };
         let mut f = Rc::unwrap_or_clone(f);
+        let n = f.bound.len();
+        let sig = match &f.code {
+            Function::User { declared, .. } | Function::Core(_, declared, _) => Some(declared),
+            Function::Projection(_) => None,
+        };
+        let suggested = f.instance.as_ref();
+        let out = out_type.or_else(|| suggested.map(|sig| result_type(sig, args.len()).clone()));
+        for (i, actual) in supplied_types
+            .unwrap_or_else(|| vec![Type::Var(u32::MAX); args.len()])
+            .into_iter()
+            .enumerate()
+        {
+            // A contextual formal expectation can be more informative than a
+            // polymorphic call's supplied expression (e.g., a higher-order ref).
+            let expected = suggested
+                .and_then(|sig| fun_arg(sig, i))
+                .or_else(|| sig.and_then(|sig| fun_arg(sig, n + i)));
+            let t = if matches!(actual, Type::Var(_)) {
+                expected.cloned().unwrap_or(actual)
+            } else {
+                actual
+            };
+            f.bound_types.push(t);
+        }
         f.bound.extend(args);
         let arity = match &f.code {
             Function::User { formals, .. } => formals.len(),
-            Function::Core(op, _, _) => operation_arity(*op),
+            Function::Core(op, ..) => operation_arity(*op),
             Function::Projection(_) => 1,
         };
         if f.bound.len() < arity {
+            f.instance = out;
             return Ok(V::Fun(Rc::new(f)));
         }
         if f.bound.len() > arity {
             return Err(error(span, "too many arguments for function"));
         }
         match f.code {
-            Function::User { formals, body, env } => {
+            Function::User {
+                formals,
+                body,
+                env,
+                declared,
+            } => {
+                let mut substs = HashMap::new();
+                for (i, arg) in f.bound_types.iter().enumerate() {
+                    if let Some(p) = fun_arg(&declared, i) {
+                        fit_instance(p, arg, &mut substs);
+                    }
+                }
+                if let Some(out) = out.as_ref() {
+                    fit_instance(result_type(&declared, arity), out, &mut substs);
+                }
                 let scope = self.frame(env);
+                if !substs.is_empty() {
+                    self.frames[scope].substs = substs;
+                    self.frames[scope].type_scope = Some(scope);
+                }
                 for (s, v) in formals.iter().zip(f.bound) {
                     self.put(scope, *s, v)
                 }
                 self.eval(body, scope)
             }
-            Function::Core(op, ty, schema) => self.core(
-                op,
-                f.bound,
-                result_type(&ty, arity),
-                schema.as_ref(),
-                None,
-                span,
-            ),
+            Function::Core(op, ty, schema) => {
+                let out = out.as_ref().unwrap_or_else(|| result_type(&ty, arity));
+                let mode = callable_lift(op, &f.bound_types).map_err(|m| error(span, m))?;
+                self.core(op, f.bound, out, schema.as_ref(), mode, span)
+            }
             Function::Projection(field) => {
                 projection(&field, f.bound.pop().expect("checked arity"), span)
             }
@@ -1089,23 +1313,21 @@ impl Eval<'_> {
                 if op == Not {
                     return Ok(V::Bool(!as_bool(&v)?));
                 }
-                if let V::Real(n) = v {
+                if *inner_type(ty) == Type::Prim(Prim::R) {
+                    let V::Real(n) = v else {
+                        return Err("expected finite real operand");
+                    };
                     return finite(if op == Abs { n.abs() } else { -n });
                 }
                 let n = as_exact(&v)?;
-                let (num, kind) = if op == Abs {
-                    (n.n.checked_abs(), n.domain)
+                let num = if op == Abs {
+                    n.n.checked_abs()
                 } else {
-                    (
-                        n.n.checked_neg(),
-                        if n.domain == Domain::Natural {
-                            Domain::Integer
-                        } else {
-                            n.domain
-                        },
-                    )
+                    n.n.checked_neg()
                 };
-                Ok(V::Exact(Exact::new(num.ok_or(OVERFLOW)?, n.d, kind)?))
+                let k = domain(inner_type(ty))
+                    .ok_or("numeric domain is unresolved at typed execution")?;
+                Ok(V::Exact(Exact::new(num.ok_or(OVERFLOW)?, n.d, k)?))
             }),
             Count => {
                 let count = match a() {
@@ -1124,7 +1346,8 @@ impl Eval<'_> {
             Range => {
                 let lo = as_exact(&a()).map_err(fail)?;
                 let hi = as_exact(&a()).map_err(fail)?;
-                let type_domain = domain(ty).unwrap_or_else(|| Exact::common(lo.domain, hi.domain));
+                let type_domain =
+                    domain(ty).ok_or_else(|| error(span, "range has no checked numeric domain"))?;
                 let lo = lo.integral().map_err(fail)?;
                 let hi = hi.integral().map_err(fail)?;
                 if hi < lo {
@@ -1151,7 +1374,9 @@ impl Eval<'_> {
                 } else {
                     V::Exact(Exact::integer(
                         identity,
-                        domain(ty).unwrap_or(Domain::Natural),
+                        domain(ty).ok_or_else(|| {
+                            error(span, "reduction has no checked numeric domain")
+                        })?,
                     ))
                 };
                 for v in xs {
@@ -1409,7 +1634,7 @@ fn stats(op: CoreOp, v: V, span: Span) -> R<V> {
             } else {
                 (
                     xs[mid - 1]
-                        .compute(CoreOp::Add, xs[mid], Some(Domain::Rational))
+                        .compute(CoreOp::Add, xs[mid], Domain::Rational)
                         .map_err(fail)?,
                     2,
                 )
@@ -1418,7 +1643,7 @@ fn stats(op: CoreOp, v: V, span: Span) -> R<V> {
             let mut sum = Exact::integer(0, Domain::Rational);
             for v in &xs {
                 sum = sum
-                    .compute(CoreOp::Add, *v, Some(Domain::Rational))
+                    .compute(CoreOp::Add, *v, Domain::Rational)
                     .map_err(fail)?;
             }
             (sum, xs.len() as i128)
@@ -1427,7 +1652,7 @@ fn stats(op: CoreOp, v: V, span: Span) -> R<V> {
             sum.compute(
                 CoreOp::Div,
                 Exact::integer(div, Domain::Natural),
-                Some(Domain::Rational),
+                Domain::Rational,
             )
             .map_err(fail)?,
         )
@@ -1840,5 +2065,55 @@ mod tests {
             .unwrap()
             .message
             .contains("sequence lengths differ"));
+    }
+    #[test]
+    fn checked_instances_cover_numeric_closures_and_indirect_broadcast() {
+        let ir = compile(
+            r#"
+            << "io";
+            twice(x) := + x x;
+            through(f,x) := @ f x;
+            twice_with(f,x) := @ (@ f x) x;
+            plus := &+;
+            factory(x) := \y -> + x y;
+            add:[z] z->[z] := &+;
+            scale:z [z]->[z] := &*;
+            pair:[z] [z]->[z] := &-;
+            f := factory 0.5q;
+            !{
+                ! io.print twice 4z;
+                ! io.print twice 0.25q;
+                ! io.print twice 0.25r;
+                ! io.print through &twice 0.25r;
+                ! io.print twice_with plus 0.25q;
+                ! io.print @ f 0.25q;
+                ! io.print @@ add ([1 2],4);
+                ! io.print @ (@ scale 2) [4 5];
+                ! io.print @@ pair ([9 8],[3 2]);
+            };
+        "#,
+        );
+        assert_eq!(
+            run(&ir).unwrap().stdout,
+            "8\n1/2\n0.5\n0.5\n1/2\n3/4\n[5 6]\n[8 10]\n[6 6]\n"
+        );
+        assert!(ir.arena.iter().any(|n|matches!(&n.callee_type,Some(Type::Fun(arg,out)) if **arg==Type::Prim(Prim::R)&&**out==Type::Prim(Prim::R))));
+    }
+
+    #[test]
+    fn indirect_pairwise_preserves_the_shape_check() {
+        let ir = compile("add:[z] [z]->[z] := &+; fail := @@ add ([1 2],[3]); !{ (); };");
+        let err = run(&ir).err().unwrap();
+        assert!(err.message.contains("shape mismatch"));
+    }
+
+    #[test]
+    fn generic_natural_instance_preserves_underflow() {
+        let ir = compile("sub(x,y) := - x y; fail := sub 1n 2n; !{ (); };");
+        assert!(run(&ir)
+            .err()
+            .unwrap()
+            .message
+            .contains("natural subtraction underflow"));
     }
 }

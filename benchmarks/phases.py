@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Time the Draft 0.4 phases separately in a Rust release build."""
+"""Time strict typed frontend phases in a Rust release build.
+
+parse includes lexing; eval includes stdout writes for scripts with an entry.
+Declaration-only workloads do not execute initializers. Use compare.py for
+compatible end-to-end timings including process startup and migration fallback.
+"""
 import argparse
 from pathlib import Path
 from statistics import median
@@ -20,16 +25,28 @@ def workloads():
     yield "evaluation-range", '<< "io"; !{ ! io.print +/ (.. 1 10000); };\n'
 
 
+def arithmetic_workloads():
+    for n in [500, 1000, 2000, 4000, 8000]:
+        # Mirror the arithmetic declarations in compare.py (4000-decl case).
+        yield f"arithmetic-decl-{n}", "".join(
+            f"x{i} := + {i} (* {i} 2);\n" for i in range(n)
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument(
+        "--arithmetic-only", action="store_true",
+        help="profile the arithmetic-declaration scaling workloads from compare.py",
+    )
     cli = parser.parse_args()
     if cli.runs < 3:
         parser.error("--runs must be at least 3")
     path = cli.binary.resolve(strict=True)
     with TemporaryDirectory(prefix="flux04-phases-") as directory:
-        for name, source in workloads():
+        for name, source in (arithmetic_workloads() if cli.arithmetic_only else workloads()):
             script = Path(directory) / (name + ".flx")
             script.write_text(source, encoding="ascii")
             runs = []

@@ -117,6 +117,7 @@ pub fn resolve(p: &Program) -> Result<Resolution, Error> {
         r.expression(expr)?;
     }
     r.out.groups = groups(&r.deps, p)?;
+    verify_eager_locals(p, &r.out)?;
     Ok(r.out)
 }
 
@@ -399,6 +400,350 @@ impl Usage {
     }
 }
 
+// A local callable is in scope before its declaration, but local quantities
+// are installed one at a time. Check that eagerly reachable code does not use
+// an uninitialized slot. Suspended code is only followed at a known call or
+// execute site. Opaque higher-order calls still have the evaluator's guard.
+fn verify_eager_locals(p: &Program, r: &Resolution) -> Result<(), Error> {
+    let mut index = EagerIndex {
+        resolution: r,
+        defs: HashMap::new(),
+        blocks: Vec::new(),
+    };
+    index.gather_stmts(&p.defs);
+    if let Some(e) = &p.entry {
+        index.gather_expr(e);
+    }
+    for (stmts, tail) in &index.blocks {
+        let mut pending = stmts
+            .iter()
+            .filter_map(|s| r.declaration(s))
+            .filter(|id| r.symbol(*id).kind == SymbolKind::Value)
+            .collect::<std::collections::HashSet<_>>();
+        if pending.is_empty() {
+            continue;
+        }
+        for stmt in *stmts {
+            match stmt {
+                Stmt::Def { params, body, .. } if params.is_empty() => {
+                    index.check(body, &pending)?
+                }
+                Stmt::Effect { body, .. } => index.check(body, &pending)?,
+                _ => {}
+            };
+            if let Some(id) = r.declaration(stmt) {
+                pending.remove(&id);
+            }
+        }
+        if let Some(tail) = tail {
+            index.check(tail, &pending)?;
+        }
+    }
+    Ok(())
+}
+
+struct EagerIndex<'a> {
+    resolution: &'a Resolution,
+    defs: HashMap<SymbolId, (&'a Expr, usize)>,
+    blocks: Vec<(&'a [Stmt], Option<&'a Expr>)>,
+}
+impl<'a> EagerIndex<'a> {
+    fn gather_stmts(&mut self, ss: &'a [Stmt]) {
+        for s in ss {
+            match s {
+                Stmt::Def { params, body, .. } => {
+                    if let Some(id) = self.resolution.declaration(s) {
+                        self.defs.insert(id, (body, params.len()));
+                    }
+                    self.gather_expr(body);
+                }
+                Stmt::Effect { body, .. } => {
+                    if let Some(id) = self.resolution.declaration(s) {
+                        self.defs.insert(id, (body, 0));
+                    }
+                    self.gather_expr(body);
+                }
+                Stmt::Schema { .. } => {}
+            }
+        }
+    }
+    fn gather_expr(&mut self, e: &'a Expr) {
+        match e {
+            Expr::Block(ss, tail) | Expr::Action(ss, tail) => {
+                self.blocks.push((ss, tail.as_deref()));
+                self.gather_stmts(ss);
+                if let Some(e) = tail {
+                    self.gather_expr(e);
+                }
+            }
+            Expr::Call(_, es) | Expr::Tuple(es) | Expr::Array(es) | Expr::Pipeline(es) => {
+                for x in es {
+                    self.gather_expr(x);
+                }
+            }
+            Expr::Cases(pairs, tail) => {
+                for (c, v) in pairs {
+                    self.gather_expr(c);
+                    self.gather_expr(v);
+                }
+                self.gather_expr(tail);
+            }
+            Expr::Lambda(_, body) | Expr::TypedLambda(_, _, body) => self.gather_expr(body),
+            Expr::Record(fs) | Expr::NamedRecord(_, fs) => {
+                for (_, x) in fs {
+                    self.gather_expr(x);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn check(
+        &self,
+        e: &'a Expr,
+        pending: &std::collections::HashSet<SymbolId>,
+    ) -> Result<(), Error> {
+        if !pending.is_empty() {
+            let mut walk = EagerWalk {
+                index: self,
+                pending,
+                active: std::collections::HashSet::new(),
+                depth: 0,
+                fuel: 20_000,
+                masked: Vec::new(),
+            };
+            walk.expression(e)?;
+        }
+        Ok(())
+    }
+    fn known(&self, expr: &'a Expr, fuel: usize) -> Known<'a> {
+        if fuel == 0 {
+            return Known::Unknown;
+        }
+        match expr {
+            Expr::Name(_) => self
+                .resolution
+                .reference(expr)
+                .and_then(|id| self.defs.get(&id))
+                .and_then(|&(body, n)| (n == 0).then_some(body))
+                .map_or(Known::Unknown, |body| self.known(body, fuel - 1)),
+            Expr::Ref(_) => self
+                .resolution
+                .reference(expr)
+                .and_then(|id| self.defs.get(&id))
+                .map_or(Known::Unknown, |&(body, n)| Known::Function(body, n)),
+            Expr::Lambda(ps, body) | Expr::TypedLambda(ps, _, body) => {
+                Known::Function(body, ps.len())
+            }
+            Expr::Action(ss, tail) => Known::Action(expr, ss, tail.as_deref()),
+            Expr::Tuple(es) => Known::Tuple(es),
+            Expr::Record(fs) | Expr::NamedRecord(_, fs) => Known::Record(fs),
+            Expr::Call(n, args)
+                if args.len() == 1
+                    && n.starts_with('.')
+                    && !matches!(n.as_str(), ".." | ".:")
+                    && self.resolution.reference(expr).is_some_and(|id| {
+                        self.resolution.symbol(id).kind == SymbolKind::External
+                    }) =>
+            {
+                self.known(&args[0], fuel - 1)
+                    .project(&n[1..])
+                    .map_or(Known::Unknown, |e| self.known(e, fuel - 1))
+            }
+            Expr::Bool(b) => Known::Bool(*b),
+            _ => Known::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Known<'a> {
+    Unknown,
+    Bool(bool),
+    Tuple(&'a [Expr]),
+    Record(&'a [(String, Expr)]),
+    Optional(bool),
+    Function(&'a Expr, usize),
+    Action(&'a Expr, &'a [Stmt], Option<&'a Expr>),
+}
+impl<'a> Known<'a> {
+    fn project(self, selector: &str) -> Option<&'a Expr> {
+        match self {
+            Self::Tuple(es) => es.get(selector.parse::<usize>().ok()?.checked_sub(1)?),
+            Self::Record(fs) => fs.iter().find(|(n, _)| n == selector).map(|(_, e)| e),
+            _ => None,
+        }
+    }
+}
+struct EagerWalk<'a, 's> {
+    index: &'s EagerIndex<'a>,
+    pending: &'s std::collections::HashSet<SymbolId>,
+    masked: Vec<SymbolId>,
+    active: std::collections::HashSet<usize>,
+    depth: usize,
+    fuel: usize,
+}
+impl<'a> EagerWalk<'a, '_> {
+    fn guarded(
+        &mut self,
+        owner: &'a Expr,
+        f: impl FnOnce(&mut Self) -> Result<Known<'a>, Error>,
+    ) -> Result<Known<'a>, Error> {
+        if self.depth >= 128 || !self.active.insert(key(owner)) {
+            return Ok(Known::Unknown);
+        }
+        self.depth += 1;
+        let result = f(self);
+        self.depth -= 1;
+        self.active.remove(&key(owner));
+        result
+    }
+    fn apply(&mut self, f: Known<'a>, args: usize) -> Result<Known<'a>, Error> {
+        if let Known::Function(body, n) = f {
+            if args < n {
+                return Ok(Known::Function(body, n - args));
+            }
+            if n != 0 {
+                let result = self.guarded(body, |w| w.expression(body))?;
+                if args > n {
+                    return self.apply(result, args - n);
+                }
+                return Ok(result);
+            }
+        }
+        Ok(Known::Unknown)
+    }
+    fn block(&mut self, ss: &'a [Stmt], tail: Option<&'a Expr>) -> Result<Known<'a>, Error> {
+        // Recursion can instantiate the same lexical block again. Those
+        // slots belong to a fresh frame; its own steps are checked separately.
+        let mark = self.masked.len();
+        self.masked.extend(
+            ss.iter()
+                .filter_map(|s| self.index.resolution.declaration(s)),
+        );
+        let result = (|| {
+            for s in ss {
+                match s {
+                    Stmt::Def { params, body, .. } if params.is_empty() => {
+                        self.expression(body)?;
+                    }
+                    Stmt::Effect { body, .. } => {
+                        self.expression(body)?;
+                    }
+                    _ => {}
+                }
+            }
+            tail.map_or(Ok(Known::Unknown), |e| self.expression(e))
+        })();
+        self.masked.truncate(mark);
+        result
+    }
+    fn expression(&mut self, e: &'a Expr) -> Result<Known<'a>, Error> {
+        // Recursion/highly shared call graphs cannot turn the checker into an
+        // unbounded evaluator; unresolved paths retain the runtime guard.
+        if self.fuel == 0 {
+            return Ok(Known::Unknown);
+        }
+        self.fuel -= 1;
+        let r = self.index.resolution;
+        Ok(match e {
+            Expr::Name(_) => {
+                if let Some(id) = r
+                    .reference(e)
+                    .filter(|s| self.pending.contains(s) && !self.masked.contains(s))
+                {
+                    return Err(Error::new(
+                        r.offset(e).unwrap_or(0),
+                        format!(
+                            "local `{}` is read before its initializer has finished",
+                            r.symbol(id).name
+                        ),
+                    ));
+                }
+                self.index.known(e, 128)
+            }
+            Expr::Call(n, args) => {
+                let id = r.reference(e);
+                let external = id.is_some_and(|id| r.symbol(id).kind == SymbolKind::External);
+                if external && n == "??" {
+                    if let [fallback, optional] = args.as_slice() {
+                        return match self.expression(optional)? {
+                            Known::Optional(true) => Ok(Known::Unknown),
+                            Known::Optional(false) => self.expression(fallback),
+                            _ => {
+                                self.expression(fallback)?;
+                                Ok(Known::Unknown)
+                            }
+                        };
+                    }
+                }
+                let values = args
+                    .iter()
+                    .map(|x| self.expression(x))
+                    .collect::<Result<Vec<_>, _>>()?;
+                match (external, n.as_str(), values.as_slice()) {
+                    (true, selector, [value])
+                        if selector.starts_with('.') && !matches!(selector, ".." | ".:") =>
+                    {
+                        value
+                            .project(&selector[1..])
+                            .map_or(Known::Unknown, |e| self.index.known(e, 128))
+                    }
+                    (true, "?0", []) => Known::Optional(false),
+                    (true, "?1", [_]) => Known::Optional(true),
+                    (true, "@", [f, _]) => self.apply(*f, 1)?,
+                    (true, "@@", [f, Known::Tuple(es)]) => self.apply(*f, es.len())?,
+                    (true, "!", [Known::Action(owner, ss, tail)]) => {
+                        self.guarded(owner, |w| w.block(ss, *tail))?
+                    }
+                    _ => {
+                        if let Some(&(body, count)) = id.and_then(|id| self.index.defs.get(&id)) {
+                            self.apply(Known::Function(body, count), args.len())?
+                        } else {
+                            Known::Unknown
+                        }
+                    }
+                }
+            }
+            Expr::Cases(pairs, tail) => {
+                let mut uncertain = false;
+                for (cond, value) in pairs {
+                    match self.expression(cond)? {
+                        Known::Bool(false) => continue,
+                        Known::Bool(true) => {
+                            let selected = self.expression(value)?;
+                            return Ok(if uncertain { Known::Unknown } else { selected });
+                        }
+                        _ => {
+                            uncertain = true;
+                            self.expression(value)?;
+                        }
+                    }
+                }
+                let fallback = self.expression(tail)?;
+                if uncertain {
+                    Known::Unknown
+                } else {
+                    fallback
+                }
+            }
+            Expr::Block(ss, tail) => self.block(ss, tail.as_deref())?,
+            Expr::Array(es) | Expr::Tuple(es) | Expr::Pipeline(es) => {
+                for x in es {
+                    self.expression(x)?;
+                }
+                self.index.known(e, 128)
+            }
+            Expr::Record(fs) | Expr::NamedRecord(_, fs) => {
+                for (_, x) in fs {
+                    self.expression(x)?;
+                }
+                self.index.known(e, 128)
+            }
+            _ => self.index.known(e, 128),
+        })
+    }
+}
+
 /// Iterative Kosaraju so a long dependency chain does not grow the Rust stack.
 fn groups(edges: &[BTreeSet<usize>], p: &Program) -> Result<Vec<Vec<usize>>, Error> {
     let n = edges.len();
@@ -636,5 +981,47 @@ mod tests {
         assert_eq!(r.span(call), None);
         assert_eq!(r.span(&operands[1]), None);
         assert_eq!(r.offset(&operands[1]), Some(0));
+    }
+    #[test]
+    fn rejects_known_eager_local_reads_before_ready() {
+        for (source, binding) in [
+            ("!{ a := f (); f(x:()):z := a; (); };", "a"),
+            (
+                "!{ a := f (); x := 8; f(u:()):z := g u; g(u:()):z := x; (); };",
+                "x",
+            ),
+            ("!{ rf := &f; a := @ rf (); f(x:()):z := a; (); };", "a"),
+            (
+                "!{ boxed := (&f,()); a := @ (.1 boxed) (); f(x:()):z := a; () };",
+                "a",
+            ),
+            (
+                "!{ r := .{ fn := &f; }; a := @ (.fn r) (); f(x:()):z := a; () };",
+                "a",
+            ),
+            ("!{ a := ! !{ f () }; f(x:()):z := a; (); };", "a"),
+        ] {
+            let p = parse(source).unwrap();
+            let error = resolve(&p).unwrap_err();
+            assert!(
+                error.message.contains(&format!("local `{binding}`")),
+                "{source}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_latent_reads_ready_calls_and_fresh_recursive_frames() {
+        for source in [
+            "!{ hold := &f; x := 8; f(u:()):z := x; a := @ hold (); (); };",
+            r"!{ hold := \u -> f u; x := 8; f(u:()):z := x; a := @ hold (); (); };",
+            "!{ a := ? 0b (f ()) 3; f(u:()):z := a; (); };",
+            "!{ a := ?? (f ()) (?1 3); f(u:()):z := a; (); };",
+            "!{ f(n:z):z := ? (= n 0) 0 (g (- n 1)); g(n:z):z := f n; a := f 2; (); };",
+            "f(n:z):z := { y := ? (= n 0) 1 (f (- n 1)); y }; a := f 2;",
+        ] {
+            let p = parse(source).unwrap();
+            assert!(resolve(&p).is_ok(), "{source}: {:?}", resolve(&p));
+        }
     }
 }

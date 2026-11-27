@@ -76,8 +76,19 @@ pub enum LiftMode {
     RightSequence,
     Pairwise,
 }
+impl LiftMode {
+    pub(crate) fn from_shapes(left: bool, right: bool) -> Self {
+        match (left, right) {
+            (false, false) => Self::Scalar,
+            (true, false) => Self::LeftSequence,
+            (false, true) => Self::RightSequence,
+            (true, true) => Self::Pairwise,
+        }
+    }
+}
+
 impl CoreOp {
-    fn lift_arity(self) -> Option<usize> {
+    pub(crate) fn lift_arity(self) -> Option<usize> {
         use CoreOp::*;
         match self {
             Add | Sub | Mul | Div | Quotient | Remainder | Pow | Equal | NotEqual | Lt | Le
@@ -167,6 +178,8 @@ pub struct ExprNode {
     pub table_schema: Option<Rc<TableSchema>>,
     /// Resolved pointwise plan for direct calls; indirect references are not specialized.
     pub lift_mode: Option<LiftMode>,
+    /// Zonked callable signature from the checker at a direct named use.
+    pub callee_type: Option<Type>,
     /// Checker evidence, when the inference engine recorded a resolved operation.
     pub evidence: Option<Operation>,
     pub kind: ExprKind,
@@ -433,7 +446,21 @@ impl Lower<'_> {
                     .reference(e)
                     .ok_or_else(|| Boundary::missing(span, "value reference"))?,
             ),
-            Expr::Ref(s) => Reference(self.target(e, s, span)?),
+            Expr::Ref(s) => {
+                let target = self.target(e, s, span)?;
+                if matches!(
+                    target,
+                    Target::Builtin(
+                        CoreOp::Apply | CoreOp::ApplyTuple | CoreOp::Execute | CoreOp::Default
+                    )
+                ) {
+                    return Err(Boundary::unsupported(
+                        span,
+                        format!("first-class reference to special syntax `{s}`"),
+                    ));
+                }
+                Reference(target)
+            }
             Expr::Call(s, a) => Call(self.target(e, s, span)?, self.list(a, span)?),
             Expr::Tuple(es) => Tuple(self.list(es, span)?),
             Expr::Array(es) => Sequence(self.list(es, span)?),
@@ -495,12 +522,7 @@ impl Lower<'_> {
                                 body: self.expr(body, span)?,
                             });
                         }
-                        Stmt::Schema { start, .. } => {
-                            return Err(Boundary::unsupported(
-                                Span::at(*start),
-                                "nested schema declarations",
-                            ))
-                        }
+                        Stmt::Schema { .. } => {}
                     }
                 }
                 Block {
@@ -560,12 +582,7 @@ impl Lower<'_> {
                     args.get(i)
                         .is_some_and(|id| matches!(self.arena[id.0].ty, Type::Seq(_)))
                 };
-                Some(match (sequence(0), sequence(1)) {
-                    (false, false) => LiftMode::Scalar,
-                    (true, false) => LiftMode::LeftSequence,
-                    (false, true) => LiftMode::RightSequence,
-                    (true, true) => LiftMode::Pairwise,
-                })
+                Some(LiftMode::from_shapes(sequence(0), sequence(1)))
             } else {
                 None
             }
@@ -579,6 +596,7 @@ impl Lower<'_> {
             ty,
             table_schema,
             lift_mode,
+            callee_type: self.inference.callee_type(e).cloned(),
             evidence,
             kind,
         });
