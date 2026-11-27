@@ -23,7 +23,8 @@ or demote transparently without altering type or value. For example,
 Resource limits are not machine-integer overflow and may still produce
 diagnostics. The reference runtime guards normalized numerator, denominator
 and decimal coefficient magnitudes at 1,048,576 bits, and decimal scale at
-10,000. These implementation limits do not round values or select another
+10,000. Wide integer ranges are additionally limited to 64 MiB of integer
+data. These implementation limits do not round values or select another
 numerical type.
 
 An unconstrained integral literal defaults to `z`; an unsuffixed fractional

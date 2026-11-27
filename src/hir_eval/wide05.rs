@@ -233,3 +233,64 @@ pub(super) fn to_real(x: &BigRational) -> NumericResult<f64> {
         sign | (((e + 1023) as u64) << 52) | (q & ((1u64 << 52) - 1)),
     ))
 }
+
+/// A wide exact radicand need not itself fit binary64. Round its square root
+/// from integer bounds so neither intermediate overflow nor cancellation in a
+/// lossy converted radicand determines the result.
+pub(super) fn sqrt(x: &BigRational) -> NumericResult<f64> {
+    if x.is_negative() {
+        return Err("square root of a negative number");
+    }
+    if x.is_zero() {
+        return Ok(0.0);
+    }
+    let n = x.numer().magnitude();
+    let d = x.denom().magnitude();
+    let mut e = n.bits() as i64 - d.bits() as i64;
+    // Only compare at nearby exponents. The most extreme estimates can be
+    // classified before a shift, avoiding work proportional to input width.
+    if e > 2048 {
+        return Err("nonfinite real result");
+    }
+    if e < -2150 {
+        return Ok(0.0);
+    }
+    if if e >= 0 {
+        n < &(d << e as usize)
+    } else {
+        &(n << (-e) as usize) < d
+    } {
+        e -= 1;
+    }
+    let mut exponent = e.div_euclid(2);
+    if exponent >= 1024 {
+        return Err("nonfinite real result");
+    }
+    let normal = exponent >= -1022;
+    let shift = 2 * if normal { 52 - exponent } else { 1074 };
+    let rounded = |num: &BigUint, den: &BigUint| -> NumericResult<u64> {
+        let q = (num / den).sqrt().to_u64().ok_or("nonfinite real result")?;
+        let mid = BigUint::from(2 * q + 1);
+        let cmp = (num << 2usize).cmp(&(&mid * &mid * den));
+        Ok(q + u64::from(cmp.is_gt() || (cmp.is_eq() && q & 1 == 1)))
+    };
+    let mut significand = if shift >= 0 {
+        rounded(&(n << shift as usize), d)?
+    } else {
+        rounded(n, &(d << (-shift) as usize))?
+    };
+    if !normal {
+        // This also encodes the carry into the smallest normal correctly.
+        return Ok(f64::from_bits(significand));
+    }
+    if significand == 1u64 << 53 {
+        significand >>= 1;
+        exponent += 1;
+    }
+    if exponent >= 1024 {
+        return Err("nonfinite real result");
+    }
+    Ok(f64::from_bits(
+        (((exponent + 1023) as u64) << 52) | (significand & ((1u64 << 52) - 1)),
+    ))
+}

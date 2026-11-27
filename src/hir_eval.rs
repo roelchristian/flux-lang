@@ -1742,6 +1742,9 @@ impl Eval<'_> {
                 scalar_binary(op, x, y, inner_type(ty))
             }),
             Sqrt => lift_one(a(), mode, &|v| {
+                if matches!(v, V::Wide(_)) {
+                    return finite(wide05::sqrt(&wide05::ratio(&v)?)?);
+                }
                 let x = real_of(&v)?;
                 if x < 0.0 {
                     Err("square root of a negative number")
@@ -2032,13 +2035,36 @@ impl Eval<'_> {
     }
 }
 
+fn wide_standard_deviation(xs: &[V]) -> NumericResult<V> {
+    let q = Domain::Rational;
+    let origin = xs.first().ok_or("expected nonempty sequence")?;
+    let count = exact_i128(xs.len() as i128, q);
+    let mut sum = exact_i128(0, q);
+    for x in xs {
+        let x = exact_binary(CoreOp::Sub, x, origin, q)?;
+        sum = exact_binary(CoreOp::Add, &sum, &x, q)?;
+    }
+    let mean = exact_binary(CoreOp::Div, &sum, &count, q)?;
+    let mut ss = exact_i128(0, q);
+    for x in xs {
+        let x = exact_binary(CoreOp::Sub, x, origin, q)?;
+        let x = exact_binary(CoreOp::Sub, &x, &mean, q)?;
+        let square = exact_binary(CoreOp::Mul, &x, &x, q)?;
+        ss = exact_binary(CoreOp::Add, &ss, &square, q)?;
+    }
+    let variance = exact_binary(CoreOp::Div, &ss, &count, q)?;
+    finite(wide05::sqrt(&wide05::ratio(&variance)?)?)
+}
+
 fn stats(op: CoreOp, v: V, span: Span) -> R<V> {
     let fail = |m| error(span, m);
     let xs = as_seq(&v).map_err(fail)?;
     if xs.is_empty() {
         return Ok(V::Optional(None));
     }
-    let value = if op == CoreOp::StdDev {
+    let value = if op == CoreOp::StdDev && xs.iter().any(|v| matches!(v, V::Wide(_))) {
+        wide_standard_deviation(xs).map_err(fail)?
+    } else if op == CoreOp::StdDev {
         let mut mean = 0.0;
         let mut ss = 0.0;
         for (i, x) in xs.iter().enumerate() {
@@ -2708,5 +2734,23 @@ second(x:z):z^z := ^{ ^? first x };
             range(&lo, &hi, Domain::Natural).err(),
             Some("wide range resource limit exceeded (64 MiB of integer data)")
         );
+    }
+    #[test]
+    fn wide_sqrt_need_not_first_round_the_radicand() {
+        let enormous = BigRational::from_integer(BigInt::from(10u8).pow(400));
+        assert!(wide05::to_real(&enormous).is_err());
+        assert_eq!(wide05::sqrt(&enormous).unwrap(), 1e200);
+        let tiniest = wide05::from_real(f64::from_bits(1)).unwrap();
+        assert_eq!(wide05::sqrt(&tiniest).unwrap(), f64::from_bits(1).sqrt());
+    }
+    #[test]
+    fn exact_wide_sd_does_not_lose_the_small_variance_of_a_large_offset() {
+        let base = BigInt::from(1u8) << 2048usize;
+        let near = &base + 2u8;
+        let xs = [
+            wide05::ratio_value(BigRational::from_integer(base), Domain::Integer).unwrap(),
+            wide05::ratio_value(BigRational::from_integer(near), Domain::Integer).unwrap(),
+        ];
+        assert!(matches!(wide_standard_deviation(&xs).unwrap(),V::Real(r) if r==1.0));
     }
 }
