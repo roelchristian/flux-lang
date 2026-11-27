@@ -3,8 +3,8 @@
 Flux is a statically typed, predominantly functional, array-oriented programming
 language with strict Polish expressions and an ASCII source format. It is
 designed for numerical work, tabular analysis, and scripting. This repository
-contains the Draft 0.3 design and an early reference interpreter in Rust, not a
-stable language release.
+contains the Draft 0.4 semantic frontend migration and a reference interpreter
+in Rust, not a stable language release.
 
 ```flux
 << "io" : io;
@@ -30,6 +30,8 @@ cargo run -- examples/pipeline.flx
 cargo run -- examples/monitoring.flx
 cargo run -- check examples/observations.flx
 cargo run -- fmt examples/observations.flx
+cargo run -- hir examples/permutation.flx
+cargo run -- run-hir examples/permutation.flx
 cargo run --
 ```
 
@@ -42,13 +44,16 @@ whitespace, and checks that the token stream is unchanged.
 
 ## Specification
 
-- [Flux Language Specification, Draft 0.3](docs/specification.md)
+- [Flux Language Specification, Draft 0.4 semantic revision](docs/draft-0.4.md)
+- [Draft 0.3 surface specification](docs/specification.md)
+- [Draft 0.4 migration and performance notes](docs/review-0.4.md)
 - [Rust implementation notes and roadmap](docs/implementation.md)
 - [Draft 0.2 baseline, preserved verbatim](docs/draft-0.2.md)
 - [Executable examples](examples/README.md)
 - [Performance review and benchmarks](docs/performance.md)
 
-The language design is broader than the prototype. The prototype includes eager pipelines, closed structural records, and typed CSV.
-Full type inference, open row polymorphism, typed error recovery, and a columnar
-engine remain future work. See the implementation notes for the
-prototype's support boundaries.
+The language design is broader than the prototype. The migration adds inferred
+generics and open structural rows. The ordinary CLI
+uses typed execution where available and a checked Draft 0.3 path at explicit
+migration boundaries. Use `run-hir` to require typed execution. Typed error
+recovery and a columnar engine remain outside this revision.

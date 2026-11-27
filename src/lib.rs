@@ -1,20 +1,42 @@
 //! Reference prototype for the Flux language.
+pub mod builtins;
 pub mod check;
 mod csv;
+pub mod diagnostic;
 pub mod eval;
+pub mod hir;
+pub mod hir_eval;
+pub mod infer;
 pub mod lexer;
 pub mod parser;
+pub mod resolve;
+pub mod semantic;
+pub mod types;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Error {
     pub start: usize,
     pub message: String,
+    specification: Option<Box<diagnostic::Diagnostic>>,
 }
 impl Error {
     pub fn new(start: usize, message: impl Into<String>) -> Self {
         Self {
             start,
             message: message.into(),
+            specification: None,
+        }
+    }
+
+    pub fn structured(&self) -> Option<&diagnostic::Diagnostic> {
+        self.specification.as_deref()
+    }
+
+    pub(crate) fn from_diagnostic(detail: diagnostic::Diagnostic) -> Self {
+        Self {
+            start: detail.primary.start,
+            message: format!("{}: {}", detail.category.code(), detail.message),
+            specification: Some(Box::new(detail)),
         }
     }
 
@@ -26,7 +48,26 @@ impl Error {
         let preceding = &source[..position];
         let line = preceding.bytes().filter(|c| *c == b'\n').count() + 1;
         let column = preceding.rsplit('\n').next().unwrap_or("").chars().count() + 1;
-        format!("{path}:{line}:{column}: {}", self.message)
+        let mut result = format!("{path}:{line}:{column}: {}", self.message);
+        if let Some(detail) = self.structured() {
+            let line_start = preceding.rfind('\n').map_or(0, |end| end + 1);
+            let line_end = source[position..]
+                .find('\n')
+                .map_or(source.len(), |end| position + end);
+            let end = detail.primary.end.min(line_end);
+            if let Some(mark) = source.get(position..end).filter(|s| !s.is_empty()) {
+                result.push_str(&format!(
+                    "\n  {}\n  {}{}",
+                    &source[line_start..line_end],
+                    " ".repeat(column - 1),
+                    "^".repeat(mark.chars().count().min(120)),
+                ));
+            }
+            if let Some(suggestion) = &detail.suggestion {
+                result.push_str(&format!("\n  help: {suggestion}"));
+            }
+        }
+        result
     }
 }
 impl std::fmt::Display for Error {
@@ -38,12 +79,22 @@ impl std::error::Error for Error {}
 
 pub fn check_source(source: &str) -> Result<parser::Program, Error> {
     let program = parser::parse(source)?;
-    check::check(&program)?;
+    semantic::prepare(
+        &program,
+        semantic::Mode::Script,
+        semantic::Policy::Compatible,
+    )?;
     Ok(program)
 }
 
 pub fn run_source(source: &str) -> Result<eval::Output, Error> {
-    eval::run(&check_source(source)?)
+    let program = parser::parse(source)?;
+    semantic::prepare(
+        &program,
+        semantic::Mode::Script,
+        semantic::Policy::Compatible,
+    )?
+    .run()
 }
 
 /// Conservative early formatter: normalize line endings and remove trailing whitespace.
