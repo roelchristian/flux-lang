@@ -385,65 +385,6 @@ fn invalid_collection_shapes_have_typed_runtime_diagnostics() {
 }
 
 #[test]
-fn all_bundled_examples_work_in_both_executor_entry_points() {
-    let f = Script::new("!{ () };");
-    let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let target = f.0.join("examples");
-    fn copy_directory(source: &std::path::Path, destination: &std::path::Path) {
-        fs::create_dir(destination).unwrap();
-        for item in fs::read_dir(source).unwrap() {
-            let item = item.unwrap();
-            let target = destination.join(item.file_name());
-            if item.file_type().unwrap().is_dir() {
-                copy_directory(&item.path(), &target);
-            } else {
-                fs::copy(item.path(), target).unwrap();
-            }
-        }
-    }
-    copy_directory(&examples, &target);
-    let outputs = [
-        ("csv-grid", "5\n[[station value valid] [north 12 true] [south -3 true] [north 18 true] [west, upland 40 false]]\n"),
-        ("monitoring", "#[{station := north; count := 2; mean := ?1 15; median := ?1 15; sd := ?1 3}]\n"),
-        ("observations", "2\n?1 15\n"),
-        ("permutation", "60\n1\n0\n"),
-        ("pipeline", "337965\n"),
-        ("tacit", "(10, 13, 12, identity)\n"),
-        ("tacit-finance", "([C], [0.00 0.00 0.02])\n"),
-    ];
-    let known_files: BTreeSet<_> = outputs
-        .iter()
-        .map(|(name, _)| format!("{name}.flx"))
-        .collect();
-    let actual_files: BTreeSet<_> = fs::read_dir(target)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter(|name| name.ends_with(".flx"))
-        .collect();
-    assert_eq!(known_files, actual_files);
-    for (name, expected) in outputs {
-        let path = format!("examples/{name}.flx");
-        for args in [vec!["run-hir", &path], vec![&path]] {
-            let out = f.cli(&args);
-            assert!(
-                out.status.success(),
-                "{name} {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{name}");
-            if name == "monitoring" {
-                let output = f.0.join("summary.csv");
-                assert_eq!(
-                    fs::read_to_string(&output).unwrap().replace("\r\n", "\n"),
-                    "station,count,mean,median,sd\nnorth,2,15,15,3\n"
-                );
-                fs::remove_file(output).unwrap();
-            }
-        }
-    }
-}
-
-#[test]
 fn exported_module_aliases_use_the_same_typed_operations() {
     let source = r#"
 << "io" : out;

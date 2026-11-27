@@ -335,24 +335,26 @@ key(x:row):(r,s) := (.value x,"bucket");
 }
 
 #[test]
-fn synthetic_reconciliation_distinguishes_unmatched_missing_duplicate_and_zero() {
-    let source = include_str!("../examples/reconciliation/reconcile.flx");
+fn calibration_audit_distinguishes_unmatched_missing_duplicate_and_zero() {
+    macro_rules! calibration {
+        ($name:literal) => {
+            include_str!(concat!("../examples/applications/calibration/", $name))
+        };
+    }
     for mode in [Some("run-hir"), None] {
-        let f = Fixture::new(source);
+        let f = Fixture::new(calibration!("audit.flx"));
         for (name, contents) in [
-            (
-                "ledger.csv",
-                include_str!("../examples/reconciliation/ledger.csv"),
-            ),
-            (
-                "statement.csv",
-                include_str!("../examples/reconciliation/statement.csv"),
-            ),
+            ("schema.flx", calibration!("schema.flx")),
+            ("matching.flx", calibration!("matching.flx")),
+            ("findings.flx", calibration!("findings.flx")),
+            ("measured.csv", calibration!("measured.csv")),
+            ("reference.csv", calibration!("reference.csv")),
         ] {
             fs::write(f.0.join(name), contents).unwrap();
         }
         check(&f);
-        assert!(!f.0.join("report.csv").exists());
+        let findings = f.0.join("findings.csv");
+        assert!(!findings.exists());
         let out = f.run(mode);
         assert!(
             out.status.success() && out.stderr.is_empty(),
@@ -360,18 +362,19 @@ fn synthetic_reconciliation_distinguishes_unmatched_missing_duplicate_and_zero()
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout), "(8, 9, 5)\n");
-        let report = fs::read_to_string(f.0.join("report.csv")).unwrap();
+        let report = fs::read(&findings).unwrap();
         assert_eq!(
-            report.replace("\r\n", "\n"),
-            concat!(
-                "key,status,ledger,statement,difference\n",
-                "B,amount_difference,1,1,0.25\n",
-                "C,ledger_only,1,0,\n",
-                "D,statement_only,0,1,\n",
-                "E,duplicate_source,2,2,\n",
-                "G,missing_statement_amount,1,1,\n",
-            ),
+            String::from_utf8_lossy(&report).replace("\r\n", "\n"),
+            calibration!("expected.csv"),
         );
+
+        let rerun = f.run(mode);
+        assert_eq!(rerun.status.code(), Some(1));
+        assert!(rerun.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&rerun.stderr).contains("output fileerr exists findings.csv")
+        );
+        assert_eq!(fs::read(&findings).unwrap(), report);
     }
 }
 

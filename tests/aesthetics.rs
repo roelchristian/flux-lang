@@ -46,7 +46,7 @@ fn bytes_text(bytes: &[u8]) -> &str {
 #[test]
 fn revised_examples_run_and_do_not_clobber() {
     let files = Temp::new();
-    let pipeline = files.run(include_str!("../examples/pipeline.flx"));
+    let pipeline = files.run(include_str!("fixtures/pre-corpus/pipeline.flx"));
     assert!(
         pipeline.status.success(),
         "{}",
@@ -56,10 +56,10 @@ fn revised_examples_run_and_do_not_clobber() {
     fs::create_dir(files.0.join("examples")).unwrap();
     fs::write(
         files.0.join("examples/monitoring.csv"),
-        include_str!("../examples/monitoring.csv"),
+        include_str!("fixtures/pre-corpus/monitoring.csv"),
     )
     .unwrap();
-    let source = include_str!("../examples/monitoring.flx");
+    let source = include_str!("fixtures/pre-corpus/monitoring.flx");
     let output = files.run(source);
     assert!(output.status.success(), "{}", bytes_text(&output.stderr));
     let out_path = files.0.join("summary.csv");
