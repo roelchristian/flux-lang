@@ -3,8 +3,7 @@
 Flux is a statically typed, predominantly functional, array-oriented programming
 language with strict Polish expressions and an ASCII source format. It is
 designed for numerical work, tabular analysis, and scripting. This repository
-contains the Draft 0.4.1 typed error extension and a reference interpreter
-in Rust, not a stable language release.
+contains the Draft 0.4.2 typed HIR interpreter in Rust, not a stable language release.
 
 ```flux
 << "io" : io;
@@ -59,6 +58,7 @@ propagate them explicitly.
 
 ## Specification
 
+- [Draft 0.4.2 semantic consolidation](docs/plan-0.4.2.md) and [independent review](docs/review-0.4.2.md)
 - [Draft 0.4.1 typed errors and migration](docs/draft-0.4.1.md)
 - [Draft 0.4.1 implementation review and measurements](docs/review-0.4.1.md)
 - [Flux Language Specification, Draft 0.4 semantic revision](docs/draft-0.4.md)
@@ -70,7 +70,6 @@ propagate them explicitly.
 - [Performance review and benchmarks](docs/performance.md)
 
 The language design is broader than the prototype. The migration adds inferred
-generics and open structural rows. The ordinary CLI
-uses typed execution where available and a checked Draft 0.3 path at explicit
-migration boundaries. Use `run-hir` to require typed execution. Draft 0.4.1 error and I/O operations never use the compatibility evaluator. A
-columnar engine remains outside this revision.
+generics and open structural rows. The CLI, REPL and public execution API
+use the same typed HIR backend. The Draft 0.3 interpreter is available only
+as an opt-in Rust test oracle. A columnar engine remains outside this revision.

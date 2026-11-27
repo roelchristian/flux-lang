@@ -1,6 +1,6 @@
 //! Static semantics of the Flux reference subset.
 use crate::{
-    parser::{Expr, Program, Stmt},
+    parser::{Expr, Program, Stmt, TypeAnnotation},
     Error,
 };
 use std::{
@@ -523,7 +523,7 @@ fn apply_two(env: &Env, f: &Expr, a: &T, b: &T, effect: bool) -> R<T> {
 fn lambda(
     env: &Env,
     params: &[String],
-    annotations: &[Option<String>],
+    annotations: &[Option<TypeAnnotation>],
     body: &Expr,
     want: Option<&T>,
     supplied: Option<&[T]>,

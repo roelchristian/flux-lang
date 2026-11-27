@@ -1,6 +1,7 @@
 use crate::errors041::{IoFault, IoKind};
 use std::io::{Read, Write};
 
+#[cfg(any(test, feature = "legacy-oracle"))]
 type Rt<T> = Result<T, String>;
 type FileResult<T> = Result<T, IoFault>;
 type CsvResult<T> = Result<T, CsvFault>;
@@ -110,10 +111,12 @@ pub(crate) fn read_text_with_input(
 pub(crate) fn read041_with_input(input: &mut dyn RuntimeInput, path: &str) -> FileResult<String> {
     read_text_with_input(input, path, "CSV", CSV_MAX_BYTES)
 }
+#[cfg(any(test, feature = "legacy-oracle"))]
 pub fn read(path: &str) -> Rt<String> {
     read041_with_input(&mut FsInput, path).map_err(|e| e.diagnostic)
 }
 
+#[cfg(any(test, feature = "legacy-oracle"))]
 pub fn decode(s: &str) -> Rt<Vec<Vec<String>>> {
     decode041(s).map_err(|e| e.diagnostic)
 }
@@ -237,6 +240,7 @@ pub(crate) fn decode041(s: &str) -> CsvResult<Vec<Vec<String>>> {
 }
 
 /// Parse records and select columns in schema order, without returning the header.
+#[cfg(any(test, feature = "legacy-oracle"))]
 pub fn typed_rows(s: &str, ordered_header: &[String]) -> Rt<Vec<Vec<String>>> {
     typed_rows041(s, ordered_header).map_err(|e| e.diagnostic)
 }
@@ -326,6 +330,7 @@ pub fn encode(rows: &[Vec<String>]) -> String {
 }
 
 /// Write a new regular file; never truncate an existing path.
+#[cfg(any(test, feature = "legacy-oracle"))]
 pub fn write(path: &str, rows: &[Vec<String>]) -> Rt<()> {
     write041(path, rows).map_err(|e| e.diagnostic)
 }

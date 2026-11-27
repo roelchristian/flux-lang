@@ -6,6 +6,9 @@ rust-version = "1.85"
 description = "Reference prototype for the Flux programming language"
 publish = false
 
+[features]
+legacy-oracle = []
+
 [lib]
 name = "flux_lang"
 

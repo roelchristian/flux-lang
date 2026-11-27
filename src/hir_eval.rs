@@ -11,6 +11,7 @@ use crate::{
     Error,
 };
 use std::{cmp::Ordering, collections::HashMap, io::Write, rc::Rc};
+mod collections042;
 mod operations041;
 pub use crate::csv::{FsInput, OpenedInput, RuntimeInput};
 
@@ -409,7 +410,6 @@ struct Fun {
 #[derive(Clone)]
 enum Action {
     Block { expr: ExprId, env: usize },
-    Print(V),
     IoRead(Rc<str>),
     IoWrite(Rc<str>, Rc<str>),
     IoExists(Rc<str>),
@@ -892,17 +892,15 @@ fn scalar_binary(op: CoreOp, a: V, b: V, ty: &Type) -> NumericResult<V> {
         _ => return Err("invalid binary operation in typed HIR"),
     })
 }
-fn operation_arity(op: CoreOp) -> usize {
-    use CoreOp::*;
-    match op {
-        Absent => 0,
-        Aggregate => 3,
-        TableRows | TableFrom | Rows | CsvRead | Mean | Median | StdDev | IoRead | IoExists
-        | IoPrint | Sqrt => 1,
-        Negate | Abs | Not | Sum | Product | Count | Execute | Print | Present | Has | Unwrap
-        | ToNatural | ToInteger | ToRational | ToReal => 1,
-        _ => 2,
-    }
+fn operation_arity(op: CoreOp, span: Span) -> R<usize> {
+    crate::builtins::for_operation(op)
+        .map(|m| m.arity)
+        .ok_or_else(|| {
+            invariant(
+                span,
+                format!("typed operation {op:?} has no registry identity"),
+            )
+        })
 }
 impl Eval<'_> {
     fn frame(&mut self, parent: usize) -> usize {
@@ -1400,7 +1398,7 @@ impl Eval<'_> {
         f.bound.extend(args);
         let arity = match &f.code {
             Function::User { formals, .. } => formals.len(),
-            Function::Core(op, ..) => operation_arity(*op),
+            Function::Core(op, ..) => operation_arity(*op, span)?,
             Function::Projection(_) => 1,
             Function::Constructor(_, arity) => *arity,
         };
@@ -1440,7 +1438,16 @@ impl Eval<'_> {
             Function::Core(op, ty, schema) => {
                 let out = out.as_ref().unwrap_or_else(|| result_type(&ty, arity));
                 let mode = callable_lift(op, &f.bound_types).map_err(|m| error(span, m))?;
-                self.core(op, f.bound, out, schema.as_ref(), mode, span)
+                let instance_schema = match op {
+                    CoreOp::TableFrom
+                    | CoreOp::TableRows
+                    | CoreOp::Aggregate
+                    | CoreOp::Extend
+                    | CoreOp::Cartesian
+                    | CoreOp::CsvRead => self.p.instance_schema(out).or(schema),
+                    _ => schema,
+                };
+                self.core(op, f.bound, out, instance_schema.as_ref(), mode, span)
             }
             Function::Constructor(id, _) => self.make_variant(id, f.bound, span),
             Function::Projection(field) => {
@@ -1456,11 +1463,6 @@ impl Eval<'_> {
             return result;
         }
         match action.as_ref() {
-            Action::Print(v) => {
-                writeln!(self.output, "{}", repr(v))
-                    .map_err(|e| error(span, format!("could not write output: {e}")))?;
-                Ok(V::Unit)
-            }
             Action::IoRead(_) | Action::IoWrite(..) | Action::IoExists(_) | Action::IoPrint(_) => {
                 Err(invariant(span, "fallible I/O action has no implementation"))
             }
@@ -1517,10 +1519,13 @@ impl Eval<'_> {
     ) -> R<V> {
         use CoreOp::*;
         self.tick(span)?;
-        if args.len() != operation_arity(op) {
+        if args.len() != operation_arity(op, span)? {
             return Err(error(span, "invalid typed HIR operator arity"));
         }
         if let Some(result) = operations041::apply_core(op, &args, ty, span, self.p) {
+            return result;
+        }
+        if let Some(result) = collections042::apply(op, &args, ty, schema, self, span) {
             return result;
         }
         let mut args = args.into_iter();
@@ -1531,21 +1536,27 @@ impl Eval<'_> {
             | Gt | Ge | And | Or => lift(a(), a(), mode, &|x, y| {
                 scalar_binary(op, x, y, inner_type(ty))
             }),
-            Sqrt => {
-                let v = a();
+            Sqrt => lift_one(a(), mode, &|v| {
                 let x = match v {
                     V::Real(r) => r,
                     V::Exact(n) => n.real(),
-                    _ => return Err(invariant(span, "checked square root expects a number")),
+                    _ => return Err("checked square root expects a number"),
                 };
                 if x < 0.0 {
                     Err("square root of a negative number")
                 } else {
                     finite(x.sqrt())
                 }
-            }
+            }),
             IoRead | IoWrite | IoExists | IoPrint | CheckedDiv => {
                 return Err(invariant(span, "checked operation has no implementation"))
+            }
+            Concat | Distinct | Lookup | Zip | Cartesian | Take | Drop | Slice | Reverse
+            | Flatten | Transpose | Variance | Percentile | Min | Max | All | Any | Fold | Scan => {
+                return Err(invariant(
+                    span,
+                    "checked collection operation has no implementation",
+                ))
             }
             EqualWhole => Ok(V::Bool(equal(&a(), &a()))),
             Negate | Abs | Not => lift_one(a(), mode, &|v| {
@@ -1793,7 +1804,6 @@ impl Eval<'_> {
                 }
                 return self.execute(a(), span);
             }
-            Print => Ok(V::Action(Rc::new(Action::Print(a())))),
             Present => Ok(V::Optional(Some(Rc::new(a())))),
             Absent => Ok(V::Optional(None)),
             Has => {
@@ -2441,5 +2451,31 @@ second(x:z):z^z := ^{ ^? first x };
         assert_eq!(status.stdout, "");
         assert_eq!(host.reads, ["virtual-fixture"]);
         assert_eq!(output, b"injected data\n");
+    }
+    #[test]
+    fn registry_collection_calls_keep_checked_higher_order_instances() {
+        let ir = compile(
+            r#"
+            << "io";
+            emit(x) := !{ ^= ! io.print x { _ : (); } };
+            fold := /: &+ 0z [1z 2z 3z];
+            scan := \: &+ 0z [1z 2z 3z];
+            concat:[z] [z]->[z] := &+:;
+            lookup:n [z]->?z := &.:;
+            varof:[q]->?q := &var;
+            sqrt:z->r := &^/;
+            !{
+                ! emit (fold, scan);
+                ! emit @ (@ concat [1z]) [2z];
+                ! emit @@ lookup (2n, [1z 2z]);
+                ! emit @ varof [1q 2q 3q];
+                ! emit @ sqrt 9z;
+            };
+        "#,
+        );
+        assert_eq!(
+            run(&ir).unwrap().stdout,
+            "(6, [0 1 3 6])\n[1 2]\n?1 2\n?1 2/3\n3\n"
+        );
     }
 }
