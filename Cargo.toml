@@ -15,3 +15,9 @@ name = "flux_lang"
 [[bin]]
 name = "flux"
 path = "src/main.rs"
+
+[dependencies]
+num-bigint = "0.4.6"
+num-integer = "0.1.46"
+num-rational = "0.4.2"
+num-traits = "0.2.19"
