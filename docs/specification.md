@@ -220,3 +220,11 @@ The REPL is distinct from source grammar. Semicolon-ended submissions can displa
 ### 6.6 Typed CSV and grouped summaries
 
 `csv.read` and `csv.write` construct actions. A typed read such as `t:#obs := ! csv.read "observations.csv";` uses its expected named schema and column types to match/reorder exact header names and decode each field in a parsed CSV record, rejecting missing, duplicate or unexpected names; the untyped grid reader, where provided, returns strings and is not the same result. A nonempty malformed cell is an error even in an optional column; an empty optional field represents absence. Empty strings in a required string column are string values, not automatic nulls. Logical cells accept `true`, `false`, `1b` and `0b` in the prototype. Neither aggregation nor ingestion silently fills gaps. `df.agg key summarize t` is pure: it partitions an ordered table by the key function, calls the curried summarizer once per key and same-schema group, and returns one structural or nominal summary row per group in first-seen order. The schema of a zero-group result comes from the summarizer's static result, not by inventing or evaluating an empty group. Summary field order follows the record constructor. The prototype writes that field order to the CSV header, quotes cells as needed, and refuses to overwrite an existing destination. In successful scripts, output and writing still require explicit `!`; never execute actions because they appear within a pipeline, struct literal, top-level definition or module import.
+
+
+## Draft 0.7: typed tacit programming
+
+[The tacit function algebra](draft-0.7-tacit.md) specifies the `&{ ... }`
+subgrammar, identity, composition, fork and hook. It extends the typed HIR
+interpreter without changing ordinary Polish call arities or implicit
+effects. A tacit function binding remains a first-class value.
