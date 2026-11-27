@@ -1,83 +1,66 @@
 # Flux
 
-Flux is a statically typed, predominantly functional, array-oriented programming
-language with strict Polish expressions and an ASCII source format. It is
-designed for numerical work, tabular analysis, and scripting. This repository
-contains the Draft 0.7 typed HIR interpreter in Rust, not a stable language release.
+Flux is a statically typed, array-oriented language for exact arithmetic, data
+transformation and scripting. It uses strict prefix notation: `+ 2 3` means
+“add 2 and 3”. Formulas compose as functions, while file and terminal operations
+run only when explicitly requested.
+
+This repository contains the **Draft 0.7** reference interpreter in Rust.
+The language is still experimental.
+
+## Quickstart
+
+Use Rust 1.85 or newer. From the repository root:
+
+```sh
+cargo run --locked -- examples/basics/hello.flx
+```
+
+Expected output: `Salve, munde.`
+
+Install the CLI with `cargo install --locked --path .`. Run `flux FILE` to execute
+a script, `flux check FILE` to check it without running it, or `flux fmt FILE` to
+print formatted source. Run `flux` without arguments for the REPL; try
+`+/ [1 2 3];` or `:type / 1 3;`.
+
+## A small program
+
+Save this as `squares.flx` and run `flux squares.flx`:
 
 ```flux
 sq := &{ @* * . . };
+
 !{ ^{
     ^? ! print (@: sq (.. 1z 5z));
     ()
 } };
 ```
 
-This prints `[1 4 9 16 25]`. The pure declaration binds a function value.
-Supply one argument with prefix `@ sq 5z`, or map it with `@:`. A named
-callable such as `square(x:z):z := * x x;` instead takes `square 5z`.
-The anonymous entry executes the suspended print action with `!`; `^?`
-propagates a typed failure.
+It prints `[1 4 9 16 25]`. In the tacit block `&{ ... }`, each `.` supplies the
+same input, and `@*` combines the two results with multiplication. The resulting
+function is applied as `@ sq 5z` or mapped over a range with `@:`. The
+calculation is pure; `!` executes the print action, and `^?` propagates a typed
+failure.
 
-## Try the examples
+## Explore by example
 
-From the repository root:
+| Start here | What it shows |
+| --- | --- |
+| [Functions](examples/basics/functions.flx) and [tacit composition](examples/tacit/composition.flx) | Named calls, inferred types and reusable function values |
+| [Exact arithmetic](examples/mathematics/exact.flx) and [rounding](examples/mathematics/rounding.flx) | Wide integers, exact fractions and explicit decimal rounding |
+| [Table joins](examples/tables/joins.flx) and [calibration audit](examples/applications/calibration/README.md) | Checked rows, missing measurements and exact comparisons |
+| [Source modules](examples/modules/transformations/demo.flx) and [typed results](examples/library/results.flx) | Reusable libraries and recoverable failures |
 
-```sh
-cargo run -- examples/basics/hello.flx
-cargo run -- examples/tacit/arithmetic.flx
-cargo run -- examples/mathematics/exact.flx
-cargo run -- check examples/tables/observations.flx
-cargo run -- run-hir examples/tacit/composition.flx
-cargo test --locked --test example_corpus
-```
+The [example tour](examples/README.md) lists all 52 runnable examples, including
+concordance, meteorology, astronomy and demography. Start there for application
+commands, sample inputs and expected outputs.
 
-The [example index](examples/README.md) is a guided tour from expressions and
-function algebra to local modules and complete scientific and text-processing
-applications. `cargo install --path .` installs `flux`. Invoke it without a file
-for the REPL; try `:type`, `:schema`, `:load`, or `:help`.
+## Reference and development
 
-## Recoverable failure
+- [Syntax](docs/specification.md) and [type system](docs/draft-0.4.md)
+- [Tacit function algebra](docs/draft-0.7-tacit.md) and [source modules](docs/draft-0.4.3.md)
+- [Standard library and typed results](docs/draft-0.5-stdlib.md), [numerics](docs/draft-0.5-numerics.md) and [tables](docs/draft-0.6-relational.md)
+- [Implementation notes](docs/implementation.md) and [performance](docs/performance.md)
 
-Use `^{ ... }` to return a result, `^: error` to raise, `^? result` to
-propagate, and `^= result { ... }` to recover. These operations are checked
-statically. The ordinary `/` operator still produces a fatal diagnostic on a
-zero divisor; use `math.div` for checked, exact division.
-
-The prelude’s `print` returns an action of type `!(()^ioerr)`; executing that action yields a result, not bare unit.
-File and CSV actions likewise return typed results. A script must handle or
-propagate them explicitly.
-
-## Tacit functions
-```flux
-sq:q->q := &{ @* * . . };
-answer := @ sq 12;
-```
-
-The bare period is identity inside a tacit block. `@.` composes functions,
-`@*` combines two transformations of one input, and `@?` is the hook (a
-fork with identity on the left). No new execution or coercion rules apply.
-
-## Specification
-
-- [Draft 0.7 tacit function algebra](docs/draft-0.7-tacit.md) and [implementation plan](docs/plan-0.7-tacit.md)
-
-- [Draft 0.6 relational and tabular computation](docs/draft-0.6-relational.md) and [independent review](docs/review-0.6-relational.md)
-- [Draft 0.5 standard library and typed combinators](docs/draft-0.5-stdlib.md) and [independent review](docs/review-0.5-stdlib.md)
-- [Draft 0.5 exact numerical foundations](docs/draft-0.5-numerics.md) and [independent review](docs/review-0.5-numerics.md)
-- [Draft 0.4.3 local source modules](docs/draft-0.4.3.md) and [independent review](docs/review-0.4.3.md)
-- [Draft 0.4.2 semantic consolidation](docs/plan-0.4.2.md) and [independent review](docs/review-0.4.2.md)
-- [Draft 0.4.1 typed errors and migration](docs/draft-0.4.1.md)
-- [Draft 0.4.1 implementation review and measurements](docs/review-0.4.1.md)
-- [Flux Language Specification, Draft 0.4 semantic revision](docs/draft-0.4.md)
-- [Draft 0.3 surface specification](docs/specification.md)
-- [Draft 0.4 migration and performance notes](docs/review-0.4.md)
-- [Rust implementation notes and roadmap](docs/implementation.md)
-- [Draft 0.2 baseline, preserved verbatim](docs/draft-0.2.md)
-- [Executable examples](examples/README.md)
-- [Performance review and benchmarks](docs/performance.md)
-
-The language design is broader than the prototype. The migration adds inferred
-generics and open structural rows. The CLI, REPL and public execution API
-use the same typed HIR backend. The Draft 0.3 interpreter is available only
-as an opt-in Rust test oracle. A columnar engine remains outside this revision.
+Run `cargo test --locked` for the full suite or
+`cargo test --locked --test example_corpus` for the public examples.
