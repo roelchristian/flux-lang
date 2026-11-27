@@ -366,23 +366,23 @@ pub static REGISTRY: &[Builtin] = &[
     pure!(Some(CoreOp::TableFrom), "#:", 1, Table, Collection),
     pure!(Some(CoreOp::Rows), ":#", 1, Table, Collection),
     pure!(
-        None,
+        Some(CoreOp::InnerJoin),
         "*=",
         4,
         Table,
         Collection,
         Equality::Structural,
-        Recognized,
+        Runtime,
         &[]
     ),
     pure!(
-        None,
+        Some(CoreOp::LeftJoin),
         "*?",
         4,
         Table,
         Collection,
         Equality::Structural,
-        Recognized,
+        Runtime,
         &[]
     ),
     internal!(
@@ -805,6 +805,86 @@ pub static REGISTRY: &[Builtin] = &[
         Runtime,
         &[]
     ),
+    internal!(
+        Some(CoreOp::SemiJoin),
+        "df.semi",
+        4,
+        Table,
+        Collection,
+        Pure,
+        Runtime,
+        &["table.semi"]
+    ),
+    internal!(
+        Some(CoreOp::AntiJoin),
+        "df.anti",
+        4,
+        Table,
+        Collection,
+        Pure,
+        Runtime,
+        &["table.anti"]
+    ),
+    internal!(
+        Some(CoreOp::TableUnion),
+        "df.union",
+        2,
+        Table,
+        Collection,
+        Pure,
+        Runtime,
+        &["table.union"]
+    ),
+    internal!(
+        Some(CoreOp::TableDistinct),
+        "df.distinct",
+        1,
+        Table,
+        Collection,
+        Pure,
+        Runtime,
+        &["table.distinct"]
+    ),
+    internal!(
+        Some(CoreOp::TableSelect),
+        "df.select",
+        2,
+        Table,
+        Collection,
+        Pure,
+        Runtime,
+        &["table.select"]
+    ),
+    internal!(
+        Some(CoreOp::DropNa),
+        "df.dropna",
+        2,
+        Table,
+        Collection,
+        Pure,
+        Runtime,
+        &["table.dropna"]
+    ),
+    internal!(
+        Some(CoreOp::Fill),
+        "df.fill",
+        2,
+        Table,
+        Collection,
+        Pure,
+        Runtime,
+        &["table.fill"]
+    ),
+    internal!(
+        Some(CoreOp::PresentOnly),
+        "df.present",
+        1,
+        Table,
+        Collection,
+        Pure,
+        Runtime,
+        &["table.present"]
+    ),
 ];
 
 // Indexed by the operation discriminant; aliases share the same execution contract.
@@ -858,7 +938,18 @@ const IO: &[Member] = &[
 ];
 const MATH: &[Member] = &[("div", "math.div"), ("quantize", "math.quantize")];
 const CSV: &[Member] = &[("read", "csv.read"), ("write", "csv.write")];
-const TABLE: &[Member] = &[("agg", "df.agg"), ("extend", "df.extend")];
+const TABLE: &[Member] = &[
+    ("agg", "df.agg"),
+    ("extend", "df.extend"),
+    ("semi", "df.semi"),
+    ("anti", "df.anti"),
+    ("union", "df.union"),
+    ("distinct", "df.distinct"),
+    ("select", "df.select"),
+    ("dropna", "df.dropna"),
+    ("fill", "df.fill"),
+    ("present", "df.present"),
+];
 const STATISTICS: &[Member] = &[
     ("avg", "avg"),
     ("mean", "avg"),
@@ -993,7 +1084,7 @@ mod tests {
         assert_eq!(lookup("csv.write").unwrap().effect, ConstructAction);
         assert_eq!(lookup("!").unwrap().effect, ExecuteAction);
         assert_eq!(prelude_arity("*?"), Some(4));
-        assert_eq!(runtime_arity("*?"), None);
+        assert_eq!(runtime_arity("*?"), Some(4));
         assert_eq!(runtime_arity(".field"), Some(1));
         assert_eq!(runtime_arity("io.read"), Some(1));
         assert_eq!(runtime_arity(":d"), Some(1));

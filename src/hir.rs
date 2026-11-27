@@ -119,6 +119,16 @@ pub enum CoreOp {
     DtDate,
     JsonEncode,
     JsonDecode,
+    InnerJoin,
+    LeftJoin,
+    SemiJoin,
+    AntiJoin,
+    TableUnion,
+    TableDistinct,
+    TableSelect,
+    DropNa,
+    Fill,
+    PresentOnly,
 }
 
 /// Static shape execution plan for direct pointwise operations. Pairwise
@@ -701,7 +711,13 @@ impl Lower<'_> {
             &kind,
             Call(
                 Target::Builtin(
-                    CoreOp::TableRows | CoreOp::TableFrom | CoreOp::Aggregate | CoreOp::Extend
+                    CoreOp::TableRows
+                        | CoreOp::TableFrom
+                        | CoreOp::Aggregate
+                        | CoreOp::Extend
+                        | CoreOp::InnerJoin
+                        | CoreOp::LeftJoin
+                        | CoreOp::TableSelect
                 ),
                 _
             )

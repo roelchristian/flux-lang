@@ -58,6 +58,7 @@ propagate them explicitly.
 
 ## Specification
 
+- [Draft 0.6 relational and tabular computation](docs/draft-0.6-relational.md) and [independent review](docs/review-0.6-relational.md)
 - [Draft 0.5 standard library and typed combinators](docs/draft-0.5-stdlib.md) and [independent review](docs/review-0.5-stdlib.md)
 - [Draft 0.5 exact numerical foundations](docs/draft-0.5-numerics.md) and [independent review](docs/review-0.5-numerics.md)
 - [Draft 0.4.3 local source modules](docs/draft-0.4.3.md) and [independent review](docs/review-0.4.3.md)
