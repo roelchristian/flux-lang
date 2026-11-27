@@ -584,11 +584,13 @@ mod tests {
     #[test]
     fn rejects_remote_absolute_and_nonregular_source_imports() {
         let fx = Fixture::new();
-        let exported = fx.put("a.flx", "x:n := 1n; >> (x);");
         let main = fx.0.join("root.flx");
+        // Use source spellings valid on every runner: raw Windows paths can
+        // contain backslashes that would be parsed as string escapes instead.
         for target in [
-            "https://example.invalid/a.flx".into(),
-            exported.display().to_string(),
+            "https://example.invalid/a.flx",
+            "/flux-test-root/a.flx",
+            "C:/flux-test-root/a.flx",
         ] {
             let source = format!("<< \"{target}\" : a;");
             let err = load_virtual(&main, &source).unwrap_err().diagnostic();
