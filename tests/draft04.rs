@@ -200,7 +200,19 @@ fn rejects_invalid_elaboration() {
         ("exact/approximate mix", "bad := + 1q 2r;"),
         ("cyclic values", "a := b; b := a;"),
         ("inconsistent recursion", "f(x) := f [x];"),
+        (
+            "experimental explicit open row",
+            "bad(x:.{tag:z; | 'r}, y:'r):'r := y;",
+        ),
         ("nested numeric lifting", "x := + [[1 2] [3 4]] 9;"),
+        ("nested relational lifting", "x := = [[1 2] [3 4]] 1;"),
+        ("nested logical lifting", "x := && [[1b]] 1b;"),
+        ("vector range bounds", "x := .. [1 2] [3 4];"),
+        ("boolean scalar ordering", "x := < 0b 1b;"),
+        (
+            "not executable decimal CSV",
+            r#"<< "csv"; row :: {val:d;}; !{ x:#row := ! csv.read "data.csv"; };"#,
+        ),
         ("undeclared nested Eq", ">> (f); f(x:['a]):b := == x x;"),
         (
             "nominal function equality",
@@ -254,4 +266,20 @@ fn generic_core_executes_through_a_typed_only_preparation() {
     assert!(prepared.hir().is_some());
     assert!(prepared.migration_reason().is_none());
     assert_eq!(prepared.run().expect("HIR run").stdout, "4\nx\n");
+}
+
+#[test]
+fn tuple_spread_handles_a_function_returned_by_the_first_call() {
+    run(
+        r#"<< "io"; f(x:z):z->z := \(y:z) -> + x y; !{ ! io.print @@ &f (1,2); };"#,
+        "3\n",
+    );
+}
+
+#[test]
+fn exact_division_and_numeric_conversion_boundaries() {
+    run(
+        r#"<< "io"; !{ ! io.print / 0 -170141183460469231731687303715884105728; ! io.print / -170141183460469231731687303715884105728 -170141183460469231731687303715884105728; ! io.print :q 0.5r; ! io.print :r (/ 14949302760048185 17434334414104329); };"#,
+        "0\n1\n1/2\n0.8574633481823224\n",
+    );
 }

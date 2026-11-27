@@ -71,8 +71,94 @@ impl Exact {
             Err("expected an integral value")
         }
     }
+    /// Round the exact quotient once, to nearest binary64, ties to even.
     fn real(self) -> f64 {
-        self.n as f64 / self.d as f64
+        if self.n == 0 {
+            return 0.0;
+        }
+        let n = self.n.unsigned_abs();
+        let d = self.d as u128;
+        let mut exponent = d.leading_zeros() as i32 - n.leading_zeros() as i32;
+        if if exponent >= 0 {
+            n < (d << exponent)
+        } else {
+            (n << -exponent) < d
+        } {
+            exponent -= 1;
+        }
+        let (scaled_n, scaled_d) = if exponent >= 0 {
+            (n, d << exponent)
+        } else {
+            (n << -exponent, d)
+        };
+        let mut rem = scaled_n - scaled_d;
+        let mut significand = 1u64;
+        for _ in 0..52 {
+            significand <<= 1;
+            let complement = scaled_d - rem;
+            if rem >= complement {
+                significand |= 1;
+                rem -= complement;
+            } else {
+                rem *= 2;
+            }
+        }
+        let complement = scaled_d - rem;
+        if rem > complement || (rem == complement && significand & 1 == 1) {
+            significand += 1;
+            if significand == 1u64 << 53 {
+                significand >>= 1;
+                exponent += 1;
+            }
+        }
+        let sign = u64::from(self.n < 0) << 63;
+        let exponent = ((exponent + 1023) as u64) << 52;
+        f64::from_bits(sign | exponent | (significand & ((1u64 << 52) - 1)))
+    }
+
+    /// Convert the *stored* binary64 value to a reduced, bounded exact fraction.
+    fn from_real(value: f64) -> NumericResult<Self> {
+        if !value.is_finite() {
+            return Err("nonfinite real value");
+        }
+        let bits = value.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i32;
+        let mantissa = bits & ((1u64 << 52) - 1);
+        let (mut m, mut shift) = if exponent == 0 {
+            (mantissa, -1074)
+        } else {
+            (mantissa | (1u64 << 52), exponent - 1075)
+        };
+        if m == 0 {
+            return Ok(Self::integer(0, Domain::Rational));
+        }
+        if shift < 0 {
+            let cancel = (m.trailing_zeros() as i32).min(-shift);
+            m >>= cancel;
+            shift += cancel;
+        }
+        let (magnitude, denominator) = if shift < 0 {
+            if -shift >= 127 {
+                return Err(OVERFLOW);
+            }
+            (u128::from(m), 1i128 << -shift)
+        } else {
+            let magnitude = u128::from(m);
+            if shift >= 128 || magnitude > (u128::MAX >> shift) {
+                return Err(OVERFLOW);
+            }
+            (magnitude << shift, 1)
+        };
+        let signed = if bits >> 63 != 0 {
+            if magnitude == 1u128 << 127 {
+                i128::MIN
+            } else {
+                -i128::try_from(magnitude).map_err(|_| OVERFLOW)?
+            }
+        } else {
+            i128::try_from(magnitude).map_err(|_| OVERFLOW)?
+        };
+        Self::new(signed, denominator, Domain::Rational)
     }
     fn as_domain(self, domain: Domain) -> NumericResult<Exact> {
         if domain == Domain::Natural && (self.n < 0 || self.d != 1) {
@@ -112,6 +198,9 @@ impl Exact {
             Div => {
                 if b.n == 0 {
                     return Err(DIV_BY_ZERO);
+                }
+                if self.n == 0 {
+                    return Ok(Self::integer(0, Rational));
                 }
                 let g = gcd(self.n.unsigned_abs(), b.n.unsigned_abs());
                 let (a, c) = if g == 1u128 << 127 {
@@ -1072,12 +1161,15 @@ impl Eval<'_> {
             }
             Apply => return self.apply(a(), vec![a()], span),
             ApplyTuple => {
-                let f = a();
+                let mut f = a();
                 let xs = a();
                 let V::Tuple(xs) = xs else {
                     return Err(error(span, "@@ expects a tuple bundle"));
                 };
-                return self.apply(f, xs.to_vec(), span);
+                for operand in xs.iter() {
+                    f = self.apply(f, vec![operand.clone()], span)?;
+                }
+                return Ok(f);
             }
             Map => {
                 let (f, v) = (a(), a());
@@ -1269,7 +1361,11 @@ impl Eval<'_> {
                     ToInteger => Domain::Integer,
                     _ => Domain::Rational,
                 };
-                Ok(V::Exact(as_exact(&v)?.as_domain(d)?))
+                let exact = match v {
+                    V::Real(x) => Exact::from_real(x)?,
+                    other => as_exact(&other)?,
+                };
+                Ok(V::Exact(exact.as_domain(d)?))
             }),
         };
         result.map_err(fail)

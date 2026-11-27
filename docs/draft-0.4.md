@@ -29,7 +29,7 @@ An unsuffixed integral literal follows an appropriate expected numeric type or d
 
 ## Structural rows and table schema
 
-A structural field requirement may be inferred from projection. For example, `amount(x) := .amount x;` requires the field `amount` but need not require the rest of the structural row. Each call can instantiate both the field type and the remaining row, while a declared nominal record remains distinct. A missing field or a wrong type for a required field is an error. Repeated fields are not legal. Inferred constraints may be reported as an open row with a tail variable; the row variable denotes only the remaining fields and cannot repeat an explicitly named field.
+A structural field requirement may be inferred from projection. For example, `amount(x) := .amount x;` requires the field `amount` but need not require the rest of the structural row. Each call can instantiate both the field type and the remaining row, while a declared nominal record remains distinct. A missing field or a wrong type for a required field is an error. Repeated fields are not legal. Inferred constraints may be reported as an open row with a tail variable; the row variable denotes only the remaining fields and cannot repeat an explicitly named field. Explicit open-row annotations are not part of the source language in this draft.
 
 ```flux
 amount(x) := .amount x;

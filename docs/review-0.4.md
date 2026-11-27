@@ -87,3 +87,51 @@ spent 0.93 ms in evaluation; declaration-only cases skip execution.
   primary spans to include related spans and typed evidence for every failure.
 - Treat performance outliers as merge gates, not claims about the whole
   language. Compare strict typed workloads separately from compatibility runs.
+
+## Independent review of PR #2
+
+Separate reviewers checked numerical semantics, rank-one schemes/open rows,
+dependency analysis, and the checker-to-HIR interface against PR head
+`f21a291`. They reproduced the positive generic, open structural projection,
+top-level recursion, and header-only grouped CSV cases using the actual CLI;
+the CSV test deliberately made the summarizer fail if ever executed.
+
+### Corrected after review
+
+- Exact division now handles zero over the minimum bounded integer before
+  cancellation. Explicit conversions between bounded rationals and binary64
+  round correctly or report a numeric bound; finite reals can convert back
+  exactly when their fraction fits.
+- Reject nested elementwise comparison/logic, nonscalar range bounds,
+  unsupported decimal CSV fields and unsupported ordering at check time.
+- Explicit open-row annotation syntax is rejected pending kinding and
+  rigidity rules. Inferred private open rows are still supported.
+- Tuple spread applies already-evaluated operands one at a time, including
+  when saturation returns another function.
+- The CSV no-clobber test uses a Windows-valid temporary directory name.
+
+### Do not merge until these are addressed
+
+1. **Local eager initialization is not dependency-checked.**
+   `!{ a := f (); f(x:()):z := a; ( ) };` passes checking and fails in
+   typed execution with “value used before initialization.” Local closure
+   dependencies need a static initialization-order check distinct from
+   top-level SCC ordering and latent captures.
+2. **Nominal schema identity is not lexical end to end.**
+   A nested schema named `rr` overwrites the outer `rr` in the inference
+   table. An outer `rr { a := 3; }` used after a block declaring
+   `rr :: { b:s; };` can fail with “missing row field a.” Use the resolved
+   type-definition ID rather than strings in the schema map and nominal types.
+3. **Check rigidity and ambiguity at all binding boundaries.**
+   `outer(x) := { pretend(y:'a):'a := x; &pretend };` currently accepts an
+   explicit variable that can be equated with a captured monotype.
+   `bad(x) := == [] [];` also passes without fixing the element type. Add
+   rigid scoped variables and reject generalized-away internal ambiguities.
+4. **Some polymorphic operation evidence is still reconstructed.**
+   Direct numeric calls contain explicit scalar and broadcast modes with
+   shape checks. Indirect built-in references still select shape from values,
+   and generic numeric bodies still infer concrete domains from value tags.
+   Carry evidence at instantiation/partial application boundaries instead.
+5. **Large-file checking remains materially slower.** Profile the
+   4,000-declaration workload before merging; the runtime wins do not offset
+   an unreviewed check-path regression.

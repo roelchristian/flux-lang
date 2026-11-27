@@ -396,23 +396,10 @@ impl Engine<'_> {
             }
             ".{" => {
                 let mut fields = Vec::new();
-                let mut tail = None;
                 while next(*i) != "}" {
                     let name = next(*i);
                     if name == "|" || name == ".." {
-                        *i += 1;
-                        let name = next(*i);
-                        if !name.starts_with('\'') {
-                            return Err(self.err("expected a row type variable"));
-                        }
-                        *i += 1;
-                        tail = Some(
-                            match v.entry(name.to_owned()).or_insert_with(|| self.cx.fresh()) {
-                                Type::Var(id) => *id,
-                                _ => unreachable!(),
-                            },
-                        );
-                        break;
+                        return Err(self.err("explicit open-row annotations are not supported; infer the row from field use"));
                     }
                     if name.is_empty() {
                         return Err(self.err("unclosed record type"));
@@ -431,7 +418,7 @@ impl Engine<'_> {
                     }
                 }
                 expect(i, "}").map_err(|e| self.err(e))?;
-                Type::Record(Row { fields, tail })
+                Type::Record(Row { fields, tail: None })
             }
             x if x.starts_with('\'') => {
                 v.entry(x.into()).or_insert_with(|| self.cx.fresh()).clone()
@@ -892,6 +879,12 @@ impl Engine<'_> {
         let at = self.cx.resolve(a);
         let bt = self.cx.resolve(b);
         if n != "==" {
+            if [&at, &bt]
+                .iter()
+                .any(|t| matches!(t, Type::Seq(el) if matches!(el.as_ref(), Type::Seq(_))))
+            {
+                return Err(self.err("elementwise comparison is limited to one sequence dimension; use == for nested structural equality"));
+            }
             match (&at, &bt) {
                 (Type::Seq(a), Type::Seq(b)) => return Ok(s(self.binary_rel(n, a, b)?)),
                 (Type::Seq(a), b) => return Ok(s(self.binary_rel(n, a, b)?)),
@@ -1308,9 +1301,7 @@ impl Engine<'_> {
             let t = if let Type::Optional(t) = t { *t } else { t };
             if !matches!(
                 t,
-                Type::Prim(
-                    Prim::N | Prim::Z | Prim::Q | Prim::D | Prim::R | Prim::B | Prim::S | Prim::C
-                )
+                Type::Prim(Prim::N | Prim::Z | Prim::Q | Prim::R | Prim::B | Prim::S | Prim::C)
             ) {
                 return Err(self.err(format!("unsupported CSV column type for {name}: {t}")));
             }
@@ -1332,6 +1323,12 @@ impl Engine<'_> {
                 self.numeric_binary(n, &xs[0], &xs[1], want)?
             }
             ".." => {
+                if xs
+                    .iter()
+                    .any(|t| matches!(self.cx.resolve(t), Type::Seq(_)))
+                {
+                    return Err(self.err("range bounds must be scalar exact integers"));
+                }
                 let w = match want.map(|t| self.cx.resolve(t)) {
                     Some(Type::Seq(t)) => Some(*t),
                     _ => None,
@@ -1353,6 +1350,12 @@ impl Engine<'_> {
                 }
                 let a = self.cx.resolve(&xs[0]);
                 let b = self.cx.resolve(&xs[1]);
+                if [&a, &b]
+                    .iter()
+                    .any(|t| matches!(t, Type::Seq(el) if matches!(el.as_ref(), Type::Seq(_))))
+                {
+                    return Err(self.err("logical lifting is limited to one sequence dimension"));
+                }
                 let ash = bool_shape(&a);
                 let bsh = bool_shape(&b);
                 self.unify(&a, &ash)?;
@@ -1384,6 +1387,11 @@ impl Engine<'_> {
             }
             ":n" | ":z" | ":q" | ":d" | ":r" => {
                 self.req(Class::Num, &xs[0])?;
+                if n == ":d" {
+                    return Err(
+                        self.err("decimal conversion is not executable in the reference subset")
+                    );
+                }
                 p(match n {
                     ":n" => N,
                     ":z" => Z,

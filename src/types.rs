@@ -529,6 +529,20 @@ impl InferCtx {
                 class,
                 ty: ty.clone(),
             }),
+            Prim(p) if class == Ord => {
+                if !matches!(
+                    p,
+                    crate::types::Prim::N
+                        | crate::types::Prim::Z
+                        | crate::types::Prim::Q
+                        | crate::types::Prim::D
+                        | crate::types::Prim::R
+                        | crate::types::Prim::S
+                        | crate::types::Prim::C
+                ) {
+                    return fail();
+                }
+            }
             Prim(p)
                 if class != Num
                     || matches!(
@@ -540,7 +554,7 @@ impl InferCtx {
                             | crate::types::Prim::R
                     ) => {}
             Prim(_) => return fail(),
-            _ if class == Num => return fail(),
+            _ if matches!(class, Num | Ord) => return fail(),
             Optional(x) => Self::class_obligations(class, x, out)?,
             Tuple(xs) => {
                 for x in xs {

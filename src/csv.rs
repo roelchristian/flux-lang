@@ -292,11 +292,12 @@ mod tests {
 
     #[test]
     fn no_clobber() {
-        let dir = std::env::temp_dir().join(format!(
-            "flux-csv-test-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-        ));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("flux-csv-test-{}-{nonce}", std::process::id(),));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("file.csv");
         let name = path.to_str().unwrap();
