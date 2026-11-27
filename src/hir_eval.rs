@@ -674,7 +674,13 @@ fn repr(v: &V) -> String {
                 .collect::<Vec<_>>()
                 .join("; ")
         ),
-        V::Table(xs, _) => format!("#[{}]", xs.iter().map(repr).collect::<Vec<_>>().join(" ")),
+        V::Table(xs, schema) => format!(
+            "#[{}]",
+            xs.iter()
+                .map(|row| repr_table_row(row, schema))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
         V::Dict(xs) => format!(
             "#{{{}}}",
             xs.iter()
@@ -701,6 +707,66 @@ fn repr(v: &V) -> String {
         V::Action(_) => "<action>".into(),
     }
 }
+fn repr_table_row(row: &V, schema: &TableSchema) -> String {
+    if let (V::Record(fields), TableSchema::Named(columns)) = (row, schema) {
+        if fields
+            .iter()
+            .map(|(n, _)| n.as_ref())
+            .ne(columns.iter().map(|(n, _)| n.as_str()))
+        {
+            let ordered = columns
+                .iter()
+                .map(|(name, _)| {
+                    fields
+                        .iter()
+                        .find(|(key, _)| key.as_ref() == name)
+                        .map(|(_, value)| format!("{name} := {}", repr(value)))
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(values) = ordered.filter(|_| fields.len() == columns.len()) {
+                return format!("{{{}}}", values.join("; "));
+            }
+        }
+    }
+    repr(row)
+}
+
+// A schema's stored order controls presentation, not structural equality.
+// Preserve order for tuple slots and retain lexical identity for nominal types.
+fn same_field_types(a: &[(String, Type)], b: &[(String, Type)]) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|(name, ty)| {
+            b.iter()
+                .find(|(other, _)| name == other)
+                .is_some_and(|(_, rhs)| same_type_layout(ty, rhs))
+        })
+}
+fn same_tuple_types(a: &[Type], b: &[Type]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_type_layout(a, b))
+}
+fn same_type_layout(a: &Type, b: &Type) -> bool {
+    use Type::*;
+    match (a, b) {
+        (Record(a), Record(b)) => a.tail == b.tail && same_field_types(&a.fields, &b.fields),
+        (Tuple(a), Tuple(b)) => same_tuple_types(a, b),
+        (Seq(a), Seq(b))
+        | (Table(a), Table(b))
+        | (Optional(a), Optional(b))
+        | (Action(a), Action(b)) => same_type_layout(a, b),
+        (Dict(a, b), Dict(c, d)) | (Result(a, b), Result(c, d)) | (Fun(a, b), Fun(c, d)) => {
+            same_type_layout(a, c) && same_type_layout(b, d)
+        }
+        _ => a == b,
+    }
+}
+fn same_table_layout(a: &TableSchema, b: &TableSchema) -> bool {
+    a == b
+        || match (a, b) {
+            (TableSchema::Named(a), TableSchema::Named(b)) => same_field_types(a, b),
+            (TableSchema::Positional(a), TableSchema::Positional(b)) => same_tuple_types(a, b),
+            _ => false,
+        }
+}
 fn equal(a: &V, b: &V) -> bool {
     match (a, b) {
         (V::Exact(a), V::Exact(b)) => a.n == b.n && a.d == b.d,
@@ -722,7 +788,9 @@ fn equal(a: &V, b: &V) -> bool {
                     .all(|(k, v)| b.iter().any(|(l, w)| k == l && equal(v, w)))
         }
         (V::Table(a, ta), V::Table(b, tb)) => {
-            ta == tb && a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| equal(a, b))
+            same_table_layout(ta, tb)
+                && a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(a, b)| equal(a, b))
         }
         (V::Dict(a), V::Dict(b)) => {
             a.len() == b.len()
