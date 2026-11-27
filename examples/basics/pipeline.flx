@@ -1,0 +1,20 @@
+--- Each $ is the preceding stage's value.
+piped := |{
+    .. 1z 100z;
+    ^ $ 2n;
+    ?: (> $ 100z) $;
+    +/ $
+};
+
+--- The same transformation as a first-class tacit function.
+square:[z]->[z] := &{ @* * . . };
+large(xs:[z]):[z] := ?: (> xs 100z) xs;
+sum_large_squares:[z]->z := &{ @. +/ (@. large square) };
+
+!{
+    ^{
+        ^? ! print piped;
+        ^? ! print @ sum_large_squares (.. 1z 100z);
+        ()
+    }
+};
