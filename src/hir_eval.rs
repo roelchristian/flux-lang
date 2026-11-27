@@ -14,9 +14,17 @@ use num_bigint::BigInt;
 use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{Signed, ToPrimitive, Zero};
-use std::{cmp::Ordering, collections::HashMap, io::Write, rc::Rc};
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    io::{BufRead, Write},
+    rc::Rc,
+};
 mod collections042;
+mod combinators05;
 mod decimal05;
+mod json05;
+mod library05;
 mod wide05;
 use wide05::Wide;
 mod operations041;
@@ -588,6 +596,7 @@ enum Action {
     IoPrint(V),
     CsvRead(Rc<str>, Option<Rc<TableSchema>>),
     CsvWrite(Rc<str>, V),
+    Library(CoreOp, Vec<V>),
 }
 #[derive(Default)]
 struct Frame {
@@ -601,6 +610,8 @@ struct Eval<'a> {
     frames: Vec<Frame>,
     input: &'a mut dyn RuntimeInput,
     output: &'a mut dyn Write,
+    stdin: &'a mut dyn BufRead,
+    args: &'a [String],
     fuel: usize,
     depth: u16,
     effects: u16,
@@ -1367,7 +1378,15 @@ impl Eval<'_> {
                             _ => &n.ty,
                         };
                         let ty = self.type_at(ty, env);
-                        self.core(*op, args, &ty, n.table_schema.as_ref(), n.lift_mode, s)?
+                        if combinators05::handles(*op) {
+                            let types = ids
+                                .iter()
+                                .map(|id| self.type_at(&p.node(*id).ty, env))
+                                .collect::<Vec<_>>();
+                            combinators05::apply(*op, args, &types, &ty, self, s)?
+                        } else {
+                            self.core(*op, args, &ty, n.table_schema.as_ref(), n.lift_mode, s)?
+                        }
                     }
                     Target::Constructor(id) => self.make_variant(*id, args, s)?,
                     Target::Projection(field) => {
@@ -1642,6 +1661,9 @@ impl Eval<'_> {
             }
             Function::Core(op, ty, schema) => {
                 let out = out.as_ref().unwrap_or_else(|| result_type(&ty, arity));
+                if combinators05::handles(op) {
+                    return combinators05::apply(op, f.bound, &f.bound_types, out, self, span);
+                }
                 let mode = callable_lift(op, &f.bound_types).map_err(|m| error(span, m))?;
                 let instance_schema = match op {
                     CoreOp::TableFrom
@@ -1667,7 +1689,11 @@ impl Eval<'_> {
         if let Some(result) = operations041::apply_action(&action, self, span) {
             return result;
         }
+        if let Some(result) = library05::apply_action(&action, self, span) {
+            return result;
+        }
         match action.as_ref() {
+            Action::Library(..) => Err(invariant(span, "unknown standard library action")),
             Action::IoRead(_) | Action::IoWrite(..) | Action::IoExists(_) | Action::IoPrint(_) => {
                 Err(invariant(span, "fallible I/O action has no implementation"))
             }
@@ -1733,6 +1759,12 @@ impl Eval<'_> {
         if let Some(result) = collections042::apply(op, &args, ty, schema, self, span) {
             return result;
         }
+        if let Some(result) = library05::apply_core(op, &args, span, self.p) {
+            return result;
+        }
+        if let Some(result) = json05::apply(op, &args, ty, span, self.p) {
+            return result;
+        }
         let mut args = args.into_iter();
         let mut a = || args.next().expect("arity checked");
         let fail = |message| error(span, message);
@@ -1761,6 +1793,15 @@ impl Eval<'_> {
                     span,
                     "checked collection operation has no implementation",
                 ))
+            }
+            OptMap | OptBind | OptResult | ResMap | ResMapErr | ResCollect | ResPartition
+            | ResOk | ResOptional | ReadLine | FsList | FsMkdir | FsBase | FsJoin | SysArgs
+            | SysEnv | SysPid | StrUpper | StrLower | StrTrim | StrSplit | StrJoin | RxFind
+            | DtDays | DtDate | JsonEncode | JsonDecode => {
+                return Err(invariant(
+                    span,
+                    "checked standard library operation has no implementation",
+                ));
             }
             EqualWhole => Ok(V::Bool(equal(&a(), &a()))),
             Negate | Abs | Not => lift_one(a(), mode, &|v| {
@@ -2178,11 +2219,19 @@ fn write_cell(v: &V) -> NumericResult<String> {
         _ => return Err("unsupported CSV output cell type"),
     })
 }
-fn evaluate(program: &HirProgram, input: &mut dyn RuntimeInput, output: &mut dyn Write) -> R<V> {
+fn evaluate(
+    program: &HirProgram,
+    input: &mut dyn RuntimeInput,
+    stdin: &mut dyn BufRead,
+    args: &[String],
+    output: &mut dyn Write,
+) -> R<V> {
     let mut eval = Eval {
         p: program,
         frames: vec![Frame::default()],
         input,
+        stdin,
+        args,
         output,
         fuel: 1_000_000,
         depth: 0,
@@ -2209,12 +2258,24 @@ fn evaluate(program: &HirProgram, input: &mut dyn RuntimeInput, output: &mut dyn
     }
 }
 
+/// Execute using injected files and output; line input is EOF and arguments are empty.
 pub fn run_with_io(
     program: &HirProgram,
     input: &mut dyn RuntimeInput,
     sink: &mut dyn Write,
 ) -> Result<Output, Error> {
-    let mut value = evaluate(program, input, sink).map_err(Control::into_error)?;
+    run_with_host(program, input, &mut std::io::empty(), &[], sink)
+}
+
+/// Execute with explicit host file input, line input, script arguments, and output.
+pub fn run_with_host(
+    program: &HirProgram,
+    input: &mut dyn RuntimeInput,
+    stdin: &mut dyn BufRead,
+    args: &[String],
+    sink: &mut dyn Write,
+) -> Result<Output, Error> {
+    let mut value = evaluate(program, input, stdin, args, sink).map_err(Control::into_error)?;
     let span = program
         .entry
         .map(|id| program.node(id).span)
@@ -2331,12 +2392,24 @@ fn table_view(rows: &[V], schema: &TableSchema) -> String {
     out.join("\n")
 }
 
+/// Inspect an entry with EOF line input and no script arguments.
 pub fn view_with_io(
     program: &HirProgram,
     input: &mut dyn RuntimeInput,
     sink: &mut dyn Write,
 ) -> Result<crate::eval::ReplOutput, Error> {
-    let value = evaluate(program, input, sink).map_err(Control::into_error)?;
+    view_with_host(program, input, &mut std::io::empty(), &[], sink)
+}
+
+/// Inspect an entry using explicit host streams and script arguments.
+pub fn view_with_host(
+    program: &HirProgram,
+    input: &mut dyn RuntimeInput,
+    stdin: &mut dyn BufRead,
+    args: &[String],
+    sink: &mut dyn Write,
+) -> Result<crate::eval::ReplOutput, Error> {
+    let value = evaluate(program, input, stdin, args, sink).map_err(Control::into_error)?;
     fn inspect(v: &V) -> String {
         match v {
             V::String(s) => format!("{s:?}"),
@@ -2579,6 +2652,44 @@ mod tests {
         "#,
         );
         assert_eq!(view_entry(&ir).unwrap().value, "1b");
+    }
+
+    #[test]
+    fn result_combinators_keep_first_failure_and_failure_provenance() {
+        let source = r#"
+            << "res";
+            first(x:z):z^z := ^{ ^: x };
+            second(x:z):z^z := ^{ ^? first x };
+            shifted := res.maperr (\x -> + x 100z) res.collect [second 5z first 2z];
+            !{ ^{ ^? shifted; () } };
+        "#;
+        let ir = compile(source);
+        let err = run(&ir).err().unwrap();
+        assert!(err.message.contains("105"), "{}", err.message);
+        let diagnostic = err.structured().unwrap();
+        assert_eq!(
+            &source[diagnostic.primary.start..diagnostic.primary.end],
+            "^: x"
+        );
+        assert!(diagnostic
+            .related
+            .iter()
+            .any(|r| r.label.contains("propagat")));
+    }
+
+    #[test]
+    fn option_combinators_use_checked_callback_instances_and_skip_missing_payload() {
+        let ir = compile(
+            r#"
+            << "opt";
+            choose := &opt.map;
+            inc(x) := + x 1n;
+            bad(x:n):n := - x 99n;
+            none:?n := ?0;
+            !{ (@@ choose (&inc,?1 5n), opt.map &bad none) };
+        "#,
+        );
+        assert_eq!(view_entry(&ir).unwrap().value, "(?1 6, ?0)");
     }
 
     #[test]

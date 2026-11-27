@@ -3,7 +3,7 @@ use flux_lang::{
     parser::MemberKind,
     semantic::{prepare_modules, prepare_modules_timed, Mode as SemanticMode, Policy, Timings},
 };
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -74,7 +74,14 @@ impl Session {
             }
             Mode::View | Mode::Time => {
                 let start = Instant::now();
-                let out = prepared.view_with_output(&mut io::stdout()).map_err(diag)?;
+                let out = prepared
+                    .view_with_host(
+                        &mut flux_lang::FsInput,
+                        &mut io::stdin().lock(),
+                        &[],
+                        &mut io::stdout(),
+                    )
+                    .map_err(diag)?;
                 let elapsed = start.elapsed();
                 if out.value.contains('\n') {
                     println!("{}\n: {}", out.value, inspection.type_name);
@@ -141,7 +148,12 @@ impl Session {
                     self.declarations.push((origin, source));
                 } else {
                     prepared
-                        .run_with_output(&mut io::stdout())
+                        .run_with_host(
+                            &mut flux_lang::FsInput,
+                            &mut io::stdin().lock(),
+                            &[],
+                            &mut io::stdout(),
+                        )
                         .map_err(|error| loaded.diagnostic(&error))?;
                 }
                 Ok(())
@@ -193,15 +205,17 @@ enum Mode {
 fn repl() -> Result<u8, String> {
     let stdin = io::stdin();
     let interactive = stdin.is_terminal();
-    let mut lines = stdin.lock().lines();
+    let mut line = String::new();
     let mut session = Session::new();
     loop {
         if interactive {
             print!("flux> ");
             io::stdout().flush().map_err(|e| e.to_string())?;
         }
-        let Some(line) = lines.next() else { break };
-        let line = line.map_err(|e| e.to_string())?;
+        line.clear();
+        if stdin.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+            break;
+        }
         let line = line.trim();
         if line.is_empty() || line.starts_with("--") {
             continue;
@@ -218,9 +232,28 @@ fn repl() -> Result<u8, String> {
 fn cli() -> Result<u8, String> {
     const COMMANDS: &[&str] = &["check", "fmt", "hir", "interface", "phases", "run-hir"];
     const USAGE: &str =
-        "flux [FILE | check FILE | hir FILE | interface FILE | run-hir FILE | phases FILE | fmt FILE | --version]";
+        "flux [FILE [-- ARGS...] | check FILE | hir FILE | interface FILE | run-hir FILE [-- ARGS...] | phases FILE | fmt FILE | --version]";
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let (mode, path) = match args.as_slice() {
+    let separator = args.iter().position(|arg| arg == "--");
+    let arguments = match separator {
+        Some(at) => args[at + 1..]
+            .iter()
+            .map(|arg| {
+                arg.to_str()
+                    .map(str::to_owned)
+                    .ok_or("script arguments must be UTF-8")
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        None => Vec::new(),
+    };
+    let cli_args = &args[..separator.unwrap_or(args.len())];
+    if separator.is_some()
+        && !matches!(cli_args, [file] if !file.to_string_lossy().starts_with('-'))
+        && !matches!(cli_args, [cmd, _] if cmd == "run-hir")
+    {
+        return Err(format!("usage: {USAGE}"));
+    }
+    let (mode, path) = match cli_args {
         [] => return repl(),
         [flag] if flag == "--help" || flag == "-h" => {
             println!("Flux reference prototype\n\nUsage: {USAGE}\n\nRun without arguments for the REPL. fmt writes to stdout.");
@@ -303,8 +336,13 @@ fn cli() -> Result<u8, String> {
             .map_err(diagnostic)?;
             let start = Instant::now();
             if program.entry.is_some() {
-                plan.run_with_output(&mut io::stdout())
-                    .map_err(diagnostic)?;
+                plan.run_with_host(
+                    &mut flux_lang::FsInput,
+                    &mut io::stdin().lock(),
+                    &[],
+                    &mut io::stdout(),
+                )
+                .map_err(diagnostic)?;
             }
             let run = start.elapsed();
             eprintln!(
@@ -329,7 +367,12 @@ eval_ns\t{}",
             }
             let output = prepare_modules(program, SemanticMode::Script, Policy::TypedOnly, inputs)
                 .map_err(diagnostic)?
-                .run_with_output(&mut io::stdout())
+                .run_with_host(
+                    &mut flux_lang::FsInput,
+                    &mut io::stdin().lock(),
+                    &arguments,
+                    &mut io::stdout(),
+                )
                 .map_err(diagnostic)?;
             return Ok(output.status);
         }

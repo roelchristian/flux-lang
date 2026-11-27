@@ -14,7 +14,13 @@ fn natural(n: usize) -> V {
     exact_i128(n as i128, Domain::Natural)
 }
 
-fn variant(program: &HirProgram, owner: &str, name: &str, fields: Vec<V>, span: Span) -> R<V> {
+pub(super) fn variant(
+    program: &HirProgram,
+    owner: &str,
+    name: &str,
+    fields: Vec<V>,
+    span: Span,
+) -> R<V> {
     let descriptor = errors041::lookup(owner, name)
         .ok_or_else(|| invariant(span, format!("unknown standard constructor {owner}.{name}")))?;
     if descriptor.payload.len() != fields.len() {
@@ -36,11 +42,11 @@ fn variant(program: &HirProgram, owner: &str, name: &str, fields: Vec<V>, span: 
     })))
 }
 
-fn success(v: V) -> V {
+pub(super) fn success(v: V) -> V {
     V::Outcome(Ok(Rc::new(v)))
 }
 
-fn failure(payload: V, origin: Span, diagnostic: Option<String>) -> V {
+pub(super) fn failure(payload: V, origin: Span, diagnostic: Option<String>) -> V {
     V::Outcome(Err(Rc::new(Failure {
         payload: Rc::new(payload),
         origin,
@@ -59,7 +65,7 @@ fn io_payload(program: &HirProgram, fault: &IoFault, span: Span) -> R<V> {
     )
 }
 
-fn on_io(program: &HirProgram, r: Result<V, IoFault>, span: Span) -> R<V> {
+pub(super) fn on_io(program: &HirProgram, r: Result<V, IoFault>, span: Span) -> R<V> {
     match r {
         Ok(v) => Ok(success(v)),
         Err(e) => Ok(failure(

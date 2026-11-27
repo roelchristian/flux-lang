@@ -134,10 +134,11 @@ pub fn resolve(p: &Program) -> Result<Resolution, Error> {
         .map(|(expr, span)| (key(expr), span))
         .collect();
     for &owner in errors041::OWNERS {
-        if !p
-            .imports
-            .iter()
-            .any(|m| standard_owners(m).contains(&owner))
+        if owner != "ioerr"
+            && !p
+                .imports
+                .iter()
+                .any(|m| standard_owners(m).contains(&owner))
         {
             continue;
         }
@@ -1197,7 +1198,8 @@ mod tests {
             alias_res.reference(body),
             alias_res.standard_constructor("csverr", "fileerr")
         );
-        assert!(parse("x := missing \"x\";").is_err());
+        assert!(parse("x := missing \"x\";").is_ok());
+        assert!(parse("x := invalidjson \"x\";").is_err());
         let p = parse("<< csv; x := missing \"x\"; y := { missing := 2; missing };").unwrap();
         let r = resolve(&p).unwrap();
         let Stmt::Def { body, .. } = &p.defs[0] else {

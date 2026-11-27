@@ -514,9 +514,10 @@ impl Engine<'_> {
     }
     fn install_standard_errors(&mut self, imports: &[String]) -> R<()> {
         for &name in crate::errors041::OWNERS {
-            if !imports
-                .iter()
-                .any(|module| crate::parser::standard_owners(module).contains(&name))
+            if name != "ioerr"
+                && !imports
+                    .iter()
+                    .any(|module| crate::parser::standard_owners(module).contains(&name))
             {
                 continue;
             }
@@ -1452,7 +1453,7 @@ impl Engine<'_> {
         }
     }
     fn builtin_ref(&mut self, n: &str, want: Option<&Type>) -> R<Type> {
-        if fallible_builtin(n) {
+        if fallible_builtin(crate::builtins::canonical(n)) {
             self.saw_result = true;
         }
         if n.starts_with('.') && n != ".:" && n != ".." {
@@ -1526,6 +1527,117 @@ impl Engine<'_> {
             out
         })
     }
+    fn native_combinator(
+        &mut self,
+        env: &Env,
+        op: &str,
+        args: &[Expr],
+        want: Option<&Type>,
+        effect: bool,
+    ) -> R<Type> {
+        use Prim::*;
+        let wanted = want.map(|w| self.cx.resolve(w));
+        let result_parts = match &wanted {
+            Some(Type::Result(ok, err)) => Some((ok.as_ref().clone(), err.as_ref().clone())),
+            _ => None,
+        };
+        let optional_part = match &wanted {
+            Some(Type::Optional(t)) => Some(t.as_ref().clone()),
+            _ => None,
+        };
+        let fresh_pair = |this: &mut Self| (this.cx.fresh(), this.cx.fresh());
+        let (input, output, callback, which) = match op {
+            "opt.map" | "opt.bind" => {
+                let item = self.cx.fresh();
+                let value = optional_part.unwrap_or_else(|| self.cx.fresh());
+                let mapped = if op == "opt.bind" {
+                    o(value.clone())
+                } else {
+                    value.clone()
+                };
+                (o(item.clone()), o(value), Some(f(item, mapped)), 1)
+            }
+            "opt.result" => {
+                let (ok, err) = result_parts.unwrap_or_else(|| fresh_pair(self));
+                let er = self.expr(env, &args[0], Some(&err), effect)?;
+                let value = self.expr(env, &args[1], Some(&o(ok.clone())), effect)?;
+                return Ok(if er == Type::Never || value == Type::Never {
+                    Type::Never
+                } else {
+                    result(ok, err)
+                });
+            }
+            "res.map" => {
+                let (mapped, err) = result_parts.unwrap_or_else(|| fresh_pair(self));
+                let item = self.cx.fresh();
+                (
+                    result(item.clone(), err.clone()),
+                    result(mapped.clone(), err),
+                    Some(f(item, mapped)),
+                    1,
+                )
+            }
+            "res.maperr" => {
+                let (item, mapped) = result_parts.unwrap_or_else(|| fresh_pair(self));
+                let err = self.cx.fresh();
+                (
+                    result(item.clone(), err.clone()),
+                    result(item, mapped.clone()),
+                    Some(f(err, mapped)),
+                    1,
+                )
+            }
+            "res.collect" => {
+                let (item, err) = match result_parts {
+                    Some((Type::Seq(item), err)) => (*item, err),
+                    _ => fresh_pair(self),
+                };
+                (
+                    s(result(item.clone(), err.clone())),
+                    result(s(item), err),
+                    None,
+                    0,
+                )
+            }
+            "res.partition" => {
+                let (item, err) = match wanted {
+                    Some(Type::Tuple(parts)) => match parts.as_slice() {
+                        [Type::Seq(a), Type::Seq(e)] => (a.as_ref().clone(), e.as_ref().clone()),
+                        _ => fresh_pair(self),
+                    },
+                    _ => fresh_pair(self),
+                };
+                (
+                    s(result(item.clone(), err.clone())),
+                    Type::Tuple(vec![s(item), s(err)]),
+                    None,
+                    0,
+                )
+            }
+            "res.ok" => {
+                let (item, err) = fresh_pair(self);
+                (result(item, err), p(B), None, 0)
+            }
+            "res.optional" => {
+                let item = optional_part.unwrap_or_else(|| self.cx.fresh());
+                let err = self.cx.fresh();
+                (result(item.clone(), err), o(item), None, 0)
+            }
+            _ => unreachable!(),
+        };
+        let callback_first = callback.is_some()
+            && (self.known_callee(env, &args[0])
+                || matches!(&args[0],Expr::TypedLambda(_,ts,_) if ts.iter().all(Option::is_some)));
+        let mut bottom = false;
+        if callback_first {
+            bottom |= self.expr(env, &args[0], callback.as_ref(), effect)? == Type::Never;
+        }
+        bottom |= self.expr(env, &args[which], Some(&input), effect)? == Type::Never;
+        if callback.is_some() && !callback_first {
+            bottom |= self.expr(env, &args[0], callback.as_ref(), effect)? == Type::Never;
+        }
+        Ok(if bottom { Type::Never } else { output })
+    }
     fn builtin_call(
         &mut self,
         env: &Env,
@@ -1556,6 +1668,10 @@ impl Engine<'_> {
             self.saw_result = true;
         }
         let result = match n {
+            "opt.map" | "opt.bind" | "opt.result" | "res.map" | "res.maperr" | "res.collect"
+            | "res.partition" | "res.ok" | "res.optional" => {
+                self.native_combinator(env, n, args, want, effect)?
+            }
             "@" => {
                 let arg = self.cx.fresh();
                 let out = want.cloned().unwrap_or_else(|| self.cx.fresh());
@@ -1922,6 +2038,29 @@ impl Engine<'_> {
         }
         Ok(())
     }
+    fn json_decodable(&self, typ: &Type, seen: &mut HashSet<NominalId>) -> bool {
+        use Prim::*;
+        match self.cx.resolve(typ) {
+            Type::Prim(N | Z | Q | D | B | S | C | Unit) => true,
+            Type::Optional(t) => {
+                !matches!(t.as_ref(), Type::Optional(_) | Type::Prim(Unit))
+                    && self.json_decodable(&t, seen)
+            }
+            Type::Seq(t) => self.json_decodable(&t, seen),
+            Type::Tuple(ts) => ts.iter().all(|t| self.json_decodable(t, seen)),
+            Type::Record(r) => {
+                r.tail.is_none() && r.fields.iter().all(|(_, t)| self.json_decodable(t, seen))
+            }
+            Type::Nominal(n) => {
+                !seen.insert(n.clone())
+                    || self.schemas.get(&n).is_some_and(|r| {
+                        r.tail.is_none()
+                            && r.fields.iter().all(|(_, t)| self.json_decodable(t, seen))
+                    })
+            }
+            _ => false,
+        }
+    }
     fn builtin_types(&mut self, n: &str, xs: &[Type], want: Option<&Type>) -> R<Type> {
         use Prim::*;
         let arity = crate::builtins::lookup(n)
@@ -1933,6 +2072,106 @@ impl Engine<'_> {
             }
         }
         Ok(match n {
+            "opt.map" | "opt.bind" => {
+                let (a0, b0) = (self.cx.fresh(), self.cx.fresh());
+                let out = if n == "opt.bind" {
+                    o(b0.clone())
+                } else {
+                    b0.clone()
+                };
+                self.unify(&xs[1], &o(a0.clone()))?;
+                self.unify(&xs[0], &f(a0, out))?;
+                o(b0)
+            }
+            "opt.result" => {
+                let item = self.cx.fresh();
+                self.unify(&xs[1], &o(item.clone()))?;
+                result(item, xs[0].clone())
+            }
+            "res.map" | "res.maperr" => {
+                let (a0, e0, mapped) = (self.cx.fresh(), self.cx.fresh(), self.cx.fresh());
+                self.unify(&xs[1], &result(a0.clone(), e0.clone()))?;
+                if n == "res.map" {
+                    self.unify(&xs[0], &f(a0, mapped.clone()))?;
+                    result(mapped, e0)
+                } else {
+                    self.unify(&xs[0], &f(e0, mapped.clone()))?;
+                    result(a0, mapped)
+                }
+            }
+            "res.collect" | "res.partition" => {
+                let (a0, e0) = (self.cx.fresh(), self.cx.fresh());
+                self.unify(&xs[0], &s(result(a0.clone(), e0.clone())))?;
+                if n == "res.collect" {
+                    result(s(a0), e0)
+                } else {
+                    Type::Tuple(vec![s(a0), s(e0)])
+                }
+            }
+            "res.ok" | "res.optional" => {
+                let (a0, e0) = (self.cx.fresh(), self.cx.fresh());
+                self.unify(&xs[0], &result(a0.clone(), e0))?;
+                if n == "res.ok" {
+                    p(B)
+                } else {
+                    o(a0)
+                }
+            }
+            "io.readln" => a(result(o(p(S)), Self::standard_type("ioerr"))),
+            "fs.ls" | "fs.mkdir" | "sys.env" => {
+                self.unify(&xs[0], &p(S))?;
+                let out = match n {
+                    "fs.ls" => s(p(S)),
+                    "fs.mkdir" => p(Unit),
+                    _ => o(p(S)),
+                };
+                a(result(out, Self::standard_type("ioerr")))
+            }
+            "sys.args" => a(s(p(S))),
+            "sys.pid" => a(p(N)),
+            "str.upper" | "str.lower" | "str.trim" | "str.split" | "fs.base" | "fs.join" => {
+                for x in xs {
+                    self.unify(x, &p(S))?;
+                }
+                match n {
+                    "str.split" => s(p(S)),
+                    "fs.base" => o(p(S)),
+                    _ => p(S),
+                }
+            }
+            "str.join" => {
+                self.unify(&xs[0], &p(S))?;
+                self.unify(&xs[1], &s(p(S)))?;
+                p(S)
+            }
+            "rx.find" => {
+                for x in xs {
+                    self.unify(x, &p(S))?;
+                }
+                result(o(p(S)), Self::standard_type("rxerr"))
+            }
+            "dt.days" => {
+                self.unify(&xs[0], &p(S))?;
+                result(p(Z), Self::standard_type("dterr"))
+            }
+            "dt.date" => {
+                self.unify(&xs[0], &p(Z))?;
+                result(p(S), Self::standard_type("dterr"))
+            }
+            "json.encode" => result(p(S), Self::standard_type("jsonerr")),
+            "json.decode" => {
+                self.unify(&xs[0], &p(S))?;
+                let Some(Type::Result(ok, _)) = want.map(|t| self.cx.resolve(t)) else {
+                    return Err(self.err("json.decode needs a contextual success type annotation"));
+                };
+                if !self.cx.free_vars(&ok).is_empty() {
+                    return Err(self.err("json.decode needs a concrete success type annotation"));
+                }
+                if !self.json_decodable(&ok, &mut HashSet::new()) {
+                    return Err(self.err(format!("unsupported json.decode schema {ok}")));
+                }
+                result(*ok, Self::standard_type("jsonerr"))
+            }
             "@" => {
                 let out = want.cloned().unwrap_or_else(|| self.cx.fresh());
                 self.unify(&xs[0], &f(xs[1].clone(), out.clone()))?;
@@ -2747,6 +2986,22 @@ fn fallible_builtin(name: &str) -> bool {
             | "csv.read"
             | "csv.write"
             | "math.div"
+            | "io.readln"
+            | "fs.ls"
+            | "fs.mkdir"
+            | "sys.env"
+            | "rx.find"
+            | "dt.days"
+            | "dt.date"
+            | "json.encode"
+            | "json.decode"
+            | "opt.result"
+            | "res.map"
+            | "res.maperr"
+            | "res.collect"
+            | "res.partition"
+            | "res.ok"
+            | "res.optional"
     )
 }
 fn find_entry_natural_tail(p: &Program) -> Option<usize> {
@@ -3188,5 +3443,71 @@ mod tests {
         "#,
         )
         .unwrap();
+    }
+    #[test]
+    fn optional_and_result_combinators_check_context_and_callbacks() {
+        check(
+            r#"
+            << "opt";
+            << "res";
+            add(x:z):z := + x 1;
+            lift(x:z):?z := ?1 x;
+            good:z^s := opt.result "missing" (?1 2z);
+            bad:z^s := opt.result "missing" ?0;
+            mapped:z^s := res.map &add good;
+            transformed:z^n := res.maperr (\tag -> # tag) bad;
+            may:?z := opt.bind &lift (opt.map &add (?1 1z));
+            collected:[z]^s := res.collect [good bad];
+            parts:([z],[s]) := res.partition [];
+            indicator:b := res.ok bad;
+            optional:?z := res.optional mapped;
+            indirect:(z->z)->(z^s)->z^s := &res.map;
+        "#,
+        )
+        .unwrap();
+        let bad = check(r#"<< "opt"; out := opt.bind (\x -> + x 1) (?1 2z);"#).unwrap_err();
+        assert_eq!(bad.kind, InferErrorKind::TypeError);
+    }
+
+    #[test]
+    fn standard_print_requires_no_module_and_chronological_json_context_is_checked() {
+        check(
+            r#"
+            action:!(()^ioerr) := print 1;
+            !{ ^{ ^? ! action; () } };
+        "#,
+        )
+        .unwrap();
+        check(
+            r#"
+            << "io";
+            << "fs";
+            << "sys";
+            << "str";
+            << "rx";
+            << "dt";
+            << "json";
+            read:!(?s^ioerr) := io.readln;
+            path:s := fs.join "a" "b";
+            exists:!(b^ioerr) := fs.exists path;
+            pid:!n := sys.pid;
+            args:![s] := sys.args;
+            cols:[s] := str.split "," "a,b";
+            match:?s^rxerr := rx.find "a+" "aaa";
+            days:z^dterr := dt.days "1970-01-01";
+            date:s^dterr := dt.date 0;
+            row :: { value:z; text:?s; };
+            decoded:row^jsonerr := json.decode "{}";
+            decoder:s->row^jsonerr := &json.decode;
+        "#,
+        )
+        .unwrap();
+        for source in [
+            r#"<< "json"; decoded := json.decode "{}";"#,
+            r#"<< "json"; decoded:(z->z)^jsonerr := json.decode "{}";"#,
+            r#"<< "json"; decoded:(?())^jsonerr := json.decode "null";"#,
+        ] {
+            assert_eq!(check(source).unwrap_err().kind, InferErrorKind::TypeError);
+        }
     }
 }

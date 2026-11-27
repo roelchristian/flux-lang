@@ -98,6 +98,26 @@ impl Prepared<'_> {
         hir_eval::run_with_io(&self.hir, input, output)
     }
 
+    pub fn run_with_host(
+        &self,
+        input: &mut dyn crate::RuntimeInput,
+        stdin: &mut dyn std::io::BufRead,
+        arguments: &[String],
+        output: &mut dyn std::io::Write,
+    ) -> Result<eval::Output, Error> {
+        hir_eval::run_with_host(&self.hir, input, stdin, arguments, output)
+    }
+
+    pub fn view_with_host(
+        &self,
+        input: &mut dyn crate::RuntimeInput,
+        stdin: &mut dyn std::io::BufRead,
+        arguments: &[String],
+        output: &mut dyn std::io::Write,
+    ) -> Result<eval::ReplOutput, Error> {
+        hir_eval::view_with_host(&self.hir, input, stdin, arguments, output)
+    }
+
     pub fn view_with_output(
         &self,
         sink: &mut dyn std::io::Write,

@@ -43,6 +43,7 @@ pub enum Rule {
     Reduction,
     Statistics,
     Optional,
+    Result,
     Table,
     Effect,
     Conversion,
@@ -295,8 +296,10 @@ pub static REGISTRY: &[Builtin] = &[
         &[
             "statistics.avg",
             "stats.avg",
+            "stat.avg",
             "statistics.mean",
-            "stats.mean"
+            "stats.mean",
+            "stat.mean"
         ]
     ),
     pure!(
@@ -307,7 +310,7 @@ pub static REGISTRY: &[Builtin] = &[
         Reduction,
         NotRequired,
         Runtime,
-        &["statistics.pct", "stats.pct"]
+        &["statistics.pct", "stats.pct", "stat.pct"]
     ),
     pure!(
         Some(CoreOp::StdDev),
@@ -317,7 +320,7 @@ pub static REGISTRY: &[Builtin] = &[
         Reduction,
         NotRequired,
         Runtime,
-        &["statistics.sd", "stats.sd"]
+        &["statistics.sd", "stats.sd", "stat.sd"]
     ),
     pure!(
         None,
@@ -327,7 +330,7 @@ pub static REGISTRY: &[Builtin] = &[
         Reduction,
         NotRequired,
         Recognized,
-        &["statistics.cor", "stats.cor"]
+        &["statistics.cor", "stats.cor", "stat.cor"]
     ),
     pure!(Some(CoreOp::Take), "take", 2, Household, Collection),
     pure!(Some(CoreOp::Drop), "drop", 2, Household, Collection),
@@ -460,7 +463,7 @@ pub static REGISTRY: &[Builtin] = &[
         Dependent,
         ConstructAction,
         Runtime,
-        &["io.println"]
+        &["io.println", "print"]
     ),
     internal!(
         Some(CoreOp::IoRead),
@@ -490,7 +493,7 @@ pub static REGISTRY: &[Builtin] = &[
         Dependent,
         ConstructAction,
         Runtime,
-        &[]
+        &["fs.exists"]
     ),
     internal!(
         Some(CoreOp::CsvRead),
@@ -532,6 +535,276 @@ pub static REGISTRY: &[Builtin] = &[
         Runtime,
         &["table.extend"]
     ),
+    internal!(
+        Some(CoreOp::OptMap),
+        "opt.map",
+        2,
+        Optional,
+        Dependent,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::OptBind),
+        "opt.bind",
+        2,
+        Optional,
+        Dependent,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::OptResult),
+        "opt.result",
+        2,
+        Result,
+        Dependent,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ResMap),
+        "res.map",
+        2,
+        Result,
+        Dependent,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ResMapErr),
+        "res.maperr",
+        2,
+        Result,
+        Dependent,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ResCollect),
+        "res.collect",
+        1,
+        Result,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ResPartition),
+        "res.partition",
+        1,
+        Result,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ResOk),
+        "res.ok",
+        1,
+        Result,
+        Dependent,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ResOptional),
+        "res.optional",
+        1,
+        Result,
+        Dependent,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ReadLine),
+        "io.readln",
+        0,
+        Effect,
+        Scalar,
+        ConstructAction,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::FsList),
+        "fs.ls",
+        1,
+        Effect,
+        Scalar,
+        ConstructAction,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::FsMkdir),
+        "fs.mkdir",
+        1,
+        Effect,
+        Scalar,
+        ConstructAction,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::FsBase),
+        "fs.base",
+        1,
+        Household,
+        Scalar,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::FsJoin),
+        "fs.join",
+        2,
+        Household,
+        Scalar,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::SysArgs),
+        "sys.args",
+        0,
+        Effect,
+        Scalar,
+        ConstructAction,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::SysEnv),
+        "sys.env",
+        1,
+        Effect,
+        Scalar,
+        ConstructAction,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::SysPid),
+        "sys.pid",
+        0,
+        Effect,
+        Scalar,
+        ConstructAction,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::StrUpper),
+        "str.upper",
+        1,
+        Household,
+        Scalar,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::StrLower),
+        "str.lower",
+        1,
+        Household,
+        Scalar,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::StrTrim),
+        "str.trim",
+        1,
+        Household,
+        Scalar,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::StrSplit),
+        "str.split",
+        2,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::StrJoin),
+        "str.join",
+        2,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::RxFind),
+        "rx.find",
+        2,
+        Result,
+        Scalar,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::DtDays),
+        "dt.days",
+        1,
+        Result,
+        Scalar,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::DtDate),
+        "dt.date",
+        1,
+        Result,
+        Scalar,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::JsonEncode),
+        "json.encode",
+        1,
+        Result,
+        Dependent,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::JsonDecode),
+        "json.decode",
+        1,
+        Result,
+        Dependent,
+        Pure,
+        Runtime,
+        &[]
+    ),
 ];
 
 // Indexed by the operation discriminant; aliases share the same execution contract.
@@ -566,7 +839,7 @@ pub fn canonical(name: &str) -> &str {
 
 pub fn prelude_arity(name: &str) -> Option<usize> {
     lookup(name)
-        .filter(|b| b.prelude && b.canonical == name)
+        .filter(|b| (b.prelude && b.canonical == name) || name == "print")
         .map(|b| b.arity)
 }
 
@@ -576,6 +849,7 @@ type Member = (&'static str, &'static str);
 const IO: &[Member] = &[
     ("print", "io.print"),
     ("println", "io.println"),
+    ("readln", "io.readln"),
     ("read", "io.read"),
     ("write", "io.write"),
     ("exists", "io.exists"),
@@ -593,13 +867,54 @@ const STATISTICS: &[Member] = &[
     ("cor", "cor"),
 ];
 
+const OPT: &[Member] = &[
+    ("map", "opt.map"),
+    ("bind", "opt.bind"),
+    ("result", "opt.result"),
+];
+const RES: &[Member] = &[
+    ("map", "res.map"),
+    ("maperr", "res.maperr"),
+    ("collect", "res.collect"),
+    ("partition", "res.partition"),
+    ("ok", "res.ok"),
+    ("optional", "res.optional"),
+];
+const FS: &[Member] = &[
+    ("ls", "fs.ls"),
+    ("mkdir", "fs.mkdir"),
+    ("base", "fs.base"),
+    ("join", "fs.join"),
+    ("exists", "fs.exists"),
+];
+const SYS: &[Member] = &[("args", "sys.args"), ("env", "sys.env"), ("pid", "sys.pid")];
+const STR: &[Member] = &[
+    ("upper", "str.upper"),
+    ("lower", "str.lower"),
+    ("trim", "str.trim"),
+    ("split", "str.split"),
+    ("join", "str.join"),
+];
+const RX: &[Member] = &[("find", "rx.find")];
+const DT: &[Member] = &[("days", "dt.days"), ("date", "dt.date")];
+const JSON: &[Member] = &[("encode", "json.encode"), ("decode", "json.decode")];
+
 pub fn module_items(path: &str) -> Option<impl Iterator<Item = (&'static str, usize)>> {
     let members = match path {
         "io" => IO,
         "csv" => CSV,
         "math" => MATH,
         "df" | "table" => TABLE,
-        "stats" | "statistics" => STATISTICS,
+        "stat" | "stats" | "statistics" => STATISTICS,
+        "opt" => OPT,
+        "res" => RES,
+        "fs" => FS,
+        "sys" => SYS,
+        "str" => STR,
+        "rx" => RX,
+        "dt" => DT,
+        "json" => JSON,
+
         _ => return None,
     };
     Some(members.iter().map(|&(local, key)| {
@@ -641,7 +956,7 @@ mod tests {
                 assert!(names.insert(*a), "duplicate {a}");
                 assert_eq!(lookup(a), Some(b));
                 assert!(
-                    prelude_arity(a).is_none(),
+                    a == &"print" || prelude_arity(a).is_none(),
                     "alias should not leak into prelude"
                 );
             }
@@ -649,7 +964,24 @@ mod tests {
     }
     #[test]
     fn module_exports_have_registry_arity_and_legacy_unsupported_spellings() {
-        for module in ["io", "csv", "table", "df", "stats", "statistics", "math"] {
+        for module in [
+            "io",
+            "csv",
+            "table",
+            "df",
+            "stats",
+            "statistics",
+            "math",
+            "stat",
+            "opt",
+            "res",
+            "fs",
+            "sys",
+            "str",
+            "rx",
+            "dt",
+            "json",
+        ] {
             let mut names = HashSet::new();
             for (name, arity) in module_items(module).unwrap() {
                 assert!(names.insert(name));
@@ -666,6 +998,8 @@ mod tests {
         assert_eq!(runtime_arity("io.read"), Some(1));
         assert_eq!(runtime_arity(":d"), Some(1));
         assert_eq!(runtime_arity("math.quantize"), Some(2));
+        assert_eq!(prelude_arity("print"), Some(1));
+        assert_eq!(canonical("print"), "io.print");
         assert_eq!(runtime_arity(":q"), Some(1));
     }
     #[test]
