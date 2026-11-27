@@ -1,0 +1,5 @@
+station,value,valid
+north,12,true
+south,-3,true
+north,18,true
+"west, upland",40,false

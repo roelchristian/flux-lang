@@ -7,6 +7,8 @@ pub struct Program {
     pub defs: Vec<Stmt>,
     pub imports: Vec<String>,
     pub entry: Option<Expr>,
+    /// Zero-based byte offset of the entry’s opening `!`, if any.
+    pub entry_start: Option<usize>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -42,6 +44,8 @@ pub enum Expr {
     Array(Vec<Expr>),
     Cases(Vec<(Expr, Expr)>, Box<Expr>),
     Lambda(Vec<String>, Box<Expr>),
+    TypedLambda(Vec<String>, Vec<Option<String>>, Box<Expr>),
+    Pipeline(Vec<Expr>),
     Record(Vec<(String, Expr)>),
     Block(Vec<Stmt>, Option<Box<Expr>>),
     Action(Vec<Stmt>, Option<Box<Expr>>),
@@ -106,6 +110,14 @@ const PRELUDE: &[(&str, usize)] = &[
     ("pct", 2),
     ("sd", 1),
     ("cor", 2),
+    ("take", 2),
+    ("drop", 2),
+    ("slice", 3),
+    ("rev", 1),
+    ("flat", 1),
+    ("tr", 1),
+    ("med", 1),
+    ("var", 1),
     ("?0", 0),
     ("?1", 1),
     ("?+", 1),
@@ -145,7 +157,7 @@ fn close(s: &str) -> Option<&'static str> {
     match s {
         "(" => Some(")"),
         "[" | "#[" => Some("]"),
-        "{" | "!{" | "#{" | "{." => Some("}"),
+        "{" | "!{" | "#{" | "{." | "?{" | ".{" | "|{" => Some("}"),
         _ => None,
     }
 }
@@ -206,7 +218,9 @@ impl Parser {
             .rev()
             .find_map(|s| s.get(n).copied())
             .or_else(|| {
-                if n.starts_with('.') && n.len() > 1 && !matches!(n, ".:" | "..") {
+                if n.strip_prefix('.').is_some_and(|x| {
+                    is_ident(x) || (!x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()))
+                }) {
                     Some(Binding::Callable(1))
                 } else {
                     PRELUDE
@@ -218,6 +232,7 @@ impl Parser {
     fn canonical(&self, n: &str) -> String {
         if let Some((alias, member)) = n.split_once('.') {
             if let Some(path) = self.aliases.get(alias) {
+                let path = if path == "table" { "df" } else { path };
                 return format!("{path}.{member}");
             }
         }
@@ -331,6 +346,7 @@ impl Parser {
             defs: Vec::new(),
             imports: Vec::new(),
             entry: None,
+            entry_start: None,
         };
         let mut exports = Vec::new();
         // Resolve top-level interfaces before any expression is parsed;
@@ -342,19 +358,12 @@ impl Parser {
             };
             if self.at(i) == "<<" {
                 self.pos = i + 1;
-                let t = self.next()?;
-                if !t.text.starts_with('"') {
-                    return Err(Error::new(t.start, "expected quoted module path"));
-                }
-                let path = decode(&t)?;
-                self.expect(":")?;
-                let alias = self.ident()?;
-                self.expect(";")?;
+                let (path, alias, start) = self.import_decl()?;
                 if self.aliases.insert(alias.clone(), path.clone()).is_some() {
                     return self.err(format!("duplicate module alias `{alias}`"));
                 }
                 for &(name, arity) in module_items(&path)
-                    .ok_or_else(|| Error::new(t.start, format!("unknown module `{path}`")))?
+                    .ok_or_else(|| Error::new(start, format!("unknown module `{path}`")))?
                 {
                     self.scope()
                         .insert(format!("{alias}.{name}"), Binding::Callable(arity));
@@ -366,10 +375,7 @@ impl Parser {
         self.pos = 0;
         while !self.peek().is_empty() {
             if self.eat("<<") {
-                self.next()?;
-                self.expect(":")?;
-                self.ident()?;
-                self.expect(";")?;
+                self.import_decl()?;
             } else if self.eat(">>") {
                 self.expect("(")?;
                 loop {
@@ -391,6 +397,7 @@ impl Parser {
                     return self.err("anonymous entry action must be last and unique");
                 }
                 p.entry = Some(e);
+                p.entry_start = Some(start);
             } else if self.def_at(self.pos) {
                 p.defs.push(self.definition(false)?);
             } else {
@@ -421,6 +428,37 @@ impl Parser {
             }
         }
         Ok(p)
+    }
+    fn import_decl(&mut self) -> PResult<(String, String, usize)> {
+        let t = self.next()?;
+        let raw = if t.text.starts_with('"') {
+            decode(&t)?
+        } else if is_ident(&t.text) {
+            t.text
+        } else {
+            return Err(Error::new(
+                t.start,
+                "expected module name or quoted module path",
+            ));
+        };
+        let stem = std::path::Path::new(&raw)
+            .file_stem()
+            .and_then(|x| x.to_str())
+            .unwrap_or("");
+        let alias = if self.eat(":") {
+            self.ident()?
+        } else {
+            if !is_ident(stem) {
+                return Err(Error::new(
+                    t.start,
+                    "module stem is not a valid default alias; supply an explicit alias",
+                ));
+            }
+            stem.to_owned()
+        };
+        self.expect(";")?;
+        // This prototype resolves only bundled interfaces, identified by their stem.
+        Ok((stem.to_owned(), alias, t.start))
     }
     fn ty_until(&mut self, ends: &[&str]) -> PResult<String> {
         let start = self.pos;
@@ -587,9 +625,16 @@ impl Parser {
                 }
             }
             "{" => self.block(false),
+            ".{" => self.record_fields(effect).map(Expr::Record),
             "{." => Err(Error::new(
                 t.start,
-                "anonymous records are a provisional, unimplemented form",
+                "write `.{` to start an anonymous record",
+            )),
+            "|{" => self.pipeline(effect),
+            "$" if matches!(self.lookup("$"), Some(Binding::Value)) => Ok(Expr::Name(t.text)),
+            "$" => Err(Error::new(
+                t.start,
+                "`$` is only bound in pipeline stages after the source",
             )),
             "!{" => self.block(true),
             "!" if self.eat("{") => self.block(true),
@@ -599,20 +644,26 @@ impl Parser {
                 "action execution is only legal inside an action block",
             )),
             "\\" => {
-                let (params, types) = self.parameters()?;
-                if types.iter().any(Option::is_some) {
-                    return self.err("typed lambda parameters are not implemented");
-                }
+                let (params, types) = if self.peek() == "(" {
+                    self.parameters()?
+                } else {
+                    (vec![self.ident()?], vec![None])
+                };
                 self.expect("->")?;
                 self.scopes
                     .push(params.iter().map(|p| (p.clone(), Binding::Value)).collect());
                 let out = self.expr(false);
                 self.scopes.pop();
-                Ok(Expr::Lambda(params, Box::new(out?)))
+                let body = Box::new(out?);
+                if types.iter().any(Option::is_some) {
+                    Ok(Expr::TypedLambda(params, types, body))
+                } else {
+                    Ok(Expr::Lambda(params, body))
+                }
             }
-            "?" => {
+            "?" | "?{" => {
                 let mut pairs = Vec::new();
-                if self.eat("{") {
+                if t.text == "?{" || self.eat("{") {
                     while !self.eat("_") {
                         let c = self.expr(effect)?;
                         self.expect(":")?;
@@ -713,6 +764,10 @@ impl Parser {
     }
     fn record(&mut self, name: String, effect: bool) -> PResult<Expr> {
         self.expect("{")?;
+        self.record_fields(effect)
+            .map(|f| Expr::NamedRecord(name, f))
+    }
+    fn record_fields(&mut self, effect: bool) -> PResult<Vec<(String, Expr)>> {
         let mut fields = Vec::new();
         let mut seen = HashSet::new();
         while !self.eat("}") {
@@ -724,7 +779,25 @@ impl Parser {
             fields.push((n, self.expr(effect)?));
             self.expect(";")?;
         }
-        Ok(Expr::NamedRecord(name, fields))
+        Ok(fields)
+    }
+    fn pipeline(&mut self, effect: bool) -> PResult<Expr> {
+        let mut stages = vec![self.expr(effect)?];
+        self.expect(";")?;
+        self.scopes
+            .push(HashMap::from([("$".to_owned(), Binding::Value)]));
+        let tail = (|| -> PResult<()> {
+            loop {
+                stages.push(self.expr(effect)?);
+                if self.eat("}") {
+                    return Ok(());
+                }
+                self.expect(";")?;
+            }
+        })();
+        self.scopes.pop();
+        tail?;
+        Ok(Expr::Pipeline(stages))
     }
     fn call(&mut self, n: String, arity: usize, effect: bool) -> PResult<Expr> {
         let mut args = Vec::with_capacity(arity);
@@ -788,7 +861,7 @@ fn module_items(path: &str) -> Option<&'static [(&'static str, usize)]> {
             ("write_csv", 2),
         ]),
         "csv" => Some(&[("read", 1), ("write", 2)]),
-        "table" => Some(&[("agg", 3)]),
+        "df" | "table" => Some(&[("agg", 3), ("extend", 2)]),
         "statistics" | "stats" => {
             Some(&[("avg", 1), ("mean", 1), ("pct", 2), ("sd", 1), ("cor", 2)])
         }
@@ -843,6 +916,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn entry_start_identifies_opening_bang_after_declarations() {
+        let source = "x := 2; -- explanatory comment\n    !{ x };";
+        assert_eq!(parse(source).unwrap().entry_start, source.find("!{"));
+        assert_eq!(parse("x := 2;").unwrap().entry_start, None);
+        assert_eq!(parse("! { (); };").unwrap().entry_start, Some(0));
+    }
+
+    #[test]
     fn arity_missing_surplus_and_strict_prefix() {
         assert!(parse("p(x,y:n):n := + x y; n := p 2 3;").is_ok());
         for bad in [
@@ -887,5 +968,70 @@ mod tests {
         assert!(parse(">> (f); f(x:q) := * x x;").is_err());
         assert!(parse("x := ? { 1b : 1; };").is_err());
         assert!(parse("x := {. x:=3; };").is_err());
+    }
+
+    #[test]
+    fn aesthetic_core_forms_parse_with_lexical_pipeline_scope() {
+        let p = parse(
+            r#"<< csv;
+                          << "lib/df.flx" : frame;
+                          a := ?{ 1b : .{ x := 7; }; _ : .{ x := 8; }; };
+                          p := |{ 2; |{ $; + $ 1 }; * $ 3 };
+                          q := \x -> + x 1;
+                          r := \(x,y:q) -> + x y;
+                          s := frame.extend &rev [1 2];
+                          !{ ! csv.write "out.csv" []; };
+                       "#,
+        )
+        .unwrap();
+        assert_eq!(p.imports, vec!["csv", "df"]);
+        assert!(matches!(&p.defs[1], Stmt::Def { body: Expr::Pipeline(es), .. } if es.len()==3));
+        assert!(matches!(
+            &p.defs[2],
+            Stmt::Def {
+                body: Expr::Lambda(..),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &p.defs[3],
+            Stmt::Def {
+                body: Expr::TypedLambda(..),
+                ..
+            }
+        ));
+        assert!(matches!(&p.defs[4], Stmt::Def { body: Expr::Call(n,..), .. } if n=="df.extend"));
+        let Stmt::Def {
+            body: Expr::Cases(rows, _),
+            ..
+        } = &p.defs[0]
+        else {
+            panic!()
+        };
+        assert!(matches!(&rows[0].1, Expr::Record(_)));
+    }
+
+    #[test]
+    fn new_forms_reject_missing_operands_and_illegal_stage_binding() {
+        for s in [
+            "v := $;",
+            "v := |{ $; 1 };",
+            "v := |{ 1 };",
+            "v := |{ 1; };",
+            "v := |{ 1; $; };",
+            "v := |{ 1; + $ };",
+            "v := |{ 1; + $ 2 3 };",
+            "v := take 2;",
+            "v := drop 2 [1] [2];",
+            "v := slice 1 [2];",
+            "v := .{ a:=2; a:=3; };",
+            "v := {. a:=2; };",
+            r"v := \(x:q,y) -> x;",
+            "<< io; << \"lib/io.flx\";",
+            "<< \"lib/bad-name.flx\";",
+        ] {
+            assert!(parse(s).is_err(), "unexpected acceptance: {s}");
+        }
+        assert!(parse("take(n:n):n := n; y := take 2;").is_ok());
     }
 }

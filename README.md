@@ -8,7 +8,7 @@ stable language release.
 
 ```flux
 << "io" : io;
-sq(x:n) := * x x;
+sq(x:z) := * x x;
 
 !{
     x := .. 1 10;
@@ -26,13 +26,17 @@ cargo test --locked
 cargo run -- examples/permutation.flx
 cargo run -- examples/observations.flx
 cargo run -- examples/csv-grid.flx
+cargo run -- examples/pipeline.flx
+cargo run -- examples/monitoring.flx
 cargo run -- check examples/observations.flx
 cargo run -- fmt examples/observations.flx
 cargo run --
 ```
 
 `cargo install --path .` installs `flux`. The interactive shell accepts
-single-line declarations or expressions and exits with `:q`. The early
+single-line declarations or expressions. Try `:type`, `:schema`, `:history`,
+`:load`, or `:help`, and exit with `:quit`. The monitoring example refuses to
+overwrite an existing `summary.csv`. The early
 formatter writes to stdout, normalizes line endings and removes trailing
 whitespace, and checks that the token stream is unchanged.
 
@@ -42,8 +46,9 @@ whitespace, and checks that the token stream is unchanged.
 - [Rust implementation notes and roadmap](docs/implementation.md)
 - [Draft 0.2 baseline, preserved verbatim](docs/draft-0.2.md)
 - [Executable examples](examples/README.md)
+- [Performance review and benchmarks](docs/performance.md)
 
-The language design is broader than the prototype. Full type inference, row
-polymorphism, typed error recovery, schema-directed adapters and optimized
-columnar execution remain future work. See the implementation notes for the
+The language design is broader than the prototype. The prototype includes eager pipelines, closed structural records, and typed CSV.
+Full type inference, open row polymorphism, typed error recovery, and a columnar
+engine remain future work. See the implementation notes for the
 prototype's support boundaries.
