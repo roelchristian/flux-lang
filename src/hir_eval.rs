@@ -2852,6 +2852,49 @@ mod tests {
     }
 
     #[test]
+    fn tacit_lowering_equivalents_keep_polymorphism_and_numeric_evidence() {
+        let ir = compile(
+            r#"
+            square := \x -> @@ &* (x,x);
+            square_field := \x -> @@ &* (@ &.value x,@ &.value x);
+            field := \x -> @ &.value (@ &.inner x);
+            vector_square:[n]->[n] := \x -> @@ &* (x,x);
+            curried := \x -> \y -> @@ &+ (x,y);
+            !{
+                (@ square 3n, @ square 0.5q,
+                 @ square_field .{ value:=3n; text:="ignored"; },
+                 @ square_field .{ value:=0.5q; tag:=1b; },
+                 @ field .{ inner:=.{value:="text"; extra:=1n;}; },
+                 @ vector_square [2n 3n],
+                 @@ curried (2n,3n), @@ curried (0.25q,0.5q))
+            };
+        "#,
+        );
+        assert_eq!(
+            view_entry(&ir).unwrap().value,
+            "(9, 1/4, 9, 1/4, \"text\", [4 9], 5, 3/4)"
+        );
+    }
+
+    #[test]
+    fn tacit_fork_lowering_evaluates_the_left_branch_first() {
+        let ir = compile(
+            r#"
+            left(x:n):n := - x 10n;
+            right(x:n):n := // x 0n;
+            both := \x -> @@ &+ (@ &left x,@ &right x);
+            !{ @ both 1n };
+        "#,
+        );
+        let err = view_entry(&ir).err().unwrap();
+        assert!(
+            err.message.contains("natural subtraction underflow"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
     fn result_combinators_keep_first_failure_and_failure_provenance() {
         let source = r#"
             << "res";

@@ -714,10 +714,116 @@ fn close(s: &str) -> Option<&'static str> {
     match s {
         "(" => Some(")"),
         "[" | "#[" => Some("]"),
-        "{" | "!{" | "#{" | "{." | "?{" | ".{" | "|{" | "^{" => Some("}"),
+        "{" | "!{" | "#{" | "{." | "?{" | ".{" | "|{" | "^{" | "&{" => Some("}"),
         _ => None,
     }
 }
+/// A REPL submission needs more input if it ends inside matched delimiter
+/// prefixes. Bad tokens and mismatched closing signs go to normal diagnostics.
+pub fn needs_continuation(source: &str) -> bool {
+    let Ok(tokens) = lex(source) else {
+        return false;
+    };
+    let mut stack = Vec::new();
+    for token in tokens {
+        if let Some(expected) = close(&token.text) {
+            stack.push(expected);
+        } else if matches!(token.text.as_str(), ")" | "]" | "}")
+            && stack.pop() != Some(token.text.as_str())
+        {
+            return false;
+        }
+    }
+    !stack.is_empty()
+}
+
+// Lowered binders cannot collide with a bare identifier, module link or
+// pipeline binding. Every synthetic lambda owns its own resolver scope.
+const TACIT_INPUT: &str = "\0tacit-input";
+const TACIT_DEPTH_LIMIT: usize = 64;
+
+struct Tacit {
+    kind: TacitKind,
+    span: Range<usize>,
+}
+enum TacitKind {
+    Identity,
+    Reference(String),
+    Value(String),
+    Compose(Box<Tacit>, Box<Tacit>),
+    Fork(Box<Tacit>, Box<Tacit>, Box<Tacit>),
+    Hook(Box<Tacit>, Box<Tacit>),
+}
+
+fn originated(expr: Expr, span: Option<Range<usize>>, origins: &mut Vec<Origin>) -> Expr {
+    origins.push(Origin::new(&expr, span));
+    expr
+}
+
+fn tacit_input(origins: &mut Vec<Origin>, span: Option<Range<usize>>) -> Expr {
+    originated(Expr::Name(TACIT_INPUT.into()), span, origins)
+}
+
+fn tacit_value(tacit: Tacit, origins: &mut Vec<Origin>, record_root: bool) -> Expr {
+    let span = tacit.span.clone();
+    let expr = match tacit.kind {
+        TacitKind::Reference(name) => Expr::Ref(name),
+        kind => {
+            let body = tacit_call(
+                Tacit {
+                    kind,
+                    span: span.clone(),
+                },
+                origins,
+            );
+            Expr::Lambda(vec![TACIT_INPUT.into()], Box::new(body))
+        }
+    };
+    if record_root {
+        originated(expr, Some(span), origins)
+    } else {
+        // Parser::expr will record the span including the outside delimiters.
+        expr
+    }
+}
+
+fn tacit_call(tacit: Tacit, origins: &mut Vec<Origin>) -> Expr {
+    let Tacit { kind, span } = tacit;
+    let body = match kind {
+        TacitKind::Identity => return tacit_input(origins, Some(span)),
+        atom @ (TacitKind::Reference(_) | TacitKind::Value(_)) => {
+            let op = match atom {
+                TacitKind::Reference(name) => Expr::Ref(name),
+                TacitKind::Value(name) => Expr::Name(name),
+                _ => unreachable!(),
+            };
+            let op = originated(op, Some(span.clone()), origins);
+            let input = tacit_input(origins, None);
+            Expr::Call("@".into(), vec![op, input])
+        }
+        TacitKind::Compose(g, h) => {
+            let g = tacit_value(*g, origins, true);
+            let h = tacit_call(*h, origins);
+            Expr::Call("@".into(), vec![g, h])
+        }
+        TacitKind::Fork(f, g, h) => {
+            let f = tacit_value(*f, origins, true);
+            let g = tacit_call(*g, origins);
+            let h = tacit_call(*h, origins);
+            let args = originated(Expr::Tuple(vec![g, h]), None, origins);
+            Expr::Call("@@".into(), vec![f, args])
+        }
+        TacitKind::Hook(f, h) => {
+            let f = tacit_value(*f, origins, true);
+            let input = tacit_input(origins, None);
+            let h = tacit_call(*h, origins);
+            let args = originated(Expr::Tuple(vec![input, h]), None, origins);
+            Expr::Call("@@".into(), vec![f, args])
+        }
+    };
+    originated(body, Some(span), origins)
+}
+
 impl Parser {
     fn at(&self, i: usize) -> &str {
         self.toks.get(i).map_or("", |t| t.text.as_str())
@@ -1421,6 +1527,78 @@ impl Parser {
         }
         r
     }
+    fn tacit(&mut self, level: usize) -> PResult<Tacit> {
+        if level >= TACIT_DEPTH_LIMIT || self.depth + level >= 256 {
+            return self.err("tacit expression depth limit exceeded");
+        }
+        let token = self.next()?;
+        let start = token.start;
+        let kind = match token.text.as_str() {
+            "." => TacitKind::Identity,
+            "(" => {
+                let inner = self.tacit(level + 1)?;
+                self.expect(")")?;
+                inner.kind
+            }
+            "@." | "@*" | "@?" => {
+                let (description, required) = match token.text.as_str() {
+                    "@." => ("composition requires two function operands", 2),
+                    "@*" => ("fork requires three function operands", 3),
+                    _ => ("hook requires two function operands", 2),
+                };
+                let operand = |parser: &mut Self| {
+                    if matches!(parser.peek(), "" | "}" | ")" | ";") {
+                        return Err(Error::new(start, description));
+                    }
+                    parser.tacit(level + 1).map(Box::new)
+                };
+                let first = operand(self)?;
+                let second = operand(self)?;
+                if required == 3 {
+                    TacitKind::Fork(first, second, operand(self)?)
+                } else if token.text == "@." {
+                    TacitKind::Compose(first, second)
+                } else {
+                    TacitKind::Hook(first, second)
+                }
+            }
+            "!" => {
+                return Err(Error::new(
+                    start,
+                    "effect execution is not a tacit function",
+                ))
+            }
+            "$" => {
+                return Err(Error::new(
+                    start,
+                    "pipeline placeholder is not tacit identity",
+                ))
+            }
+            "&" => {
+                return Err(Error::new(
+                    start,
+                    "use a bare callable or `.` inside a tacit block",
+                ))
+            }
+            atom => match self.lookup(atom) {
+                Some(Binding::Callable(n) | Binding::Constructor(n)) if n > 0 => {
+                    TacitKind::Reference(self.canonical(atom))
+                }
+                Some(Binding::Value) => TacitKind::Value(self.canonical(atom)),
+                _ => {
+                    return Err(Error::new(
+                        start,
+                        format!("expected tacit callable or `.`, found `{atom}`"),
+                    ))
+                }
+            },
+        };
+        Ok(Tacit {
+            kind,
+            span: start..self.toks[self.pos - 1].end,
+        })
+    }
+
     fn atom(&mut self, effect: bool) -> PResult<Expr> {
         let t = self.next()?;
         match t.text.as_str() {
@@ -1538,8 +1716,30 @@ impl Parser {
                 t.start,
                 "dictionary literals are not implemented",
             )),
+            "&{" => {
+                let tacit = self.tacit(0)?;
+                if !matches!(self.peek(), "" | "}" | ";") {
+                    return self.err("unexpected additional tacit operand; expected `}`");
+                }
+                self.expect("}")?;
+                Ok(tacit_value(tacit, &mut self.origins, false))
+            }
+            "@." | "@*" | "@?" | "." => Err(Error::new(
+                t.start,
+                format!("`{}` is only valid inside `&{{ ... }}`", t.text),
+            )),
             "&" => {
                 let n = self.next()?;
+                if n.text == "." && t.end == n.start {
+                    return Ok(tacit_value(
+                        Tacit {
+                            kind: TacitKind::Identity,
+                            span: n.start..n.end,
+                        },
+                        &mut self.origins,
+                        false,
+                    ));
+                }
                 if matches!(self.lookup(&n.text),Some(Binding::Callable(k)|Binding::Constructor(k)) if k>0)
                 {
                     Ok(Expr::Ref(self.canonical(&n.text)))
@@ -2201,5 +2401,64 @@ f(x:q^err^e):q := 0;";
         }
         assert!(parse(&format!("x := :d (+ {wide} 2);")).is_ok());
         assert!(parse(&format!("x := - {wide} 2;")).is_ok());
+    }
+
+    #[test]
+    fn tacit_lowering_hygiene_and_origin_alignment() {
+        let source = "identity := &.;\nvalue(x:z):z := x;\nmain := &{ @* + value (@? - .) };\n";
+        let p = parse(source).unwrap();
+        let Stmt::Def {
+            body: Expr::Lambda(params, _),
+            ..
+        } = &p.defs[2]
+        else {
+            panic!("expected an ordinary synthetic lambda");
+        };
+        assert!(params[0].starts_with('\0'));
+        let positions = p.expression_origins();
+        assert!(positions
+            .iter()
+            .any(|(_, span)| &source[span.clone()] == "&."));
+        assert!(positions.iter().any(
+            |(node, span)| matches!(node, Expr::Ref(name) if name == "value")
+                && &source[span.clone()] == "value"
+        ));
+        assert!(positions
+            .iter()
+            .any(|(_, span)| &source[span.clone()] == "(@? - .)"));
+        let p = parse("fnn(x,y:z):z := - x y; alias := &{ (fnn) };").unwrap();
+        assert!(matches!(&p.defs[1], Stmt::Def { body: Expr::Ref(name), .. } if name == "fnn"));
+    }
+
+    #[test]
+    fn tacit_rejects_missing_extra_and_outside_forms_with_bounded_depth() {
+        for source in [
+            "x := .;",
+            "x := @. . .;",
+            "x := @* + . .;",
+            "x := @? - .;",
+            "x := &{};",
+            "x := &{ . . };",
+            "x := &{ @. . };",
+            "x := &{ @* + . };",
+            "x := &{ @? - };",
+            "x := &{ $ };",
+            "x := &{ ! };",
+            "x := &{ 0 };",
+            "x := & .;",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+        let source = format!("f := &{{ {} . }};", "@. . ".repeat(300));
+        assert!(parse(&source).unwrap_err().message.contains("depth limit"));
+    }
+
+    #[test]
+    fn imports_after_tacit_delimiters_are_discovered() {
+        let text = "identity := &{ @. . . };\n<< \"./external.flx\" : ext;\n";
+        let imports = discover_imports(text, 71).unwrap();
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].start, text.find("<<").unwrap() + 71);
+        assert_eq!(imports[0].path, "./external.flx");
     }
 }
