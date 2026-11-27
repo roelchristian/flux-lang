@@ -1,0 +1,17 @@
+<< "df";
+
+reading :: { id:s; depth:?d; };
+
+!{
+    ^{
+        t := #[
+            reading { id := "shore"; depth := ?1 0.00d; }
+            reading { id := "channel"; depth := ?0; }
+            reading { id := "basin"; depth := ?1 2.50d; }
+        ];
+        --- Filtering and filling are separate choices; zero is not missing.
+        ^? ! print .id (df.dropna &.depth t);
+        ^? ! print (df.fill 9.99d (.depth t),df.present (.depth t));
+        ()
+    }
+};

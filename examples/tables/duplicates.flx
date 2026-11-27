@@ -1,0 +1,20 @@
+<< "df";
+
+sample :: { site:s; depth:d; };
+a := #[
+    sample { site := "bank"; depth := 0.50d; }
+    sample { site := "bank"; depth := 0.5d; }
+];
+b := #[
+    sample { site := "bank"; depth := 0.500d; }
+    sample { site := "pool"; depth := 1.25d; }
+];
+
+!{
+    ^{
+        --- Concatenation retains duplicates; set union keeps first occurrences.
+        ^? ! print (# (+: a b),# (df.distinct a),# (df.union a b));
+        ^? ! print .depth (df.union a b);
+        ()
+    }
+};

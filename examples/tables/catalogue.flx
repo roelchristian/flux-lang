@@ -1,0 +1,19 @@
+<< "csv";
+<< "df";
+
+err :: { | data csverr; | output ioerr; };
+entry :: { star:s; constellation:s; magnitude:?d; parallax_mas:?d; };
+
+!{
+    ^{
+        stars:#entry := ^= ! csv.read "examples/data/catalogue.csv" {
+            e : ^: data e;
+        };
+        known := df.dropna &.magnitude stars;
+        --- Each constellation key retains its source rows.
+        groups := =: &.constellation known;
+        lyra := .: "Lyra" groups;
+        ^= ! print (# stars,# known,# groups,lyra) { e : ^: output e; };
+        ()
+    }
+};
