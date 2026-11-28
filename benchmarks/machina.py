@@ -36,7 +36,7 @@ WARMUPS = 1
 # crashes. In particular, a killed or panicking process is never a limit pass.
 LIMIT_DIAGNOSTIC = re.compile(
     r"resource limit|array dimension exceeds|array element count exceeds|"
-    r"collection limit|(?:array |logical )?element (?:limit|budget)|"
+    r"collection limit|prototype range limit|(?:array |logical )?element (?:limit|budget)|"
     r"(?:tracked |working )?memory (?:limit|budget)|"
     r"(?:work|execution|runtime|evaluator|allocation|evaluation|fuel) "
     r"(?:limit|budget)(?: exhausted| exceeded)?|"

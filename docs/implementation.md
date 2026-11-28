@@ -154,8 +154,9 @@ Locked Rust 1.85 release builds of Drafts 0.17–0.19 were checked on
 Linux x86-64 (Xeon Platinum 8573C), pinned to one logical CPU.
 These are median elapsed milliseconds from seven alternating samples;
 the generic column is the same 0.19 binary with `FLUX_OPTIMIZE=0`.
-Samples include compilation and preparation. The host showed occasional
-scheduling outliers; this is not a kernel-only or cross-platform claim.
+Samples include checking and preparation. Timing varied (the optimized
+100k real sum ranged from 8.29 to 18.38 ms); this is not a kernel-only
+or cross-platform claim.
 
 | Workload | 0.17 | 0.18 | 0.19 | 0.19 generic |
 | --- | ---: | ---: | ---: | ---: |
@@ -179,6 +180,36 @@ RSS for the 100k real arithmetic workload was 22,788 → 13,480 KiB
 (18,476 KiB in generic mode). Dense integer setup itself regressed
 in this run. The scalar, static check and CSV medians changed little
 compared with the dense kernels.
+
+### Raised-budget runs
+
+These separate runs used three checked samples at each size. Both 0.19
+matrix modes used `FLUX_MAX_ELEMENTS=10000000`,
+`FLUX_MAX_WORK=5000000000` and `FLUX_MAX_MEMORY=2800000000` on
+the 64-bit test host. The older builds hit work limits at 128 and
+256 and range limits at 512 and 1,024. The table reports elapsed
+milliseconds; a cutoff is not a measured median.
+
+| Square matrix side | Optimized, strided | Optimized, contiguous | Generic, strided | Generic, contiguous |
+| ---: | ---: | ---: | ---: | ---: |
+| 128 | 5.67 | 6.25 | 124.45 | 119.80 |
+| 256 | 24.79 | 28.28 | 963.99 | 982.04 |
+| 512 | 166.09 | 180.80 | 8 s cutoff | 8 s cutoff |
+| 1,024 | 1,293.79 | 1,334.97 | 8 s cutoff | 8 s cutoff |
+
+At 1,024², optimized median peak RSS was 102,540 KiB (strided) and
+110,936 KiB (contiguous). To reproduce, use `--standard-matrices`
+with `--match '^matmul-'`, the three limits above as `--after-env`
+overrides, and `--runs 3 --timeout 8 --allow-limits --allow-timeouts`.
+
+The larger real-vector test used `FLUX_MAX_ELEMENTS=10000000`,
+`FLUX_MAX_WORK=300000000` and `FLUX_MAX_MEMORY=1300000000`.
+At 1M elements, optimized real arithmetic and sum took 95.58 and
+82.23 ms; at 10M, 1,214.32 and 1,192.75 ms. The 10M arithmetic
+run used 941,720 KiB median peak RSS, including input construction.
+Draft 0.18 hit its range limit; no large-vector generic ratio was
+measured. Sine and exponential were only measured at the smaller
+sizes above.
 
 Measurements are environment-specific; see the
 [Draft 0.9 comparison](https://github.com/roelchristian/flux-lang/pull/13)
