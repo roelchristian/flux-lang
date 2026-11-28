@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for the implemented Draft 0.11 language.
+This is the normative reference for the implemented Draft 0.12 language.
 Unless marked **Limited** or **Proposed**, the rules describe the behavior
 of the Rust reference interpreter. Limited features have the scope stated
 here. Proposed features are not available and do not reserve a design.
@@ -90,6 +90,7 @@ when the value has the wrong domain.
 | `n`, `z`, `q`, `d`, `r` | Natural, signed integer, exact rational, exact decimal, approximate real |
 | `b`, `c`, `s`, `()` | Boolean, Unicode scalar, string, unit |
 | `[a]`, `(a,b)` | Homogeneous sequence and heterogeneous tuple |
+| `array[a]` | Dense homogeneous array with checked dynamic shape |
 | `.{ field:a; }`, a declared type name | Structural record and nominal type |
 | `#row`, `#(a,b)`, `#.{ field:a; }` | Table of nominal, positional or structural rows |
 | `{k:v}` | Dictionary keyed by `k`, with values of type `v` |
@@ -277,9 +278,7 @@ must have precisely the input length.
 `.:` is one-based lookup for sequences and tables, or key lookup for
 dictionaries; a missing key, zero index or out-of-range index returns
 absence. Dictionaries can be obtained by grouping with `=:`; dictionary
-literal syntax is not executable. Nested sequences are available, but
-a separate multidimensional array type, rank and general broadcasting
-are proposed rather than implemented. See
+literal syntax is not executable. Nested sequences remain independent from dense arrays. See
 [functional collections](../examples/basics/collections.flx) and
 [descriptive statistics](../examples/statistics/descriptive.flx).
 
@@ -345,6 +344,46 @@ order. `sd X` returns optional approximate population standard deviation.
 These statistics return absence for empty input; none drops optional
 items silently. See [percentiles](../examples/statistics/percentiles.flx)
 and [descriptive statistics](../examples/statistics/descriptive.flx).
+
+## Dense arrays and indexed sequences
+
+An `array[a]` is a dense array of homogeneous elements with a checked
+dynamic shape. It is distinct from the ordinary sequence type `[a]`;
+a nested sequence can still have ragged rows. The name `array` is
+reserved as a built-in type constructor and takes exactly one type
+argument. Import `<< "arr";` to use the operations below.
+
+| Operation | Contract |
+| --- | --- |
+| `arr.reshape SHAPE ITEMS` | Make an array from `[n]` and `[a]`, with the same element count as the product of the dimensions. |
+| `arr.shape A`, `arr.ravel A` | Return the dimensions as `[n]` or elements as `[a]` in row-major order. |
+| `arr.at INDEX A` | Return the optional element at one-based coordinates. Wrong coordinate count, zero, and out-of-range coordinates return absence. |
+| `arr.map F A` | Apply a checked unary function to each element and retain the shape. |
+| `arr.zip F A B` | Apply a checked binary function to broadcast element pairs. Align trailing axes; a missing axis counts as one. Each pair of lengths must be equal or include a singleton. |
+| `arr.outer F A B` | Apply F to each pair in A-major then B order; the output dimensions are A's followed by B's. |
+| `arr.rankmap K F A` | Pass each trailing rank-K cell as an array to F and collect its results in the leading frame shape. K must not exceed A's rank. |
+| `arr.scan F SEED A` | Scan each last-axis row with F applied to the accumulator and next element. Include each seed, increasing the last dimension by one. Rank-zero input is invalid. |
+| `arr.windows W XS` | Return all full, overlapping windows of positive natural width W as a nested sequence, in input order. A wide window produces no rows. |
+| `arr.select IS XS` | Gather sequence items by one-based natural indices, allowing duplicates and reordering. Return absence if any index is invalid. |
+| `arr.grade KEY XS` | Return the stable ascending permutation of one-based indices; evaluate KEY once per item. Key values must satisfy `ord`. |
+| `arr.permute IS XS` | Reorder a sequence with a complete permutation; reject missing, repeated or invalid positions. |
+
+Rank-zero shape `[]` contains one scalar cell. Any dimension of zero makes
+the element count zero without discarding other dimensions. A leading
+zero frame means rank mapping performs no callbacks; a zero-width
+trailing cell still supplies an empty array for each existing frame
+position. An empty last scan axis yields one seed per frame position.
+Array shapes and permutation validity are checked before the corresponding
+output is built. Reference limits are rank 16 and at most 100,000 per
+dimension or materialized element count. An indexed sequence operation
+may reject a materialized result exceeding the same bound.
+
+Array operations are explicit: ordinary arithmetic does not implicitly
+lift to `array[a]`, and static types do not encode dimensions. Callbacks
+have ordinary rank-one types and cannot implicitly execute actions.
+Arrays are not equality or hash keys in this draft; compare their shape
+and raveled data explicitly when the element type supports equality.
+See the [matrix and indexing example](../examples/mathematics/arrays.flx).
 
 ## Relational operations
 
@@ -610,5 +649,5 @@ digits or scale, then recovers explicitly from a duplicate `id` field.
 
 ## Proposed and unimplemented
 
-Distinct ranked arrays, a package registry,
-a columnar engine and native compilation are not provided.
+Static shape-indexed types, a package registry, a columnar execution
+engine and native compilation are not provided.

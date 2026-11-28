@@ -20,6 +20,8 @@ use std::{
     io::{BufRead, Write},
     rc::Rc,
 };
+mod array_sequences012;
+mod arrays012;
 mod collections042;
 mod combinators05;
 mod decimal05;
@@ -552,6 +554,7 @@ enum V {
     Unit,
     Tuple(Rc<[V]>),
     Sequence(Rc<[V]>),
+    Dense(Rc<arrays012::Dense>),
     Record(Rc<[(Box<str>, V)]>),
     Table(Rc<[V]>, Rc<TableSchema>),
     Dict(Rc<[(V, V)]>),
@@ -676,6 +679,7 @@ fn repr(v: &V) -> String {
         V::Char(c) => c.to_string(),
         V::Unit => "()".into(),
         V::Tuple(xs) => format!("({})", xs.iter().map(repr).collect::<Vec<_>>().join(", ")),
+        V::Dense(value) => value.render(repr),
         V::Sequence(xs) => format!("[{}]", xs.iter().map(repr).collect::<Vec<_>>().join(" ")),
         V::Record(fs) => format!(
             "{{{}}}",
@@ -779,6 +783,7 @@ fn same_table_layout(a: &TableSchema, b: &TableSchema) -> bool {
 }
 fn equal(a: &V, b: &V) -> bool {
     match (a, b) {
+        (V::Dense(a), V::Dense(b)) => a.equal(b),
         (V::Exact(a), V::Exact(b)) => a.n == b.n && a.d == b.d,
         (V::Exact(_) | V::Wide(_), V::Exact(_) | V::Wide(_)) => {
             order(a, b).is_ok_and(|v| v.is_eq())
@@ -912,6 +917,25 @@ enum Key {
     None,
     Some(Box<Key>),
     Tuple(Box<[Key]>),
+}
+fn array_op(op: CoreOp) -> bool {
+    use CoreOp::*;
+    matches!(
+        op,
+        ArrayReshape
+            | ArrayShape
+            | ArrayRavel
+            | ArrayAt
+            | ArrayMap
+            | ArrayZip
+            | ArrayOuter
+            | ArrayRankMap
+            | ArrayScan
+            | ArrayWindows
+            | ArraySelect
+            | ArrayGrade
+            | ArrayPermute
+    )
 }
 fn relation_op(op: CoreOp) -> bool {
     use CoreOp::*;
@@ -1619,7 +1643,13 @@ impl Eval<'_> {
                             _ => &n.ty,
                         };
                         let ty = self.type_at(ty, env);
-                        if joins06::handles(*op) || relation_op(*op) {
+                        if array_op(*op) {
+                            let types = ids
+                                .iter()
+                                .map(|id| self.type_at(&p.node(*id).ty, env))
+                                .collect::<Vec<_>>();
+                            self.array(*op, args, &types, &ty, s)?
+                        } else if joins06::handles(*op) || relation_op(*op) {
                             let types = ids
                                 .iter()
                                 .map(|id| self.type_at(&p.node(*id).ty, env))
@@ -1992,6 +2022,9 @@ impl Eval<'_> {
             }
             Function::Core(op, ty, schema) => {
                 let out = out.as_ref().unwrap_or_else(|| result_type(&ty, arity));
+                if array_op(op) {
+                    return self.array(op, f.bound, &f.bound_types, out, span);
+                }
                 if joins06::handles(op) || relation_op(op) {
                     return self.relation(op, f.bound, &f.bound_types, out, schema.as_ref(), span);
                 }
@@ -2073,6 +2106,28 @@ impl Eval<'_> {
         }
         Ok(groups)
     }
+    fn array(
+        &mut self,
+        op: CoreOp,
+        args: Vec<V>,
+        types: &[Type],
+        output: &Type,
+        span: Span,
+    ) -> R<V> {
+        self.tick(span)?;
+        if args.len() != operation_arity(op, span)? || types.len() != args.len() {
+            return Err(invariant(span, "invalid checked array arity"));
+        }
+        arrays012::apply(op, &args, types, output, self, span)
+            .or_else(|| array_sequences012::apply(op, &args, types, self, span))
+            .unwrap_or_else(|| {
+                Err(invariant(
+                    span,
+                    "checked array operation has no implementation",
+                ))
+            })
+    }
+
     fn relation(
         &mut self,
         op: CoreOp,
@@ -2160,6 +2215,13 @@ impl Eval<'_> {
                     span,
                     "checked collection operation has no implementation",
                 ))
+            }
+            ArrayReshape | ArrayShape | ArrayRavel | ArrayAt | ArrayMap | ArrayZip | ArrayOuter
+            | ArrayRankMap | ArrayScan | ArrayWindows | ArraySelect | ArrayGrade | ArrayPermute => {
+                return Err(invariant(
+                    span,
+                    "checked array operation requires operand evidence",
+                ));
             }
             StructuralRows => match a() {
                 value @ V::Table(_, _) => return Ok(value),
@@ -2851,6 +2913,7 @@ pub(crate) fn view_with_host_prevalidated(
                 "({})",
                 xs.iter().map(inspect).collect::<Vec<_>>().join(", ")
             ),
+            V::Dense(value) => value.render(inspect),
             V::Sequence(xs) => {
                 format!("[{}]", xs.iter().map(inspect).collect::<Vec<_>>().join(" "))
             }

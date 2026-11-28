@@ -745,7 +745,7 @@ fn parser_for(
             .iter()
             .map(|v| (v.name.to_owned(), Binding::Constructor(v.payload.len())))
             .collect(),
-        native_type_names: HashSet::from(["ioerr".to_owned()]),
+        native_type_names: HashSet::from(["ioerr".to_owned(), "array".to_owned()]),
         aliases: HashMap::new(),
         source_interfaces: imports.to_vec(),
         links: HashMap::new(),
@@ -1169,6 +1169,12 @@ impl Parser {
             if self.def_at(i) {
                 let type_head = self.type_head(i);
                 let is_type = type_head.is_some();
+                if is_type && n == "array" {
+                    return Err(Error::new(
+                        self.toks[i].start,
+                        "`array` is a built-in type name and cannot be redeclared",
+                    ));
+                }
                 let is_sum =
                     type_head.is_some_and(|h| self.at(h + 1) == "{" && self.at(h + 2) == "|");
                 let head = type_head.unwrap_or(i + 1);
@@ -2988,5 +2994,31 @@ f(x:q^err^e):q := 0;";
         assert!(matches!(&fields[0].1.kind, Named(name) if name == &linked));
         assert_eq!(row, "'r");
         assert!(ty.span.start >= 200);
+    }
+
+    #[test]
+    fn built_in_array_type_needs_no_import_even_in_modules() {
+        let p = parse_module(
+            ">> (keep); keep(a:array['a]):array['a] := a; array := 1z;",
+            0,
+            Some("test"),
+            &[],
+        )
+        .unwrap();
+        let Stmt::Def {
+            result_type: Some(ty),
+            ..
+        } = &p.defs[0]
+        else {
+            panic!("expected function")
+        };
+        assert!(
+            matches!(&ty.kind, TypeAnnotationKind::NamedApply(name, args)
+            if name == "array" && args.len() == 1)
+        );
+        assert!(parse("array := 1z;").is_ok());
+        for bad in ["array :: { x:q; };", "array['a] :: { | leaf 'a; };"] {
+            assert!(parse(bad).unwrap_err().message.contains("built-in type"));
+        }
     }
 }

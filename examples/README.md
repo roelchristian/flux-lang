@@ -94,3 +94,5 @@ no-overwrite behavior. Libraries are verified through their consumers, and an
 unlisted script or an unused library fails the inventory check.
 
 [Open rows](tables/open-rows.flx) shows a schema-preserving table extension.
+
+[Dense arrays](mathematics/arrays.flx) applies broadcasting, rank mapping and scans to a measurement matrix.

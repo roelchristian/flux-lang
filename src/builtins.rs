@@ -180,6 +180,136 @@ macro_rules! internal {
 
 /// Registry of exact names; selectors such as .field are generated forms, not entries.
 pub static REGISTRY: &[Builtin] = &[
+    internal!(
+        Some(CoreOp::ArrayReshape),
+        "arr.reshape",
+        2,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayShape),
+        "arr.shape",
+        1,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayRavel),
+        "arr.ravel",
+        1,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayAt),
+        "arr.at",
+        2,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayMap),
+        "arr.map",
+        2,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayZip),
+        "arr.zip",
+        3,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayOuter),
+        "arr.outer",
+        3,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayRankMap),
+        "arr.rankmap",
+        3,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayScan),
+        "arr.scan",
+        3,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayWindows),
+        "arr.windows",
+        2,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArraySelect),
+        "arr.select",
+        2,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayGrade),
+        "arr.grade",
+        2,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
+    internal!(
+        Some(CoreOp::ArrayPermute),
+        "arr.permute",
+        2,
+        Household,
+        Collection,
+        Pure,
+        Runtime,
+        &[]
+    ),
     pure!(Some(CoreOp::Add), "+", 2, Arithmetic, Elementwise),
     pure!(Some(CoreOp::Sub), "-", 2, Arithmetic, Elementwise),
     pure!(Some(CoreOp::Mul), "*", 2, Arithmetic, Elementwise),
@@ -932,8 +1062,8 @@ pub static REGISTRY: &[Builtin] = &[
 ];
 
 // Indexed by the operation discriminant; aliases share the same execution contract.
-static OPERATIONS: LazyLock<[Option<&'static Builtin>; 128]> = LazyLock::new(|| {
-    let mut operations: [Option<&'static Builtin>; 128] = [None; 128];
+static OPERATIONS: LazyLock<[Option<&'static Builtin>; 256]> = LazyLock::new(|| {
+    let mut operations: [Option<&'static Builtin>; 256] = [None; 256];
     for meta in REGISTRY {
         if let Some(op) = meta.op {
             let slot = &mut operations[op as usize];
@@ -1034,6 +1164,21 @@ const STR: &[Member] = &[
 const RX: &[Member] = &[("find", "rx.find")];
 const DT: &[Member] = &[("days", "dt.days"), ("date", "dt.date")];
 const JSON: &[Member] = &[("encode", "json.encode"), ("decode", "json.decode")];
+const ARR: &[Member] = &[
+    ("reshape", "arr.reshape"),
+    ("shape", "arr.shape"),
+    ("ravel", "arr.ravel"),
+    ("at", "arr.at"),
+    ("map", "arr.map"),
+    ("zip", "arr.zip"),
+    ("outer", "arr.outer"),
+    ("rankmap", "arr.rankmap"),
+    ("scan", "arr.scan"),
+    ("windows", "arr.windows"),
+    ("select", "arr.select"),
+    ("grade", "arr.grade"),
+    ("permute", "arr.permute"),
+];
 
 pub fn module_items(path: &str) -> Option<impl Iterator<Item = (&'static str, usize)>> {
     let members = match path {
@@ -1050,6 +1195,7 @@ pub fn module_items(path: &str) -> Option<impl Iterator<Item = (&'static str, us
         "rx" => RX,
         "dt" => DT,
         "json" => JSON,
+        "arr" => ARR,
 
         _ => return None,
     };
@@ -1117,6 +1263,7 @@ mod tests {
             "rx",
             "dt",
             "json",
+            "arr",
         ] {
             let mut names = HashSet::new();
             for (name, arity) in module_items(module).unwrap() {

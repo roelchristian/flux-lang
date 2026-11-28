@@ -60,8 +60,10 @@ pub struct Resolution {
 }
 
 impl Resolution {
-    /// Stable metadata can be reused with an exact clone/reparse. Only the
-    /// adapter translating borrowed AST nodes needs reindexing.
+    /// Stable metadata can be reused with an exact clone or a compatible
+    /// reparse. Declaration and pattern positions are still part of the
+    /// equality guard; offset-shifting edits require fresh resolution.
+    /// Only the borrowed-expression adapter is reindexed here.
     pub(crate) fn for_program<'a>(&'a self, program: &Program) -> Option<Cow<'a, Self>> {
         if !self.program_shape.as_ref()?.matches(program) {
             return None;

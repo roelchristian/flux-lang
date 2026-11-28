@@ -30,7 +30,7 @@ pub enum Type {
     Fun(Box<Type>, Box<Type>),
     Table(Box<Type>),
     Nominal(NominalId),
-    /// A saturated application of a parameterized nominal sum.
+    /// A saturated application of a parameterized nominal sum or built-in array.
     Applied(NominalId, Vec<Type>),
     Record(Row),
 }
@@ -78,6 +78,30 @@ impl Scheme {
             ty,
             constraints: vec![],
             row_lacks: BTreeMap::new(),
+        }
+    }
+}
+
+impl Type {
+    /// Canonical rank-independent dense array type.
+    pub fn dense_array(element: Type) -> Self {
+        Self::Applied(
+            NominalId {
+                id: usize::MAX,
+                name: "array".into(),
+            },
+            vec![element],
+        )
+    }
+
+    pub fn array_element(&self) -> Option<&Type> {
+        match self {
+            Self::Applied(id, args)
+                if id.id == usize::MAX && id.name == "array" && args.len() == 1 =>
+            {
+                args.first()
+            }
+            _ => None,
         }
     }
 }

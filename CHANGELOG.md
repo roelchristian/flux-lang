@@ -5,6 +5,11 @@ This log summarizes material changes. Earlier text and design revisions
 are available through [the repository's commit history](https://github.com/roelchristian/flux-lang/commits/main/);
 obsolete specifications are not kept as duplicate files.
 
+## Draft 0.12
+
+- Add checked dense arrays, explicit broadcasting and rank mapping,
+  last-axis scans, windows, indexed selection, and stable grade/permutation.
+
 ## Draft 0.11
 
 - Add explicit structural row quantification and schema-preserving

@@ -1,4 +1,5 @@
 //! Rank-one inference for the Draft 0.4 checked subset.
+mod arrays;
 mod matches;
 
 use crate::{
@@ -484,6 +485,9 @@ impl Engine<'_> {
                 TypePrimitive::C => Prim::C,
                 TypePrimitive::Unit => Prim::Unit,
             }),
+            K::Named(name) if name == "array" => {
+                return Err(self.err("type array expects 1 type argument"))
+            }
             K::Named(name) => {
                 let id = self
                     .schema_id(name)
@@ -493,6 +497,15 @@ impl Engine<'_> {
                     return Err(self.err(format!("type {name} expects {arity} type arguments")));
                 }
                 Type::Nominal(id)
+            }
+            K::NamedApply(name, args) if name == "array" => {
+                if args.len() != 1 {
+                    return Err(self.err(format!(
+                        "type array expects 1 type argument, found {}",
+                        args.len()
+                    )));
+                }
+                Type::dense_array(self.annotation(&args[0], vars)?)
             }
             K::NamedApply(name, args) => {
                 let id = self
@@ -2068,6 +2081,9 @@ impl Engine<'_> {
             self.saw_result = true;
         }
         let result = match n {
+            op if op.starts_with("arr.") && spec.is_some() => {
+                self.array_call(env, op, args, want, effect)?
+            }
             "*=" | "*?" | "df.semi" | "df.anti" | "df.union" | "df.distinct" | "df.select"
             | "df.dropna" | "df.fill" | "df.present" => {
                 self.relational_call(env, n, args, want, effect)?
@@ -2485,6 +2501,7 @@ impl Engine<'_> {
             }
         }
         Ok(match n {
+            op if op.starts_with("arr.") && arity.is_some() => self.array_types(op, xs)?,
             "*=" | "*?" | "df.semi" | "df.anti" | "df.union" | "df.distinct" | "df.select"
             | "df.dropna" | "df.fill" | "df.present" => self.relational_types(n, xs, want)?,
             "df.structural" => {

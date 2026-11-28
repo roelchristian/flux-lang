@@ -18,6 +18,8 @@ for notable changes and use Git for earlier revisions.
    and error scopes. Admission checks HIR before it reaches the evaluator.
    The compiler keeps one borrowed tree; separately exposed passes also
    verify that externally reused metadata describes the same syntax.
+   Reuse requires the same declaration and pattern offsets; edits that
+   move them require fresh resolution even when expression IDs agree.
 5. `src/hir_eval.rs` executes checked HIR. It uses bounded-resource
    arbitrary-precision exact arithmetic, exact scaled decimals and
    explicit approximate operations. Runtime I/O is attached to suspended
