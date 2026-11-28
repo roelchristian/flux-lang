@@ -29,7 +29,9 @@ mod display;
 mod joins06;
 mod json05;
 mod library05;
+mod machina_kernels;
 mod math;
+mod numerical_plan;
 mod reduce014;
 mod relations06;
 mod wide05;
@@ -37,6 +39,8 @@ use display::{inspect, repr};
 use wide05::Wide;
 mod operations041;
 pub use crate::csv::{FsInput, OpenedInput, RuntimeInput};
+mod resources;
+pub use resources::{ResourcePolicy, RuntimeOptions};
 
 type R<T> = Result<T, Control>;
 type NumericResult<T> = Result<T, &'static str>;
@@ -418,7 +422,7 @@ fn parse_exact_value(raw: &str, d: Domain) -> NumericResult<V> {
         _ => Prim::Q,
     });
     match parse_inline_exact(raw, &ty) {
-        Ok(n) => return Ok(V::Exact(n)),
+        Ok(n) => return wide05::guard_inline(n).map(V::Exact),
         Err(e) if e != OVERFLOW => return Err(e),
         Err(_) => {}
     }
@@ -428,7 +432,7 @@ fn parse_exact_value(raw: &str, d: Domain) -> NumericResult<V> {
         }
         let b = b.trim_end_matches('0');
         let decimal_digits = u32::try_from(b.len()).map_err(|_| wide05::RESOURCE)?;
-        if decimal_digits > 315_652 {
+        if decimal_digits as usize > wide05::decimal_digit_limit() {
             return Err(wide05::RESOURCE);
         }
         let num = wide05::parse_int(&format!("{a}{b}"))?;
@@ -459,7 +463,7 @@ fn exact_binary(op: CoreOp, a: &V, b: &V, d: Domain) -> NumericResult<V> {
     }
     if let (V::Exact(a), V::Exact(b)) = (a, b) {
         match a.compute(op, *b, d) {
-            Ok(v) => return Ok(V::Exact(v)),
+            Ok(v) => return wide05::guard_inline(v).map(V::Exact),
             Err(e) if e != OVERFLOW => return Err(e),
             Err(_) => {}
         }
@@ -476,7 +480,7 @@ fn real_of(v: &V) -> NumericResult<f64> {
 fn to_exact(v: &V) -> NumericResult<V> {
     match v {
         V::Real(x) => match Exact::from_real(*x) {
-            Ok(v) => Ok(V::Exact(v)),
+            Ok(v) => wide05::guard_inline(v).map(V::Exact),
             Err(e) if e != OVERFLOW => Err(e),
             Err(_) => wide05::ratio_value(wide05::from_real(*x)?, Domain::Rational),
         },
@@ -508,52 +512,87 @@ fn exact_unary(op: CoreOp, v: &V, d: Domain) -> NumericResult<V> {
             n.n.checked_neg()
         };
         if let Some(i) = num {
-            return Ok(V::Exact(Exact {
+            return wide05::guard_inline(Exact {
                 n: i,
                 d: n.d,
                 domain: d,
-            }));
+            })
+            .map(V::Exact);
         }
     }
     let v = wide05::ratio(v)?;
     wide05::ratio_value(if op == CoreOp::Abs { v.abs() } else { -v }, d)
 }
+#[cfg(test)]
 fn range(lo: &V, hi: &V, d: Domain) -> NumericResult<V> {
-    let too_big = "prototype range limit (100000 items) exceeded";
-    let out: Vec<V> = if let (V::Exact(lo), V::Exact(hi)) = (lo, hi) {
+    range_with_fuel(lo, hi, d, None)
+}
+
+fn subtract_work(fuel: &mut usize, units: usize) -> NumericResult<()> {
+    *fuel = fuel
+        .checked_sub(units)
+        .ok_or("prototype execution limit exhausted")?;
+    Ok(())
+}
+
+fn range_with_fuel(lo: &V, hi: &V, d: Domain, fuel: Option<&mut usize>) -> NumericResult<V> {
+    const TOO_BIG: &str = "prototype range collection limit exceeded";
+    let max_elements = resources::limits().max_elements;
+    let count = |delta: usize| {
+        delta
+            .checked_add(1)
+            .filter(|&n| n <= max_elements)
+            .ok_or(TOO_BIG)
+    };
+    if let (V::Exact(lo), V::Exact(hi)) = (lo, hi) {
         let (lo, hi) = (lo.integral()?, hi.integral()?);
-        if hi >= lo
-            && hi
-                .checked_sub(lo)
-                .is_none_or(|n| n >= COLLECTION_LIMIT as i128)
-        {
-            return Err(too_big);
-        }
-        (lo..=hi).map(|i| exact_i128(i, d)).collect()
-    } else {
-        let (mut lo, hi) = (wide05::integral(lo)?, wide05::integral(hi)?);
         if lo > hi {
             return Ok(V::Sequence(Rc::from([])));
         }
-        let n = (&hi - &lo)
-            .to_usize()
-            .filter(|x| *x < COLLECTION_LIMIT)
-            .ok_or(too_big)?;
-        // Repeating a large endpoint up to the ordinary item cap could
-        // allocate gigabytes without growing any individual integer.
-        if lo.bits().max(hi.bits()).saturating_mul((n + 1) as u64) > 64 * 1024 * 1024 * 8 {
-            return Err("wide range resource limit exceeded (64 MiB of integer data)");
-        }
-        let mut out = Vec::with_capacity(n + 1);
-        for _ in 0..=n {
-            out.push(wide05::ratio_value(
-                BigRational::from_integer(lo.clone()),
-                d,
-            )?);
+        let delta = hi
+            .checked_sub(lo)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or(TOO_BIG)?;
+        return collect_range(count(delta)?, fuel, (lo..=hi).map(|i| Ok(exact_i128(i, d))));
+    }
+    let (mut lo, hi) = (wide05::integral(lo)?, wide05::integral(hi)?);
+    if lo > hi {
+        return Ok(V::Sequence(Rc::from([])));
+    }
+    let len = count((&hi - &lo).to_usize().ok_or(TOO_BIG)?)?;
+    // Keep the inherited aggregate cap on BigInt endpoint copies.
+    if lo.bits().max(hi.bits()).saturating_mul(len as u64) > 64 * 1024 * 1024 * 8 {
+        return Err("wide range resource limit exceeded (64 MiB of integer data)");
+    }
+    collect_range(
+        len,
+        fuel,
+        (0..len).map(|_| {
+            let v = wide05::ratio_value(BigRational::from_integer(lo.clone()), d);
             lo += 1u8;
-        }
-        out
-    };
+            v
+        }),
+    )
+}
+
+fn collect_range(
+    len: usize,
+    fuel: Option<&mut usize>,
+    values: impl Iterator<Item = NumericResult<V>>,
+) -> NumericResult<V> {
+    if let Some(fuel) = fuel {
+        subtract_work(fuel, len)?;
+    }
+    // Building the final Rc<[V]> can briefly overlap the source Vec.
+    // The completed ordinary sequence is not kept in the dense ledger.
+    let _scratch =
+        resources::reserve_for::<V>(len.checked_mul(2).ok_or("range allocation is too large")?)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| "range allocation failed")?;
+    for value in values {
+        out.push(value?);
+    }
     Ok(V::Sequence(out.into()))
 }
 
@@ -651,6 +690,7 @@ struct Eval<'a> {
     args: &'a [String],
     fuel: usize,
     depth: u16,
+    max_depth: u16,
     effects: u16,
 }
 fn error(span: Span, message: impl Into<String>) -> Control {
@@ -1431,26 +1471,36 @@ impl Eval<'_> {
         })))
     }
     fn tick(&mut self, span: Span) -> R<()> {
-        self.fuel = self
-            .fuel
-            .checked_sub(1)
-            .ok_or_else(|| error(span, "prototype execution limit exhausted"))?;
-        Ok(())
+        self.charge_work(1, span)
+    }
+    fn charge_work(&mut self, units: usize, span: Span) -> R<()> {
+        subtract_work(&mut self.fuel, units).map_err(|message| error(span, message))
     }
     fn eval(&mut self, id: ExprId, env: usize) -> R<V> {
         let p = self.p;
         let node = p.node(id);
         self.tick(node.span)?;
-        if self.depth >= 128 {
+        if self.depth >= self.max_depth {
             return Err(error(
                 node.span,
-                "prototype nesting or recursion limit (128) exceeded",
+                format!(
+                    "prototype nesting or recursion limit ({}) exceeded",
+                    self.max_depth
+                ),
             ));
         }
         self.depth += 1;
         let r = self.eval_kind(id, env);
         self.depth -= 1;
-        r.map(|v| self.specialize_fun(v, &node.ty, env))
+        r.and_then(|v| {
+            let checked = if matches!(node.kind, ExprKind::Call(Target::Builtin(_), _)) {
+                wide05::guard_embedded(v)
+            } else {
+                wide05::guard_value(v)
+            };
+            checked.map_err(|message| error(node.span, message))
+        })
+        .map(|v| self.specialize_fun(v, &node.ty, env))
     }
     fn eval_kind(&mut self, id: ExprId, env: usize) -> R<V> {
         let p = self.p;
@@ -1541,6 +1591,13 @@ impl Eval<'_> {
                 }
             }
             ExprKind::Call(target, ids) => {
+                if matches!(target, Target::Builtin(CoreOp::Negate | CoreOp::Not))
+                    && n.lift_mode == Some(LiftMode::LeftArray)
+                {
+                    if let Some(result) = numerical_plan::try_eval(self, id, env) {
+                        return result;
+                    }
+                }
                 let f = match target {
                     Target::Symbol(sid) => Some(self.load(env, *sid, s)?),
                     Target::Builtin(_) | Target::Projection(_) | Target::Constructor(_) => None,
@@ -1637,6 +1694,11 @@ impl Eval<'_> {
                 }
             }
             ExprKind::Tuple(ids) | ExprKind::Sequence(ids) => {
+                if matches!(n.kind, ExprKind::Sequence(_))
+                    && ids.len() > resources::limits().max_elements
+                {
+                    return Err(error(s, "sequence exceeds the collection limit"));
+                }
                 let xs = ids
                     .iter()
                     .map(|id| self.eval(*id, env))
@@ -1950,23 +2012,18 @@ impl Eval<'_> {
             }
             Function::Core(op, ty, schema) => {
                 let out = out.as_ref().unwrap_or_else(|| result_type(&ty, arity));
-                if let Some(op) = witnessed_op(op) {
-                    return self.witnessed_core(
-                        op,
-                        f.bound,
-                        &f.bound_types,
-                        out,
-                        schema.as_ref(),
-                        span,
-                    );
-                }
-                let mode = callable_lift(op, &f.bound_types).map_err(|m| error(span, m))?;
-                let instance_schema = if dynamic_schema_operation(op) {
-                    self.p.instance_schema(out).or(schema)
+                let value = if let Some(op) = witnessed_op(op) {
+                    self.witnessed_core(op, f.bound, &f.bound_types, out, schema.as_ref(), span)?
                 } else {
-                    schema
+                    let mode = callable_lift(op, &f.bound_types).map_err(|m| error(span, m))?;
+                    let instance_schema = if dynamic_schema_operation(op) {
+                        self.p.instance_schema(out).or(schema)
+                    } else {
+                        schema
+                    };
+                    self.core(op, f.bound, out, instance_schema.as_ref(), mode, span)?
                 };
-                self.core(op, f.bound, out, instance_schema.as_ref(), mode, span)
+                wide05::guard_embedded(value).map_err(|m| error(span, m))
             }
             Function::Constructor(id, _) => self.make_variant(id, f.bound, span),
             Function::Projection(field) => {
@@ -2102,6 +2159,16 @@ impl Eval<'_> {
         if args.len() != operation_arity(op, span)? {
             return Err(error(span, "invalid typed HIR operator arity"));
         }
+        if let Some(work) =
+            machina_kernels::dense_work(&args, mode).map_err(|message| error(span, message))?
+        {
+            self.charge_work(work, span)?;
+            if let Some(result) = machina_kernels::binary(op, &args, ty, mode, span)
+                .or_else(|| machina_kernels::unary(op, &args, ty, mode, span))
+            {
+                return result;
+            }
+        }
         if let Some(result) = operations041::apply_core(op, &args, ty, span, self.p) {
             return result;
         }
@@ -2205,7 +2272,7 @@ impl Eval<'_> {
             Range => {
                 let d =
                     domain(ty).ok_or_else(|| error(span, "range has no checked numeric domain"))?;
-                range(&a(), &a(), d)
+                range_with_fuel(&a(), &a(), d, Some(&mut self.fuel))
             }
             Sum | Product => {
                 let xs = a();
@@ -2616,7 +2683,9 @@ fn evaluate(
     stdin: &mut dyn BufRead,
     args: &[String],
     output: &mut dyn Write,
+    options: RuntimeOptions,
 ) -> R<V> {
+    let _resources = resources::enter(options).map_err(Control::Fatal)?;
     let mut eval = Eval {
         p: program,
         frames: vec![Frame::default()],
@@ -2624,8 +2693,9 @@ fn evaluate(
         stdin,
         args,
         output,
-        fuel: 1_000_000,
+        fuel: options.resources.max_work,
         depth: 0,
+        max_depth: options.resources.max_depth,
         effects: 0,
     };
     for group in &program.groups {
@@ -2666,18 +2736,32 @@ pub fn run_with_host(
     args: &[String],
     sink: &mut dyn Write,
 ) -> Result<Output, Error> {
-    crate::hir::validate(program)?;
-    run_with_host_prevalidated(program, input, stdin, args, sink)
+    run_with_host_options(program, input, stdin, args, sink, RuntimeOptions::default())
 }
 
-pub(crate) fn run_with_host_prevalidated(
+/// Execute a checked program with explicit host resources and optimization policy.
+pub fn run_with_host_options(
     program: &HirProgram,
     input: &mut dyn RuntimeInput,
     stdin: &mut dyn BufRead,
     args: &[String],
     sink: &mut dyn Write,
+    options: RuntimeOptions,
 ) -> Result<Output, Error> {
-    let mut value = evaluate(program, input, stdin, args, sink).map_err(Control::into_error)?;
+    crate::hir::validate(program)?;
+    run_with_host_options_prevalidated(program, input, stdin, args, sink, options)
+}
+
+pub(crate) fn run_with_host_options_prevalidated(
+    program: &HirProgram,
+    input: &mut dyn RuntimeInput,
+    stdin: &mut dyn BufRead,
+    args: &[String],
+    sink: &mut dyn Write,
+    options: RuntimeOptions,
+) -> Result<Output, Error> {
+    let mut value =
+        evaluate(program, input, stdin, args, sink, options).map_err(Control::into_error)?;
     let span = program
         .entry
         .map(|id| program.node(id).span)
@@ -2712,14 +2796,28 @@ pub fn run_with_output(program: &HirProgram, sink: &mut dyn Write) -> Result<Out
 }
 
 pub fn run(program: &HirProgram) -> Result<Output, Error> {
-    crate::hir::validate(program)?;
-    run_prevalidated(program)
+    run_with_options(program, RuntimeOptions::default())
 }
 
-pub(crate) fn run_prevalidated(program: &HirProgram) -> Result<Output, Error> {
+/// Execute with captured stdout and explicit runtime options.
+pub fn run_with_options(program: &HirProgram, options: RuntimeOptions) -> Result<Output, Error> {
+    crate::hir::validate(program)?;
+    run_options_prevalidated(program, options)
+}
+
+pub(crate) fn run_options_prevalidated(
+    program: &HirProgram,
+    options: RuntimeOptions,
+) -> Result<Output, Error> {
     let mut sink = Vec::new();
-    let mut out =
-        run_with_host_prevalidated(program, &mut FsInput, &mut std::io::empty(), &[], &mut sink)?;
+    let mut out = run_with_host_options_prevalidated(
+        program,
+        &mut FsInput,
+        &mut std::io::empty(),
+        &[],
+        &mut sink,
+        options,
+    )?;
     out.stdout = String::from_utf8(sink)
         .map_err(|_| invariant(Span::default(), "output sink was not UTF-8").into_error())?;
     Ok(out)
@@ -2742,18 +2840,32 @@ pub fn view_with_host(
     args: &[String],
     sink: &mut dyn Write,
 ) -> Result<crate::eval::ReplOutput, Error> {
-    crate::hir::validate(program)?;
-    view_with_host_prevalidated(program, input, stdin, args, sink)
+    view_with_host_options(program, input, stdin, args, sink, RuntimeOptions::default())
 }
 
-pub(crate) fn view_with_host_prevalidated(
+/// Inspect an entry with explicit host resources and optimization policy.
+pub fn view_with_host_options(
     program: &HirProgram,
     input: &mut dyn RuntimeInput,
     stdin: &mut dyn BufRead,
     args: &[String],
     sink: &mut dyn Write,
+    options: RuntimeOptions,
 ) -> Result<crate::eval::ReplOutput, Error> {
-    let value = evaluate(program, input, stdin, args, sink).map_err(Control::into_error)?;
+    crate::hir::validate(program)?;
+    view_with_host_options_prevalidated(program, input, stdin, args, sink, options)
+}
+
+pub(crate) fn view_with_host_options_prevalidated(
+    program: &HirProgram,
+    input: &mut dyn RuntimeInput,
+    stdin: &mut dyn BufRead,
+    args: &[String],
+    sink: &mut dyn Write,
+    options: RuntimeOptions,
+) -> Result<crate::eval::ReplOutput, Error> {
+    let value =
+        evaluate(program, input, stdin, args, sink, options).map_err(Control::into_error)?;
     Ok(crate::eval::ReplOutput {
         value: inspect(&value),
         stdout: String::new(),
@@ -2768,16 +2880,31 @@ pub fn view_with_output(
 }
 
 pub fn view_entry(program: &HirProgram) -> Result<crate::eval::ReplOutput, Error> {
-    crate::hir::validate(program)?;
-    view_entry_prevalidated(program)
+    view_with_options(program, RuntimeOptions::default())
 }
 
-pub(crate) fn view_entry_prevalidated(
+/// Inspect an entry with captured stdout and explicit runtime options.
+pub fn view_with_options(
     program: &HirProgram,
+    options: RuntimeOptions,
+) -> Result<crate::eval::ReplOutput, Error> {
+    crate::hir::validate(program)?;
+    view_options_prevalidated(program, options)
+}
+
+pub(crate) fn view_options_prevalidated(
+    program: &HirProgram,
+    options: RuntimeOptions,
 ) -> Result<crate::eval::ReplOutput, Error> {
     let mut sink = Vec::new();
-    let mut out =
-        view_with_host_prevalidated(program, &mut FsInput, &mut std::io::empty(), &[], &mut sink)?;
+    let mut out = view_with_host_options_prevalidated(
+        program,
+        &mut FsInput,
+        &mut std::io::empty(),
+        &[],
+        &mut sink,
+        options,
+    )?;
     out.stdout = String::from_utf8(sink)
         .map_err(|_| invariant(Span::default(), "output sink was not UTF-8").into_error())?;
     Ok(out)

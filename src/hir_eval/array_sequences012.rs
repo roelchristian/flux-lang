@@ -9,7 +9,7 @@ fn seq(value: &V, span: Span) -> R<&[V]> {
             "indexed sequence operation requires a checked sequence",
         ));
     };
-    if values.len() > COLLECTION_LIMIT {
+    if values.len() > resources::limits().max_elements {
         return Err(error(
             span,
             "indexed sequence input exceeds the collection limit",
@@ -36,7 +36,7 @@ fn windows(width: &V, input: &V, span: Span) -> R<V> {
     let count = input.len() - width + 1;
     if count
         .checked_mul(width)
-        .is_none_or(|size| size > COLLECTION_LIMIT)
+        .is_none_or(|size| size > resources::limits().max_elements)
     {
         return Err(error(
             span,

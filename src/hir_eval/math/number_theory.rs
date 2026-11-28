@@ -48,9 +48,12 @@ fn multiply(a: &BigUint, b: &BigUint, bits: u64) -> NumericResult<BigUint> {
 }
 
 fn steps(n: &BigUint) -> NumericResult<u64> {
-    n.to_u64()
+    let n = n
+        .to_u64()
         .filter(|&n| n <= MAX_COMBINATORIC_STEPS)
-        .ok_or(THEORY_LIMIT)
+        .ok_or(THEORY_LIMIT)?;
+    resources::check_iterations(n as usize)?;
+    Ok(n)
 }
 
 /// A balanced product avoids repeatedly multiplying a nearly maximal
@@ -91,24 +94,28 @@ fn choose(n: BigUint, k: BigUint, lift: Option<&LiftBudget>) -> NumericResult<Bi
     let first = &n - k + 1u8;
     charge_product(&BigUint::one(), k, lift)?;
     charge_product(&first, k, lift)?;
-    let denominator = product(&BigUint::one(), k, wide05::MAX_BITS * 2)?;
+    let denominator = product(&BigUint::one(), k, wide05::max_bits().saturating_mul(2))?;
     // If the unreduced numerator exceeded this limit, dividing by the
     // already known denominator could not save the bounded final result.
-    let numerator = product(&first, k, wide05::MAX_BITS + denominator.bits())?;
-    bounded(numerator / denominator, wide05::MAX_BITS)
+    let numerator = product(
+        &first,
+        k,
+        wide05::max_bits().saturating_add(denominator.bits()),
+    )?;
+    bounded(numerator / denominator, wide05::max_bits())
 }
 
 fn fibonacci(n: &BigUint, lift: Option<&LiftBudget>) -> NumericResult<BigUint> {
     // F(k+2) >= 2F(k) for k >= 1 bounds the largest useful index.
     let n = n
         .to_u64()
-        .filter(|&n| n <= wide05::MAX_BITS * 2 + 2)
+        .filter(|&n| n <= wide05::max_bits().saturating_mul(2).saturating_add(2))
         .ok_or(THEORY_LIMIT)?;
     if let Some(lift) = lift {
         lift.work.charge(n.div_ceil(64))?;
     }
     // F(n+1) may have one more bit than F(n).
-    let bits = wide05::MAX_BITS + 1;
+    let bits = wide05::max_bits().saturating_add(1);
     let (mut a, mut b) = (BigUint::zero(), BigUint::one());
     for i in (0..(u64::BITS - n.leading_zeros())).rev() {
         let c = multiply(&a, &((&b << 1usize) - &a), bits)?;
@@ -120,7 +127,7 @@ fn fibonacci(n: &BigUint, lift: Option<&LiftBudget>) -> NumericResult<BigUint> {
             (d, next)
         };
     }
-    bounded(a, wide05::MAX_BITS)
+    bounded(a, wide05::max_bits())
 }
 
 struct Budget(Cell<u64>);
@@ -515,14 +522,14 @@ fn calculate(op: CoreOp, args: &[V], work: &Budget, lift: Option<&LiftBudget>) -
                     BigUint::zero()
                 }
             } else {
-                multiply(&(a / g), &b, wide05::MAX_BITS)?
+                multiply(&(a / g), &b, wide05::max_bits())?
             }
         }
         (MathFact, [x]) => {
             let first = BigUint::one();
             let count = steps(&natural(x)?)?;
             charge_product(&first, count, lift)?;
-            product(&first, count, wide05::MAX_BITS)?
+            product(&first, count, wide05::max_bits())?
         }
         (MathChoose, [n, k]) => choose(natural(n)?, natural(k)?, lift)?,
         (MathPerm, [n, k]) => {
@@ -533,7 +540,7 @@ fn calculate(op: CoreOp, args: &[V], work: &Budget, lift: Option<&LiftBudget>) -
                 let count = steps(&k)?;
                 let first = n - k + 1u8;
                 charge_product(&first, count, lift)?;
-                product(&first, count, wide05::MAX_BITS)?
+                product(&first, count, wide05::max_bits())?
             }
         }
         (MathModPow, [base, exponent, modulus]) => modpow(

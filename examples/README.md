@@ -42,7 +42,9 @@ Unless noted in the [manifest](manifest.json), run `flux PATH` from the root.
 
 [Array calculus](mathematics/array-calculus.flx), [matrix products](mathematics/matrix-products.flx),
 [axis reductions](mathematics/axis-reduction.flx),
-[dense arrays and indexed sequences](mathematics/arrays.flx).
+[dense arrays and indexed sequences](mathematics/arrays.flx),
+[shared views and exact fallback](mathematics/dense-views.flx), and
+[matrix contraction](mathematics/matrix-contraction.flx).
 
 ## 5. Statistics and tables
 

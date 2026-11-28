@@ -1,0 +1,18 @@
+<< "arr";
+
+--- Prepare a contiguous right operand for the Gram matrix A A^T.
+a := : r (form [64n 64n] (.. 1z 4096z));
+transpose := |: a;
+b := form [64n 64n] (,. transpose);
+gram := arr.mul a b;
+diagonal := arr.diag gram;
+
+--- The first and last rows give an independent dot product.
+first := : r (form [64n] (.. 1z 64z));
+last := : r (form [64n] (.. 4033z 4096z));
+cross := arr.dot first last;
+
+!^{
+    ! print (dim gram, .: [1n] diagonal, .: [64n] diagonal);
+    ! print (cross, = cross (?! .: [1n 64n] gram));
+};

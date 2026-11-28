@@ -10,6 +10,13 @@ obsolete specifications are not kept as duplicate files.
 - Consolidate shared Rust internals and streamline the reference and example
   index without changing the language. Group integration tests by topic.
 
+## Draft 0.19
+
+- Add Machina packed dense-array buffers, shared views and selected checked
+  kernels, with exact fallback and no change to Flux syntax.
+- Add validated host resource policies, an optimization-off typed reference
+  mode, and paired checked benchmarks.
+
 ## Draft 0.18
 
 - Add Mathesis: qualified `math` scalar and lifted functions for rounding,

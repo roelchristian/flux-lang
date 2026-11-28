@@ -65,7 +65,7 @@ fn directory(path: &str) -> Result<V, IoFault> {
             .into_string()
             .map_err(|_| IoFault::encoding(path))?;
         bytes = bytes.saturating_add(name.len());
-        if names.len() >= COLLECTION_LIMIT || bytes > DIRECTORY_NAMES_LIMIT {
+        if names.len() >= resources::limits().max_elements || bytes > DIRECTORY_NAMES_LIMIT {
             return Err(IoFault::details(
                 IoKind::Read,
                 path,
@@ -114,7 +114,7 @@ fn text_split(separator: &str, input: &str, span: Span) -> R<V> {
     }
     let mut parts = Vec::new();
     for item in input.split(separator) {
-        if parts.len() >= COLLECTION_LIMIT {
+        if parts.len() >= resources::limits().max_elements {
             return Err(error(span, "split result exceeds the collection limit"));
         }
         parts.push(string(item));

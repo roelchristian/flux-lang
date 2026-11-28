@@ -2,6 +2,7 @@ use flux_lang::{
     format_path, interface_path, lexer, modules,
     parser::{needs_continuation, MemberKind},
     semantic::{prepare_modules, prepare_modules_timed, Mode as SemanticMode, Policy, Timings},
+    RuntimeOptions,
 };
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -23,13 +24,15 @@ Parenthesize a suspended action to inspect it; use ! to execute it.";
 struct Session {
     declarations: Vec<(PathBuf, String)>,
     expressions: Vec<String>,
+    options: RuntimeOptions,
 }
 
 impl Session {
-    fn new() -> Self {
+    fn new(options: RuntimeOptions) -> Self {
         Self {
             declarations: vec![(PathBuf::from("<repl>"), String::from("<< \"io\" : io;\n"))],
             expressions: Vec::new(),
+            options,
         }
     }
 
@@ -75,11 +78,12 @@ impl Session {
             Mode::View | Mode::Time => {
                 let start = Instant::now();
                 let out = prepared
-                    .view_with_host(
+                    .view_with_host_options(
                         &mut flux_lang::FsInput,
                         &mut io::stdin().lock(),
                         &[],
                         &mut io::stdout(),
+                        self.options,
                     )
                     .map_err(diag)?;
                 let elapsed = start.elapsed();
@@ -148,11 +152,12 @@ impl Session {
                     self.declarations.push((origin, source));
                 } else {
                     prepared
-                        .run_with_host(
+                        .run_with_host_options(
                             &mut flux_lang::FsInput,
                             &mut io::stdin().lock(),
                             &[],
                             &mut io::stdout(),
+                            self.options,
                         )
                         .map_err(|error| loaded.diagnostic(&error))?;
                 }
@@ -208,7 +213,7 @@ fn repl() -> Result<u8, String> {
     const MAX_PENDING_BYTES: usize = 64 * 1024;
     let mut line = String::new();
     let mut pending = String::new();
-    let mut session = Session::new();
+    let mut session = Session::new(runtime_options()?);
     loop {
         if interactive {
             print!(
@@ -256,6 +261,43 @@ fn repl() -> Result<u8, String> {
         }
     }
     Ok(0)
+}
+
+fn runtime_options() -> Result<RuntimeOptions, String> {
+    fn setting(name: &str) -> Result<Option<String>, String> {
+        match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8")),
+        }
+    }
+    fn number<T: std::str::FromStr>(name: &str, default: T) -> Result<T, String> {
+        setting(name)?.map_or(Ok(default), |value| {
+            value
+                .parse()
+                .map_err(|_| format!("{name} must be a positive decimal integer"))
+        })
+    }
+
+    let mut options = RuntimeOptions::default();
+    let limits = &mut options.resources;
+    limits.max_rank = number("FLUX_MAX_RANK", limits.max_rank)?;
+    limits.max_elements = number("FLUX_MAX_ELEMENTS", limits.max_elements)?;
+    limits.max_memory = number("FLUX_MAX_MEMORY", limits.max_memory)?;
+    limits.max_work = number("FLUX_MAX_WORK", limits.max_work)?;
+    limits.max_exact_bits = number("FLUX_MAX_EXACT_BITS", limits.max_exact_bits)?;
+    limits.max_numeric_iterations =
+        number("FLUX_MAX_NUMERIC_ITERATIONS", limits.max_numeric_iterations)?;
+    limits.max_depth = number("FLUX_MAX_DEPTH", limits.max_depth)?;
+    if let Some(value) = setting("FLUX_OPTIMIZE")? {
+        options.optimize = match value.as_str() {
+            "0" => false,
+            "1" => true,
+            _ => return Err("FLUX_OPTIMIZE must be 0 or 1".into()),
+        };
+    }
+    options.validate().map_err(|e| e.to_string())?;
+    Ok(options)
 }
 
 fn cli() -> Result<u8, String> {
@@ -379,11 +421,12 @@ fn cli() -> Result<u8, String> {
             .map_err(diagnostic)?;
             let start = Instant::now();
             if program.entry.is_some() {
-                plan.run_with_host(
+                plan.run_with_host_options(
                     &mut flux_lang::FsInput,
                     &mut io::stdin().lock(),
                     &[],
                     &mut io::stdout(),
+                    runtime_options()?,
                 )
                 .map_err(diagnostic)?;
             }
@@ -410,11 +453,12 @@ eval_ns\t{}",
             }
             let output = prepare_modules(program, SemanticMode::Script, Policy::TypedOnly, inputs)
                 .map_err(diagnostic)?
-                .run_with_host(
+                .run_with_host_options(
                     &mut flux_lang::FsInput,
                     &mut io::stdin().lock(),
                     &arguments,
                     &mut io::stdout(),
+                    runtime_options()?,
                 )
                 .map_err(diagnostic)?;
             return Ok(output.status);

@@ -83,7 +83,7 @@ fn combinations(op: CoreOp, args: &[V], schema: Option<&Rc<TableSchema>>, span: 
         _ => return Err(error(span, "incompatible collection kinds")),
     };
     let count = left.len().saturating_mul(right.len());
-    if count > COLLECTION_LIMIT {
+    if count > resources::limits().max_elements {
         return Err(error(span, "prototype cross-product limit exceeded"));
     }
     let mut out = Vec::with_capacity(count);

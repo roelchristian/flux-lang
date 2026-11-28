@@ -1,39 +1,10 @@
 //! Shape-changing operations and deterministic axis kernels for dense arrays.
 use super::*;
 
-fn materialize(
-    input: &Dense,
-    shape: Rc<[usize]>,
-    start: usize,
-    strides: &[usize],
-    span: Span,
-) -> R<V> {
-    let len = volume(&shape, span)?;
-    let cells = (0..len)
-        .map(|mut index| {
-            let mut offset = start;
-            for (&width, &stride) in shape.iter().zip(strides).rev() {
-                offset += (index % width) * stride;
-                index /= width;
-            }
-            input.cells[offset].clone()
-        })
-        .collect();
-    Dense::pack(shape, cells, span)
-}
-
 pub(super) fn reorder(input: &Dense, permutation: &[usize], span: Span) -> R<V> {
-    let rank = input.shape.len();
-    if permutation.iter().copied().eq(0..rank) {
-        return Dense::pack(input.shape.clone(), input.cells.clone(), span);
-    }
-    let shape: Rc<[usize]> = permutation.iter().map(|&i| input.shape[i]).collect();
-    if input.cells.is_empty() {
-        return Dense::pack(shape, input.cells.clone(), span);
-    }
-    let old = broadcast_strides(&input.shape, rank);
-    let strides: Vec<_> = permutation.iter().map(|&i| old[i]).collect();
-    materialize(input, shape, 0, &strides, span)
+    let shape = permutation.iter().map(|&i| input.shape[i]).collect();
+    let strides = permutation.iter().map(|&i| input.strides[i]).collect();
+    input.view(shape, strides, input.offset, span)
 }
 
 pub(super) fn axes(permutation: &[usize], input: &Dense, span: Span) -> R<V> {
@@ -86,16 +57,16 @@ pub(super) fn section(starts: &[usize], counts: &[usize], input: &Dense, span: S
         .zip(counts)
         .map(|((&width, &start), &count)| count.min(width - start))
         .collect();
-    if shape.contains(&0) {
-        return Dense::pack(shape, Rc::from([]), span);
+    let mut offset = input.offset;
+    if !shape.contains(&0) {
+        for (&pos, &stride) in starts.iter().zip(input.strides.iter()) {
+            offset = pos
+                .checked_mul(stride)
+                .and_then(|delta| offset.checked_add(delta))
+                .ok_or_else(|| invariant(span, "dense section offset exceeds addressable size"))?;
+        }
     }
-    let strides = broadcast_strides(&input.shape, rank);
-    let start = starts
-        .iter()
-        .zip(strides)
-        .map(|(i, stride)| i * stride)
-        .sum();
-    materialize(input, shape, start, &strides[..rank], span)
+    input.view(shape, input.strides.clone(), offset, span)
 }
 
 pub(super) fn last_axis(input: &Dense, span: Span) -> R<usize> {
@@ -152,6 +123,29 @@ pub(super) fn along_axis(
     if n == 0 {
         return Dense::pack(shape.into(), Rc::from([]), span);
     }
+    let shape: Rc<[usize]> = shape.into();
+    if let LaneOp::Intrinsic(op, ty) = op {
+        eval.charge_work(input.len().saturating_add(n), span)?;
+        if let Some(result) = machina_kernels::intrinsic(input, axis, shape.clone(), op, ty, span) {
+            return result;
+        }
+    }
+    if let LaneOp::Seeded {
+        callback,
+        seed,
+        item,
+        accumulator,
+        scan,
+    } = op
+    {
+        let plan = machina_kernels::ScanPlan::new(input, axis, shape.clone(), scan, span);
+        if let Some(result) =
+            machina_kernels::seeded(plan, (item, accumulator), (callback, seed), eval)
+        {
+            return result;
+        }
+    }
+    let lease = resources::reserve_for::<V>(n).map_err(|message| error(span, message))?;
     let lanes = if scan { n / (width + 1) } else { n };
     let stride = input.shape[axis + 1..].iter().product::<usize>();
     let base = |lane, len| (lane / stride) * len * stride + lane % stride;
@@ -170,28 +164,44 @@ pub(super) fn along_axis(
     };
     for lane in 0..lanes {
         let start = base(lane, width);
-        let mut items = (0..width).map(|i| &input.cells[start + i * stride]);
+        let mut items = (0..width).map(|i| input.value(start + i * stride));
         let value = match op {
             LaneOp::Intrinsic(op, ty) => match op {
                 CoreOp::Sum | CoreOp::Product => {
-                    numeric_reduce(op, items.cloned(), ty).map_err(|e| error(span, e))?
+                    numeric_reduce(op, items, ty).map_err(|e| error(span, e))?
                 }
-                CoreOp::Min | CoreOp::Max => collections042::extrema_iter(op, items, span)?,
-                CoreOp::All | CoreOp::Any => collections042::bool_reduce_iter(op, items, span)?,
+                CoreOp::Min | CoreOp::Max => {
+                    let Some(mut best) = items.next() else {
+                        result.push(V::Optional(None));
+                        continue;
+                    };
+                    for item in items {
+                        let cmp = order(&best, &item).map_err(|e| error(span, e))?;
+                        if if op == CoreOp::Min {
+                            cmp.is_gt()
+                        } else {
+                            cmp.is_lt()
+                        } {
+                            best = item;
+                        }
+                    }
+                    V::Optional(Some(Rc::new(best)))
+                }
+                CoreOp::All | CoreOp::Any => {
+                    let all = op == CoreOp::All;
+                    V::Bool(items.try_fold(all, |acc, item| {
+                        let item = as_bool(&item).map_err(|e| error(span, e))?;
+                        Ok(if all { acc & item } else { acc | item })
+                    })?)
+                }
                 _ => return Err(invariant(span, "invalid intrinsic axis reduction")),
             },
             LaneOp::Reduce { callback, item } => {
                 let first = items.next();
                 let acc = first
                     .map(|first| {
-                        items.try_fold(first.clone(), |acc, value| {
-                            eval.apply_dyadic(
-                                callback,
-                                (acc, item),
-                                (value.clone(), item),
-                                item,
-                                span,
-                            )
+                        items.try_fold(first, |acc, value| {
+                            eval.apply_dyadic(callback, (acc, item), (value, item), item, span)
                         })
                     })
                     .transpose()?;
@@ -213,7 +223,7 @@ pub(super) fn along_axis(
                     acc = eval.apply_dyadic(
                         callback,
                         (acc, accumulator),
-                        (value.clone(), item),
+                        (value, item),
                         accumulator,
                         span,
                     )?;
@@ -228,7 +238,7 @@ pub(super) fn along_axis(
             result.push(value);
         }
     }
-    Dense::pack(shape.into(), result.into(), span)
+    Dense::pack_values_reserved(shape, result, lease, span)
 }
 
 fn contracted(
@@ -245,10 +255,10 @@ fn contracted(
 }
 
 fn charge_contraction(eval: &mut Eval<'_>, work: Option<usize>, span: Span) -> R<()> {
-    eval.fuel = work
-        .and_then(|work| eval.fuel.checked_sub(work))
-        .ok_or_else(|| error(span, "prototype execution limit exhausted"))?;
-    Ok(())
+    eval.charge_work(
+        work.ok_or_else(|| error(span, "prototype execution limit exhausted"))?,
+        span,
+    )
 }
 
 pub(super) fn dot(left: &Dense, right: &Dense, ty: &Type, eval: &mut Eval<'_>, span: Span) -> R<V> {
@@ -259,8 +269,10 @@ pub(super) fn dot(left: &Dense, right: &Dense, ty: &Type, eval: &mut Eval<'_>, s
         return Err(error(span, "arr.dot requires equal vector lengths"));
     }
     charge_contraction(eval, Some(*a), span)?;
-    contracted(left.cells.iter().cloned(), right.cells.iter().cloned(), ty)
-        .map_err(|e| error(span, e))
+    if let Some(result) = machina_kernels::dot(left, right, ty, span) {
+        return result;
+    }
+    contracted(left.iter(), right.iter(), ty).map_err(|e| error(span, e))
 }
 
 pub(super) fn matmul(
@@ -282,18 +294,19 @@ pub(super) fn matmul(
     if len == 0 {
         return Dense::pack(shape, Rc::from([]), span);
     }
+    if let Some(result) = machina_kernels::matmul(left, right, shape.clone(), ty, span) {
+        return result;
+    }
+    let lease = resources::reserve_for::<V>(len).map_err(|message| error(span, message))?;
     let mut cells = Vec::with_capacity(len);
     for i in 0..*m {
-        let left_row = &left.cells[i * k..(i + 1) * k];
         for j in 0..*n {
-            let right_column = (0..*k).map(|i| right.cells[i * n + j].clone());
-            cells.push(
-                contracted(left_row.iter().cloned(), right_column, ty)
-                    .map_err(|e| error(span, e))?,
-            );
+            let left_row = (0..*k).map(|p| left.value(i * k + p));
+            let right_column = (0..*k).map(|p| right.value(p * n + j));
+            cells.push(contracted(left_row, right_column, ty).map_err(|e| error(span, e))?);
         }
     }
-    Dense::pack(shape, cells.into(), span)
+    Dense::pack_values_reserved(shape, cells, lease, span)
 }
 
 pub(super) fn diag(input: &Dense, span: Span) -> R<V> {
@@ -301,6 +314,12 @@ pub(super) fn diag(input: &Dense, span: Span) -> R<V> {
         return Err(error(span, "arr.diag requires a rank-two array"));
     };
     let len = *m.min(n);
-    let diagonal = (0..len).map(|i| input.cells[i * (n + 1)].clone()).collect();
-    Dense::pack(Rc::from([len]), diagonal, span)
+    let stride = if len <= 1 {
+        0
+    } else {
+        input.strides[0]
+            .checked_add(input.strides[1])
+            .ok_or_else(|| error(span, "array diagonal stride exceeds the resource limit"))?
+    };
+    input.view(Rc::from([len]), Rc::from([stride]), input.offset, span)
 }

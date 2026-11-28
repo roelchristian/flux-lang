@@ -38,7 +38,7 @@ fn degree_len(coefficients: &[V]) -> usize {
 
 fn checked_coefficients(v: &V) -> NumericResult<&[V]> {
     let coefficients = as_seq(v)?;
-    if coefficients.len() > COLLECTION_LIMIT {
+    if coefficients.len() > resources::limits().max_elements {
         return Err(POLY_LIMIT);
     }
     Ok(&coefficients[..degree_len(coefficients)])
@@ -75,7 +75,7 @@ fn collect_coefficients(
     len: usize,
     zero: &V,
 ) -> NumericResult<V> {
-    if len > COLLECTION_LIMIT {
+    if len > resources::limits().max_elements {
         return Err(POLY_LIMIT);
     }
     let mut output = Vec::with_capacity(len);
@@ -127,7 +127,7 @@ fn convolve(lhs: &[V], rhs: &[V], ty: &Type) -> NumericResult<V> {
         return Ok(V::Sequence(Rc::from([])));
     }
     let len = lhs.len() + rhs.len() - 1;
-    if len > COLLECTION_LIMIT || lhs.len().saturating_mul(rhs.len()) > MAX_PAIRS {
+    if len > resources::limits().max_elements || lhs.len().saturating_mul(rhs.len()) > MAX_PAIRS {
         return Err(POLY_LIMIT);
     }
     let mut work = Work::new();

@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for Draft 0.18. **Limited** features
+This is the normative reference for Draft 0.19. **Limited** features
 work only as stated; **Proposed** features are unavailable and do not
 reserve a design. See the [example corpus](../examples/README.md) for
 complete programs, the [implementation guide](implementation.md) for Rust
@@ -552,13 +552,22 @@ each existing frame position.
 | `arr.grade KEY XS` | Return a stable ascending permutation of one-based indices. Evaluate KEY once per item; keys must satisfy `ord`. |
 | `arr.permute IS XS` | Reorder by a complete permutation. Reject missing, repeated or invalid positions. |
 
-The reference limits rank to 16 and each dimension or materialized
-collection to 100,000. Shapes, counts and permutations are validated
-before output allocation and callbacks; singleton expansion does not
-copy an expanded input. See [array calculus](../examples/mathematics/array-calculus.flx),
-[matrix products](../examples/mathematics/matrix-products.flx),
-[axis reductions](../examples/mathematics/axis-reduction.flx) and
-[indexed sequences](../examples/mathematics/arrays.flx).
+The default reference limits are rank 16 and 100,000 logical elements,
+including a bound on each dimension. The host can configure limits
+before execution; source code cannot change them. Shapes, counts and
+permutations are validated before output allocation and callbacks.
+Singleton expansion does not copy an expanded input. Transposition,
+axis permutation and sections may share immutable storage; all
+operations observe the view's own shape and logical row-major order.
+
+Packed numeric operations do not change numeric domains or rounding.
+An exact result that outgrows compact storage uses the ordinary
+arbitrary-precision path. Optimized reductions or contractions do not
+reassociate operations or use fused multiply-add. A host resource
+failure remains a fatal diagnostic in either execution mode. See the
+[host policy](implementation.md#runtime-policy), [dense views](../examples/mathematics/dense-views.flx),
+[checked contractions](../examples/mathematics/matrix-contraction.flx)
+and [axis reductions](../examples/mathematics/axis-reduction.flx).
 
 ## Relational operations
 
@@ -803,7 +812,7 @@ size bounds, the operation reports a resource diagnostic rather than
 a probable answer. Reference bounds include 100,000 factors per
 combinatorial product, 4,000,000 weighted work units for modular
 exponentiation and factor or primality searches, and the ordinary
-1,048,576-bit exact-result limit. Factor and divisor lists obey the
+1,048,576-bit default exact-result limit. Factor and divisor lists obey the
 collection limit; divisor materialization also has a 64 MiB integer
 data bound. One lifted number-theory invocation shares a 4,000,000-unit
 work allowance and a 64 MiB wide-result allowance across its cells.
