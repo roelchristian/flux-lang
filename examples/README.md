@@ -22,6 +22,9 @@ Unless noted in the [manifest](manifest.json), run `flux PATH` from the root.
 [normalisation](tacit/normalisation.flx), [predicates](tacit/predicates.flx),
 [direct calls](tacit/callable.flx).
 
+[Multiple arguments](tacit/nary.flx), [partial application and captures](tacit/partial.flx),
+[generalized forks](tacit/generalised-forks.flx).
+
 ## 4. Mathematics
 
 [Wide arithmetic](mathematics/exact.flx), [combinatorics](mathematics/combinatorics.flx),

@@ -1,0 +1,19 @@
+--- A projection can leave an argument entirely unconstrained.
+first/2: ~a -> ~b -> ~a := &{ 2: $1 };
+
+--- Multiply the first two arguments, then add the third.
+affine/3: z -> z -> z -> z := &{ 3: @* + (@* * $1 $2) $3 };
+
+sq(x: z): z := * x x;
+sqdiff/2: z -> z -> z := &{ 2: @. sq (@* - $1 $2) };
+
+--- A bare callable in branch position is applied to all inputs.
+difference: z -> z -> z := &{ 2: - };
+
+!{
+    ^{
+        ^? ! print (first "flux" 7z, affine 3z 4z 2z);
+        ^? ! print (sqdiff 3z 8z, @@ difference (11z, 4z));
+        ()
+    }
+};

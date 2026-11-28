@@ -8,6 +8,7 @@ guide explains the Rust pipeline and verification.
 | Stage | Contract |
 | --- | --- |
 | Lexer, parser and modules | Record byte spans. Discover local and imported callable arities before parsing prefix operands. Lower `name/arity` to ordinary named functions with hygienic synthetic inputs. |
+| Tacit lowering | Build curried lambdas with hygienic inputs and eager captures outside the lambda body. Evaluate fork branches before curried application. No new runtime callable kind. |
 | Resolution and inference | Assign lexical symbols and dependency groups. Check rank-one schemes, constraints, shapes and exact numeric joins. Stable syntax IDs associate expression types and selected operations with source occurrences. |
 | Elaboration and admission | Lower checked calls, lifts, schemas, closures and error scopes to typed HIR. The compiler shares one borrowed syntax tree. Independently reused metadata must describe the same syntax, including declaration and pattern offsets; matching expression IDs alone is not sufficient. |
 | Evaluation | Execute only admitted HIR in scripts and the REPL. The `legacy-oracle` Cargo feature enables a separate differential-testing interpreter, not fallback. Runtime I/O is attached to suspended actions. |

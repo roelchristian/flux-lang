@@ -1,0 +1,30 @@
+sq(x: z): z := * x x;
+sum3(a, b, c: z): z := + a + b c;
+
+--- The curried combiner receives the three branch results in order.
+sumsq3/3: z -> z -> z -> z := &{
+    3:
+    @{
+        sum3;
+        @. sq $1;
+        @. sq $2;
+        @. sq $3
+    }
+};
+
+--- An explicit tacit function may itself be a combiner.
+reverse_sqdiff/2: z -> z -> z := &{
+    2:
+    @{
+        &{ 2: @* - $1 $2 };
+        @. sq $2;
+        @. sq $1
+    }
+};
+
+!{
+    ^{
+        ^? ! print (sumsq3 2z 3z 4z, reverse_sqdiff 3z 5z);
+        ()
+    }
+};

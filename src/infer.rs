@@ -148,6 +148,16 @@ fn syntactic_value(e: &Expr) -> bool {
         | Expr::TypedLambda(..) => true,
         Expr::Tuple(es) | Expr::Array(es) => es.iter().all(syntactic_value),
         Expr::Record(fs) | Expr::NamedRecord(_, fs) => fs.iter().all(|(_, x)| syntactic_value(x)),
+        // A generalized tacit block is a closure only after all eager
+        // captures are initialized. Do not generalize expansive captures.
+        Expr::Block(defs, Some(tail)) if !defs.is_empty() => {
+            defs.iter().all(|stmt| {
+                crate::parser::is_capture(stmt)
+                    && stmt
+                        .body_and_arity()
+                        .is_some_and(|(body, _)| syntactic_value(body))
+            }) && syntactic_value(tail)
+        }
         _ => false,
     }
 }

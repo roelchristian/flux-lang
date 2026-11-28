@@ -112,7 +112,10 @@ fn spacing(source: &str, tokens: &[Token], i: usize) -> usize {
     if adjacent
         && (matches!(first, "&" | "#" | "!" | "?" | ":#")
             || header_edge(tokens, i)
-            || tilde_identifier(&tokens[i - 1], &tokens[i]))
+            || tilde_identifier(&tokens[i - 1], &tokens[i])
+            // The tacit parser recognizes these adjacent pairs contextually.
+            || first == "@" && matches!(second, "{" | "=")
+            || first == "$" && second.bytes().all(|b| b.is_ascii_digit()))
     {
         return 0;
     }
