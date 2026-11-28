@@ -1,4 +1,5 @@
 //! Typed, owned execution IR retaining stable source syntax IDs.
+#[path = "validate/mod.rs"]
 mod validate09;
 pub use validate09::validate;
 

@@ -1,7 +1,7 @@
 //! Checked shared dense storage and row-major logical views.
 use super::{resources, *};
 
-#[path = "dense_algebra015.rs"]
+#[path = "algebra.rs"]
 mod algebra;
 use algebra::{axis, last_axis, LaneOp};
 

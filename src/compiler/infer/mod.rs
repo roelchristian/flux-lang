@@ -1,6 +1,7 @@
 //! Rank-one inference for the Draft 0.4 checked subset.
 mod arrays;
 mod matches;
+#[path = "math.rs"]
 mod mathesis;
 
 use crate::{

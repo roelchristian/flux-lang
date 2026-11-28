@@ -1,12 +1,13 @@
 //! Reference prototype for the Flux language.
+#[path = "core/registry/mod.rs"]
 pub mod builtins;
 #[cfg(any(test, feature = "legacy-oracle"))]
 #[allow(dead_code)]
-#[path = "check.rs"]
+#[path = "legacy/check.rs"]
 mod legacy_check;
 #[cfg(any(test, feature = "legacy-oracle"))]
 #[allow(dead_code)]
-#[path = "eval.rs"]
+#[path = "legacy/eval.rs"]
 mod legacy_eval;
 
 pub mod check {
@@ -39,8 +40,11 @@ pub mod oracle {
     pub use crate::legacy_check::check;
     pub use crate::legacy_eval::{run, Output};
 }
+#[path = "runtime/host/input.rs"]
 mod csv;
+#[path = "diagnostics/mod.rs"]
 pub mod diagnostic;
+#[path = "core/standard_errors.rs"]
 mod errors041;
 pub mod eval {
     use crate::{
@@ -69,15 +73,25 @@ pub mod eval {
         prepare(program, Mode::Inspection, Policy::TypedOnly)?.view()
     }
 }
+#[path = "tooling/formatter.rs"]
 mod formatter;
+#[path = "compiler/hir/mod.rs"]
 pub mod hir;
+#[path = "runtime/mod.rs"]
 pub mod hir_eval;
+#[path = "compiler/infer/mod.rs"]
 pub mod infer;
+#[path = "compiler/syntax/lexer.rs"]
 pub mod lexer;
+#[path = "compiler/modules.rs"]
 pub mod modules;
+#[path = "compiler/syntax/parser/mod.rs"]
 pub mod parser;
+#[path = "compiler/resolve/mod.rs"]
 pub mod resolve;
+#[path = "compiler/driver.rs"]
 pub mod semantic;
+#[path = "compiler/types/mod.rs"]
 pub mod types;
 
 pub use csv::{FsInput, OpenedInput, RuntimeInput};

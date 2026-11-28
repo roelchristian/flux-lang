@@ -717,7 +717,7 @@ provides `ioerr`); for example a CSV recovery pattern uses
 
 Native library calls retain fixed prefix arity. Arguments in the
 signatures below are shown in operand order; these tables are not new
-annotation syntax. See the [registry](../src/builtins.rs) for the
+annotation syntax. See the [registry](../src/core/registry/mod.rs) for the
 implemented member and alias inventory. For `df`, see
 [relational operations](#relational-operations). The `stat` aliases
 `avg`/`mean`, `pct` and `sd` use the corresponding

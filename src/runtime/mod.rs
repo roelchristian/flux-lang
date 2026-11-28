@@ -20,25 +20,42 @@ use std::{
     io::{BufRead, Write},
     rc::Rc,
 };
+#[path = "array/sequence.rs"]
 mod array_sequences012;
+#[path = "array/mod.rs"]
 mod arrays012;
+#[path = "../stdlib/collections.rs"]
 mod collections042;
+#[path = "../stdlib/combinators.rs"]
 mod combinators05;
+#[path = "numeric/decimal.rs"]
 mod decimal05;
+#[path = "value/display.rs"]
 mod display;
+#[path = "../stdlib/joins.rs"]
 mod joins06;
+#[path = "../stdlib/json.rs"]
 mod json05;
+#[path = "../stdlib/native/mod.rs"]
 mod library05;
+#[path = "array/packed/mod.rs"]
 mod machina_kernels;
+#[path = "../stdlib/math/mod.rs"]
 mod math;
+#[path = "numeric/plan.rs"]
 mod numerical_plan;
+#[path = "../stdlib/reduce.rs"]
 mod reduce014;
+#[path = "../stdlib/relations.rs"]
 mod relations06;
+#[path = "numeric/wide.rs"]
 mod wide05;
 use display::{inspect, repr};
 use wide05::Wide;
+#[path = "../stdlib/effects.rs"]
 mod operations041;
 pub use crate::csv::{FsInput, OpenedInput, RuntimeInput};
+#[path = "resources.rs"]
 mod resources;
 pub use resources::{ResourcePolicy, RuntimeOptions};
 
