@@ -1,0 +1,23 @@
+<< "num";
+
+square(x: r): r := * x x;
+close(x, y: r): b := < | (- x y) 1e-6r;
+opts := .{
+    tol := 1e-9r;
+    max := 100n;
+};
+
+area := ^= num.integrate &square 0r 1r opts {
+    _ : -1r;
+};
+slope := ^= num.diff &square 3r 0.001r {
+    _ : -1r;
+};
+midpoint := ^= num.interp [0r 1r 2r] [0r 2r 6r] 1.5r {
+    _ : -1r;
+};
+
+!^{
+    !
+        print (close area (/ 1r 3r), close slope 6r, close midpoint 4r);
+};

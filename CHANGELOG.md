@@ -10,6 +10,13 @@ obsolete specifications are not kept as duplicate files.
 - Consolidate shared Rust internals and streamline the reference and example
   index without changing the language. Group integration tests by topic.
 
+## Draft 0.18
+
+- Add Mathesis: qualified `math` scalar and lifted functions for rounding,
+  elementary and special functions, and exact integer mathematics.
+- Add `poly` coefficient operations and bounded `num` root finding, integration,
+  interpolation and differentiation with typed solver errors.
+
 ## Draft 0.17
 
 - Add suspended `!^{ ... }` blocks with implicit unit and checked propagation

@@ -1,0 +1,13 @@
+<< "poly";
+
+--- Coefficients start with the constant term: 5 - 3x^2 + 2x^3.
+cs := [5q 0q -3q 2q];
+at_three := poly.eval cs 3q;
+slope := poly.deriv cs;
+area := poly.integ [1z -2z 3z];
+product := poly.mul [1z 1z] [1z -1z];
+
+!^{
+    ! print (at_three, slope, area);
+    ! print (product, poly.degree product, poly.degree [0z 0z]);
+};

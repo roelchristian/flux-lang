@@ -1,0 +1,16 @@
+<< "math";
+
+--- Sample a sine wave at quarter turns, expressed in degrees.
+angles := [0r 90r 180r 270r];
+radians := math.rad angles;
+wave := math.sin radians;
+expected := [0r 1r 0r -1r];
+
+--- Check tolerance rather than pinning the last binary64 bit.
+near_zero(x: r): b := < | x 1e-12r;
+close := @: &near_zero (- wave expected);
+roundtrip := @: &near_zero (- (math.deg radians) angles);
+
+!^{
+    ! print (close, roundtrip);
+};

@@ -26,3 +26,6 @@ fn run_script(dir: &TempDir, args: &[&str]) -> Output {
         .output()
         .expect("invoke Flux CLI")
 }
+
+#[cfg(feature = "legacy-oracle")]
+mod legacy_api;

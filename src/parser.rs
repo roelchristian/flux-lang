@@ -1954,6 +1954,7 @@ pub(crate) fn standard_owners(module: &str) -> &'static [&'static str] {
         "io" => &["ioerr", "csverr"],
         "csv" => &["ioerr", "csverr"],
         "math" => &["numerr"],
+        "num" => &["solvererr"],
         "fs" | "sys" => &["ioerr"],
         "rx" => &["rxerr"],
         "dt" => &["dterr"],

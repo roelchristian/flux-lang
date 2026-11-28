@@ -112,6 +112,77 @@ fn target(
     Ok(())
 }
 
+fn mathesis_signature(
+    spec: &builtins::Builtin,
+    inputs: &[&Type],
+    output: &Type,
+    span: Span,
+) -> Result<(), Error> {
+    use builtins::MathType;
+    let signature = spec.mathesis().expect("checked Mathesis registry entry");
+    if *output == Type::Never && inputs.contains(&&Type::Never) {
+        return Ok(());
+    }
+    let (shape, elements) = spec
+        .math_operands(inputs)
+        .map_err(|reason| invalid(span, reason))?;
+    let numeric = elements
+        .iter()
+        .zip(signature.inputs)
+        .find_map(|(&ty, param)| match (param, ty) {
+            (MathType::T, ty) => Some(ty),
+            (MathType::SeqT, Type::Seq(item)) => Some(item.as_ref()),
+            _ => None,
+        })
+        .unwrap_or(&Type::Prim(Prim::Unit));
+    let bad = || {
+        invalid(
+            span,
+            format!(
+                "HIR {} signature disagrees with checked types",
+                spec.canonical
+            ),
+        )
+    };
+    if signature.inputs.iter().any(|p| p.numeric_parameter())
+        && !matches!(
+            numeric,
+            Type::Var(_) | Type::Prim(Prim::N | Prim::Z | Prim::Q | Prim::D | Prim::R)
+        )
+    {
+        return Err(bad());
+    }
+    for (&actual, &param) in elements.iter().zip(signature.inputs) {
+        let expected = param.instantiate(numeric).ok_or_else(bad)?;
+        if param == MathType::Options {
+            let (Type::Record(actual), Type::Record(expected)) = (actual, &expected) else {
+                return Err(bad());
+            };
+            if actual.tail.is_some()
+                || actual.fields.len() != expected.fields.len()
+                || !expected
+                    .fields
+                    .iter()
+                    .all(|field| actual.fields.contains(field))
+            {
+                return Err(bad());
+            }
+        } else if *actual != expected {
+            return Err(bad());
+        }
+    }
+    if signature
+        .output
+        .instantiate(numeric)
+        .map(|ty| shape.wrap(ty))
+        .as_ref()
+        != Some(output)
+    {
+        return Err(bad());
+    }
+    Ok(())
+}
+
 fn layout_matches(p: &HirProgram, mut ty: &Type, witness: Option<&TableSchema>) -> bool {
     while let Type::Action(out) | Type::Result(out, _) | Type::Fun(_, out) = ty {
         ty = out;
@@ -344,20 +415,30 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
             ExprKind::Reference(t) => {
                 target(p, t, None, at, &mut references)?;
                 if let Target::Builtin(op) = t {
-                    if is_new_dense_operation(*op) {
+                    let spec = builtins::for_operation(*op).expect("validated target");
+                    let mathesis = spec.mathesis().is_some();
+                    if is_new_dense_operation(*op) || mathesis {
                         let mut output = &node.ty;
-                        let mut inputs = Vec::new();
-                        for _ in 0..builtins::for_operation(*op).unwrap().arity {
+                        let mut inputs = Vec::with_capacity(spec.arity);
+                        for _ in 0..spec.arity {
                             let Type::Fun(input, next) = output else {
                                 return Err(invalid(
                                     at,
-                                    "incomplete HIR dense-array callable type",
+                                    if mathesis {
+                                        "incomplete HIR Mathesis callable type"
+                                    } else {
+                                        "incomplete HIR dense-array callable type"
+                                    },
                                 ));
                             };
                             inputs.push(input.as_ref());
                             output = next;
                         }
-                        dense_signature(*op, &inputs, output, at)?;
+                        if mathesis {
+                            mathesis_signature(spec, &inputs, output, at)?;
+                        } else {
+                            dense_signature(*op, &inputs, output, at)?;
+                        }
                     }
                 }
             }
@@ -367,9 +448,15 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
                     child(id)?;
                 }
                 if let Target::Builtin(op) = t {
-                    if is_new_dense_operation(*op) {
+                    let spec = builtins::for_operation(*op).expect("validated target");
+                    let mathesis = spec.mathesis().is_some();
+                    if is_new_dense_operation(*op) || mathesis {
                         let inputs: Vec<_> = ids.iter().map(|id| &p.arena[id.0].ty).collect();
-                        dense_signature(*op, &inputs, &node.ty, at)?;
+                        if mathesis {
+                            mathesis_signature(spec, &inputs, &node.ty, at)?;
+                        } else {
+                            dense_signature(*op, &inputs, &node.ty, at)?;
+                        }
                     }
                 }
             }

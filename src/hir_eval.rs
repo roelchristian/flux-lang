@@ -29,6 +29,7 @@ mod display;
 mod joins06;
 mod json05;
 mod library05;
+mod math;
 mod reduce014;
 mod relations06;
 mod wide05;
@@ -2430,6 +2431,17 @@ impl Eval<'_> {
             Quantize => {
                 let scale = exact_index(&a()).map_err(fail)?;
                 decimal05::quantize(&a(), scale)
+            }
+            MathFloor | MathCeil | MathTrunc | MathRound | MathSign | MathFrac | MathRecip
+            | MathExp | MathExpm1 | MathLn | MathLog10 | MathLog1p | MathSin | MathCos
+            | MathTan | MathAsin | MathAcos | MathAtan | MathSinh | MathCosh | MathTanh
+            | MathAsinh | MathAcosh | MathAtanh | MathRad | MathDeg | MathLog | MathPow
+            | MathHypot | MathAtan2 | MathRoot | MathPi | MathE | MathTau | MathGcd | MathLcm
+            | MathFact | MathChoose | MathPerm | MathModPow | MathIsqrt | MathPrime
+            | MathFactor | MathDivisors | MathFib | MathGamma | MathLgamma | MathErf | MathErfc
+            | MathBeta | PolyEval | PolyAdd | PolySub | PolyMul | PolyDeriv | PolyInteg
+            | PolyDegree | NumBisect | NumNewton | NumIntegrate | NumInterp | NumDiff => {
+                return math::apply(op, args.as_slice(), ty, mode, self, span)
             }
             ToNatural | ToInteger | ToRational | ToDecimal | ToReal => lift_one(a(), mode, &|v| {
                 if op == ToReal {
