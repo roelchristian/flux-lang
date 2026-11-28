@@ -5,6 +5,12 @@ This log summarizes material changes. Earlier text and design revisions
 are available through [the repository's commit history](https://github.com/roelchristian/flux-lang/commits/main/);
 obsolete specifications are not kept as duplicate files.
 
+## Draft 0.14
+
+- Prefer `[:` (take), `:]` (drop), `sect` (section), `,.` (flatten one level),
+  and `|:` (transpose). Earlier spellings remain compatibility aliases.
+- Add `@/` for a seedless left reduction returning an optional.
+
 ## Draft 0.13
 
 - Breaking syntax change: named type variables now use adjacent tilde

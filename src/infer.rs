@@ -2354,6 +2354,27 @@ impl Engine<'_> {
                     x => return Err(self.err(format!("cannot index {x}"))),
                 }
             }
+            "@/" => {
+                let item = match want.map(|w| self.cx.resolve(w)) {
+                    Some(Type::Optional(t)) => *t,
+                    _ => self.cx.fresh(),
+                };
+                let expected = f(item.clone(), f(item.clone(), item.clone()));
+                let (callback, sequence) = if self.known_callee(env, &args[0]) {
+                    let callback = self.expr(env, &args[0], Some(&expected), effect)?;
+                    let sequence = self.expr(env, &args[1], Some(&s(item.clone())), effect)?;
+                    (callback, sequence)
+                } else {
+                    let sequence = self.expr(env, &args[1], Some(&s(item.clone())), effect)?;
+                    let callback = self.expr(env, &args[0], Some(&expected), effect)?;
+                    (callback, sequence)
+                };
+                if callback == Type::Never || sequence == Type::Never {
+                    Type::Never
+                } else {
+                    o(item)
+                }
+            }
             "/:" | "\\:" => {
                 let acc_expect = match (n, want.map(|w| self.cx.resolve(w))) {
                     ("/:", t) => t,
@@ -2381,16 +2402,16 @@ impl Engine<'_> {
                     .enumerate()
                     .map(|(i, x)| {
                         let context = match (n, i) {
-                            ("^", 1)
-                            | ("take" | "[:" | "drop" | "math.quantize", 0)
-                            | ("slice", 0 | 1) => Some(p(N)),
-                            ("take" | "drop" | "[:", 1)
-                            | ("slice", 2)
-                            | ("rev" | "=." | "tr", 0)
+                            ("^", 1) | ("[:" | ":]" | "math.quantize", 0) | ("sect", 0 | 1) => {
+                                Some(p(N))
+                            }
+                            ("[:" | ":]", 1)
+                            | ("sect", 2)
+                            | ("rev" | "=." | "|:", 0)
                             | ("+:", 0 | 1) => want.map(|w| self.cx.resolve(w)).filter(|t| {
                                 matches!(t, Type::Seq(_) | Type::Table(_) | Type::Prim(Prim::S))
                             }),
-                            ("flat", 0) => match want.map(|w| self.cx.resolve(w)) {
+                            (",.", 0) => match want.map(|w| self.cx.resolve(w)) {
                                 Some(t @ Type::Seq(_)) => Some(s(t)),
                                 _ => None,
                             },
@@ -2625,6 +2646,11 @@ impl Engine<'_> {
                 let out = want.cloned().unwrap_or_else(|| self.cx.fresh());
                 self.unify(&xs[0], &function(args.into_iter(), out.clone()))?;
                 out
+            }
+            "@/" => {
+                let item = self.seq_element(&xs[1])?;
+                self.unify(&xs[0], &f(item.clone(), f(item.clone(), item.clone())))?;
+                o(item)
             }
             "/:" | "\\:" => {
                 let item = self.seq_element(&xs[2])?;
@@ -2881,7 +2907,7 @@ impl Engine<'_> {
                 }
                 result(p(Q), Self::standard_type("numerr"))
             }
-            "take" | "[:" | "drop" | "slice" | "rev" => {
+            "[:" | ":]" | "sect" | "rev" => {
                 let (ns, last) = xs.split_at(xs.len() - 1);
                 for i in ns {
                     self.unify(i, &p(N))?;
@@ -2898,10 +2924,10 @@ impl Engine<'_> {
                     }
                 }
             }
-            "flat" | "tr" => {
+            ",." | "|:" => {
                 let el = self.cx.fresh();
                 self.unify(&xs[0], &s(s(el.clone())))?;
-                if n == "flat" {
+                if n == ",." {
                     s(el)
                 } else {
                     s(s(el))

@@ -3321,4 +3321,37 @@ a):~a := x;",
         }
         assert!(parse("no(b:b):b := ~b; e := ~= 0.1r 1r 1r; c := 'a';").is_ok());
     }
+
+    #[test]
+    fn sequence_symbols_share_registry_arity_and_remain_referenceable() {
+        let p = parse(
+            "a := [: 2n [1 2 3]; b := :] 1n a; c := sect 1n 2n a; d := ,. [a b]; e := |: d; f := @/ &+ e; g := &|:; h := &{ ,. };"
+        ).unwrap();
+        for (index, (name, count)) in [
+            ("[:", 2),
+            (":]", 2),
+            ("sect", 3),
+            (",.", 1),
+            ("|:", 1),
+            ("@/", 2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                matches!(&p.defs[index], Stmt::Def { body: Expr::Call(op, args), .. }
+                if op == name && args.len() == count),
+                "{name}"
+            );
+        }
+        assert!(matches!(&p.defs[6], Stmt::Def { body: Expr::Ref(op), .. } if op == "|:"));
+        assert!(matches!(&p.defs[7], Stmt::Def { body: Expr::Ref(op), .. } if op == ",."));
+        assert!(
+            parse("row := .{ field := 2; }; x := (1,.field row); y := (1,.{ a := 2; });").is_ok()
+        );
+        assert!(parse("bad := @/ &+;")
+            .unwrap_err()
+            .message
+            .contains("missing operand 2"));
+    }
 }

@@ -440,8 +440,18 @@ pub static REGISTRY: &[Builtin] = &[
         Runtime,
         &[]
     ),
-    pure!(Some(CoreOp::Take), "[:", 2, Household, Collection),
+    pure!(
+        Some(CoreOp::Take),
+        "[:",
+        2,
+        Household,
+        Collection,
+        NotRequired,
+        Runtime,
+        &["take"]
+    ),
     pure!(Some(CoreOp::Fold), "/:", 3, Fold, Reduction),
+    pure!(Some(CoreOp::Reduce), "@/", 2, Fold, Reduction),
     pure!(Some(CoreOp::Scan), "\\:", 3, Fold, Collection),
     pure!(Some(CoreOp::Sum), "+/", 1, Reduction, Reduction),
     pure!(Some(CoreOp::Product), "*/", 1, Reduction, Reduction),
@@ -496,12 +506,47 @@ pub static REGISTRY: &[Builtin] = &[
         Recognized,
         &["statistics.cor", "stats.cor", "stat.cor"]
     ),
-    pure!(Some(CoreOp::Take), "take", 2, Household, Collection),
-    pure!(Some(CoreOp::Drop), "drop", 2, Household, Collection),
-    pure!(Some(CoreOp::Slice), "slice", 3, Household, Collection),
+    pure!(
+        Some(CoreOp::Drop),
+        ":]",
+        2,
+        Household,
+        Collection,
+        NotRequired,
+        Runtime,
+        &["drop"]
+    ),
+    pure!(
+        Some(CoreOp::Slice),
+        "sect",
+        3,
+        Household,
+        Collection,
+        NotRequired,
+        Runtime,
+        &["slice"]
+    ),
     pure!(Some(CoreOp::Reverse), "rev", 1, Household, Collection),
-    pure!(Some(CoreOp::Flatten), "flat", 1, Household, Collection),
-    pure!(Some(CoreOp::Transpose), "tr", 1, Household, Collection),
+    pure!(
+        Some(CoreOp::Flatten),
+        ",.",
+        1,
+        Household,
+        Collection,
+        NotRequired,
+        Runtime,
+        &["flat"]
+    ),
+    pure!(
+        Some(CoreOp::Transpose),
+        "|:",
+        1,
+        Household,
+        Collection,
+        NotRequired,
+        Runtime,
+        &["tr"]
+    ),
     pure!(
         Some(CoreOp::Median),
         "med",
@@ -1091,9 +1136,13 @@ pub fn canonical(name: &str) -> &str {
     lookup(name).map_or(name, |b| b.canonical)
 }
 
+// The transition spellings are source-visible. All other aliases are only
+// exposed through explicit native imports or internal dispatch.
+const PRELUDE_ALIASES: &[&str] = &["print", "take", "drop", "slice", "flat", "tr"];
+
 pub fn prelude_arity(name: &str) -> Option<usize> {
     lookup(name)
-        .filter(|b| (b.prelude && b.canonical == name) || name == "print")
+        .filter(|b| (b.prelude && b.canonical == name) || PRELUDE_ALIASES.contains(&name))
         .map(|b| b.arity)
 }
 
@@ -1238,7 +1287,7 @@ mod tests {
                 assert!(names.insert(*a), "duplicate {a}");
                 assert_eq!(lookup(a), Some(b));
                 assert!(
-                    a == &"print" || prelude_arity(a).is_none(),
+                    PRELUDE_ALIASES.contains(a) || prelude_arity(a).is_none(),
                     "alias should not leak into prelude"
                 );
             }
@@ -1285,6 +1334,28 @@ mod tests {
         assert_eq!(canonical("print"), "io.print");
         assert_eq!(runtime_arity(":q"), Some(1));
     }
+    #[test]
+    fn sequence_operators_canonicalize_only_the_listed_transition_spellings() {
+        for (alias, primary, arity) in [
+            ("take", "[:", 2),
+            ("drop", ":]", 2),
+            ("slice", "sect", 3),
+            ("flat", ",.", 1),
+            ("tr", "|:", 1),
+        ] {
+            let spec = lookup(primary).unwrap();
+            assert_eq!(canonical(alias), primary);
+            assert_eq!(lookup(alias), Some(spec));
+            assert_eq!(for_operation(spec.op.unwrap()), Some(spec));
+            assert_eq!(prelude_arity(alias), Some(arity));
+            assert_eq!(prelude_arity(primary), Some(arity));
+        }
+        assert_eq!(canonical("rev"), "rev");
+        assert_eq!(prelude_arity("@/"), Some(2));
+        assert_eq!(for_operation(CoreOp::Reduce), lookup("@/"));
+        assert_eq!(prelude_arity("statistics.mean"), None);
+    }
+
     #[test]
     fn registered_numeric_rules_fix_result_domains() {
         use Numeric::*;

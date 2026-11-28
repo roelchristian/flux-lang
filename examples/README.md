@@ -12,6 +12,9 @@ Try `flux fmt examples/basics/pipeline.flx` to see the canonical layout, or
 add `--check` after `fmt` to check it without producing formatted output.
 See the [layout conventions](../docs/specification.md) for the margins.
 
+[Sequence calculus](basics/sequence-calculus.flx) shows prefixes, one-based sections,
+flattening, transposition, and seedless left reduction.
+
 ## 2. Functions and inference
 
 [Functions](basics/functions.flx) distinguishes a named callable, which
