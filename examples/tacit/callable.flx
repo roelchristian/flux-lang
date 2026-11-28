@@ -7,15 +7,15 @@ tree[~a] :: {
     | leaf ~a;
     | node tree[~a] tree[~a];
 };
-size/1 : tree[~a] -> n := \ t -> ?= t {
-    leaf _   : 1n;
-    node l r : + size l size r;
+total/1 : tree[~a] -> ~a | num ~a := \ t -> ?= t {
+    leaf x   : x;
+    node l r : + total l total r;
 };
 
 !{
     ^{
         ^? ! print (sq 3, cube 3, fourth 3);
-        ^? ! print size (node (leaf "north") (leaf "south"));
+        ^? ! print total (node (leaf 1n) (leaf 1n));
         ()
     }
 };

@@ -28,6 +28,7 @@ mod decimal05;
 mod joins06;
 mod json05;
 mod library05;
+mod reduce014;
 mod relations06;
 mod wide05;
 use wide05::Wide;
@@ -1649,6 +1650,12 @@ impl Eval<'_> {
                                 .map(|id| self.type_at(&p.node(*id).ty, env))
                                 .collect::<Vec<_>>();
                             self.array(*op, args, &types, &ty, s)?
+                        } else if *op == CoreOp::Reduce {
+                            let types = ids
+                                .iter()
+                                .map(|id| self.type_at(&p.node(*id).ty, env))
+                                .collect::<Vec<_>>();
+                            reduce014::apply(&args, &types, &ty, self, s)?
                         } else if joins06::handles(*op) || relation_op(*op) {
                             let types = ids
                                 .iter()
@@ -2025,6 +2032,9 @@ impl Eval<'_> {
                 if array_op(op) {
                     return self.array(op, f.bound, &f.bound_types, out, span);
                 }
+                if op == CoreOp::Reduce {
+                    return reduce014::apply(&f.bound, &f.bound_types, out, self, span);
+                }
                 if joins06::handles(op) || relation_op(op) {
                     return self.relation(op, f.bound, &f.bound_types, out, schema.as_ref(), span);
                 }
@@ -2216,6 +2226,7 @@ impl Eval<'_> {
                     "checked collection operation has no implementation",
                 ))
             }
+            Reduce => return Err(invariant(span, "checked reduce requires operand evidence")),
             ArrayReshape | ArrayShape | ArrayRavel | ArrayAt | ArrayMap | ArrayZip | ArrayOuter
             | ArrayRankMap | ArrayScan | ArrayWindows | ArraySelect | ArrayGrade | ArrayPermute => {
                 return Err(invariant(

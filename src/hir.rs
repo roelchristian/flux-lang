@@ -68,6 +68,7 @@ pub enum CoreOp {
     All,
     Any,
     Fold,
+    Reduce,
     Scan,
     CsvRead,
     CsvWrite,

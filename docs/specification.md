@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for the implemented Draft 0.13 language.
+This is the normative reference for the implemented Draft 0.14 language.
 Unless marked **Limited** or **Proposed**, the rules describe the behavior
 of the Rust reference interpreter. Limited features have the scope stated
 here. Proposed features are not available and do not reserve a design.
@@ -358,13 +358,13 @@ See the [open-row table specimen](../examples/tables/open-rows.flx).
 
 `# X` measures cardinality (Unicode scalar count for a string, row count
 for a table). `.. LOW HIGH` is an inclusive ascending integral range;
-when LOW exceeds HIGH it is empty. `take N X` (also `[: N X`) and
-`drop N X` retain a prefix or omit it, clamped to length. `slice START
-COUNT X` takes up to COUNT items from a one-based START; zero is an error
-and an out-of-range positive start gives an empty result. These operations
-and `rev X` preserve sequence, table or string kind. String positions
-count Unicode scalars. `flat XSS` flattens one sequence level; `tr XSS`
-transposes equal-length sequence rows and rejects ragged input.
+when LOW exceeds HIGH it is empty. `[: N X` retains a prefix and `:] N X`
+omits a prefix; both clamp N to the input length. `sect START COUNT X`
+takes up to COUNT items from a one-based START; zero is an error and an
+out-of-range positive start gives an empty result. These operations and
+`rev X` preserve sequence, table or string kind. String positions count
+Unicode scalars. `,. XSS` flattens one sequence level; `|: XSS` transposes
+equal-length sequence rows and rejects ragged input.
 `>: KEY X` sorts ascending and `<: KEY X` descending; equal keys retain
 their input order.
 
@@ -373,6 +373,26 @@ first. `+/ X` and `*/ X` return the sum and product in the checked
 numeric domain, with empty identities zero and one; `&&/ X` and `||/ X`
 use the Boolean identities true and false. `>/ X` and `</ X` return
 optional numeric extrema, absent on empty input.
+
+`@/ F XS` reduces a sequence of `a` with a curried `a->a->a` binary
+function, using the first element as the seed. It associates to the left.
+It evaluates F and XS once, in that order, and makes one binary call
+per element after the first. It returns `?0` for an empty sequence and
+`?1 X` for a singleton without calling F in either case. An optional,
+result, or action element stays wrapped and is not executed or
+propagated implicitly. For example, `@/ &- [10 3 2]` is
+`?1 5`. Use `/: F SEED XS` when a seed is required. See
+[sequence calculus](../examples/basics/sequence-calculus.flx).
+
+Write a space before the operand of `|:` when its name could be a
+conversion suffix: `|: q` transposes q, while `|:q x` retains the
+compact conversion-and-absolute-value form. Use `@ /` if ordinary
+application and the division token must remain separate; `@/` is
+reduction. Tuple separators next to selectors retain their old meaning.
+
+Migration: `take`, `drop`, `slice`, `flat` and `tr` are transitional
+aliases for `[:`, `:]`, `sect`, `,.` and `|:`, respectively. The
+formatter does not rewrite aliases.
 
 `avg X`, `med X` and `var X` take exact numeric sequences and return
 an optional exact rational mean, median or population variance. `pct P X`

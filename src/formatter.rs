@@ -617,4 +617,23 @@ a := ~= 1q 1q;
         );
         assert_eq!(crate::format_source(&out).unwrap(), out);
     }
+    #[test]
+    fn sequence_calculus_tokens_survive_formatter_margins() {
+        let source = r#"
+a:=[: 2 [1 2 3];
+b:=:] 1 [1 2 3];
+c:=sect 2 2 [1 2 3];
+d:=,. [[1 2] [3]];
+e:=|: [[1 2] [3 4]];
+f:=@/ &- [10 3 2];
+g: [z] := [1, .2];
+"#;
+        let out = format(source, 0, &[]).unwrap();
+        for token in [
+            "[: 2", ":] 1", "sect 2 2", ",. [[", "|: [[", "@/ &-", "[1, .2]",
+        ] {
+            assert!(out.contains(token), "{token}: {out}");
+        }
+        assert_eq!(format(&out, 0, &[]).unwrap(), out);
+    }
 }

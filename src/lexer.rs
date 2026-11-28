@@ -21,11 +21,21 @@ fn symbol_at(bytes: &[u8]) -> Option<&'static str> {
         b')' => &[")"],
         b'*' => &["*/", "*:", "*=", "*?", "*"],
         b'+' => &["+//", "+/", "+:", "+"],
-        b',' => &[","],
+        // A tuple comma may already be adjacent to a selector or an
+        // existing dot compound; retain that lexical boundary.
+        b',' if bytes.get(1) == Some(&b'.')
+            && (symbol_at(&bytes[1..]).is_some_and(|op| op.len() > 1)
+                || bytes
+                    .get(2)
+                    .is_some_and(|b| ident_start(*b) || b.is_ascii_digit())) =>
+        {
+            &[","]
+        }
+        b',' => &[",.", ","],
         b'-' => &["-:", "->", "-"],
         b'.' => &["..", ".:", ".{", "."],
         b'/' => &["//", "/:", "/=", "/"],
-        b':' => &[":#", "::", ":=", ":"],
+        b':' => &[":#", "::", ":=", ":]", ":"],
         b';' => &[";"],
         b'<' => &["</", "<:", "<<", "<=", "<@", "<"],
         b'=' => &["=.", "=:", "==", "="],
@@ -33,7 +43,7 @@ fn symbol_at(bytes: &[u8]) -> Option<&'static str> {
         b'?' => &["?!", "?+", "?/", "?0", "?1", "?:", "?=", "??", "?{", "?"],
         // Preserve compact ordinary application to an existing compound
         // operand or selector: @.field, @.1, @?{, @?!, and similar forms.
-        b'@' if matches!(bytes.get(1), Some(b'.' | b'?' | b'*'))
+        b'@' if matches!(bytes.get(1), Some(b'.' | b'?' | b'*' | b'/'))
             && (symbol_at(&bytes[1..]).is_some_and(|op| op.len() > 1)
                 || bytes[1] == b'.'
                     && bytes
@@ -42,13 +52,24 @@ fn symbol_at(bytes: &[u8]) -> Option<&'static str> {
         {
             &["@"]
         }
-        b'@' => &["@:", "@>", "@@", "@.", "@*", "@?", "@"],
+        b'@' => &["@:", "@>", "@@", "@.", "@*", "@?", "@/", "@"],
         b'[' => &["[:", "["],
         b'\\' => &["\\:", "\\"],
         b']' => &["]"],
         b'^' => &["^{", "^:", "^?", "^=", "^/", "^"],
         b'{' => &["{.", "{"],
-        b'|' => &["||/", "|{", "||", "|"],
+        // Keep a conversion following the separator available without
+        // whitespace, just as before `|:` became a callable spelling.
+        b'|' if bytes.get(1) == Some(&b':')
+            && (symbol_at(&bytes[1..]).is_some_and(|op| op.len() > 1)
+                || matches!(bytes.get(2), Some(b'n' | b'z' | b'q' | b'd' | b'r'))
+                    && bytes.get(3).is_none_or(|b| !ident_continue(*b))
+                    && !(bytes.get(3) == Some(&b'.')
+                        && bytes.get(4).is_some_and(|b| ident_start(*b)))) =>
+        {
+            &["|"]
+        }
+        b'|' => &["||/", "|{", "||", "|:", "|"],
         b'}' => &["}"],
         b'~' => &["~/", "~:", "~=", "~"],
         _ => return None,
@@ -388,5 +409,28 @@ mod tests {
         assert!(error.message.contains("use `~key_2`"));
         assert!(lex("'a' '\\n' '\\u{e9}'").is_ok());
         assert_eq!(parts("~n ~ n ~="), ["~", "n", "~", "n", "~="]);
+    }
+
+    #[test]
+    fn symbolic_sequence_aliases_respect_existing_compact_token_boundaries() {
+        assert_eq!(
+            parts("[: :] sect ,. |: @/"),
+            ["[:", ":]", "sect", ",.", "|:", "@/"]
+        );
+        assert_eq!(
+            parts("(x,.field) (x,.1) (x,.{ y := 1; }) (x,..1z 3z) (x,.: 1n xs)"),
+            [
+                "(", "x", ",", ".field", ")", "(", "x", ",", ".1", ")", "(", "x", ",", ".{", "y",
+                ":=", "1", ";", "}", ")", "(", "x", ",", "..", "1z", "3z", ")", "(", "x", ",",
+                ".:", "1n", "xs", ")"
+            ]
+        );
+        assert_eq!(
+            parts("|:q |:n |:d |: q @// @/= @/: @ / @/"),
+            [
+                "|", ":", "q", "|", ":", "n", "|", ":", "d", "|:", "q", "@", "//", "@", "/=", "@",
+                "/:", "@", "/", "@/"
+            ]
+        );
     }
 }

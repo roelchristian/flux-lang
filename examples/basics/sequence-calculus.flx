@@ -1,0 +1,23 @@
+--- Take a prefix, drop a prefix, or select a one-based section.
+xs := [10 20 30 40];
+a := [: 2 xs;
+b := :] 2 xs;
+section := sect 2 2 "a\u{03bb}bc";
+
+--- Ravel one level or transpose a rectangular sequence of rows.
+flat_rows := ,. [[1 2] [3]];
+columns := |: [[1 2] [3 4]];
+
+--- A seedless reduction associates to the left and can be absent.
+empty: [z] := [];
+difference := @/ &- [10 3 2];
+missing := @/ &- empty;
+
+!{
+    ^{
+        ^? ! print (a, b, section);
+        ^? ! print (flat_rows, columns);
+        ^? ! print (difference, missing);
+        ()
+    }
+};
