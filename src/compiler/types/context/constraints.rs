@@ -42,6 +42,10 @@ impl InferCtx {
                 class,
                 ty: ty.clone(),
             }),
+            // Complex values have equality, but not ordering, hashing, or
+            // the real/exact Num contract that statistics and Mathesis use.
+            Prim(crate::types::Prim::Cx) if class == Eq => {}
+            Prim(crate::types::Prim::Cx) => return fail(),
             Prim(p) if class == Ord => {
                 if !matches!(
                     p,

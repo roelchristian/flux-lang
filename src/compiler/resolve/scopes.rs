@@ -52,7 +52,13 @@ pub(super) fn resolve_impl(p: &Program, retain_shape: bool) -> Result<Resolution
             let id = r.fresh(v.name, SymbolKind::Constructor(v.payload.len()), 0);
             r.out.owners.insert(id, owner_id);
             r.out.standard.push((owner, v.name, id));
-            r.standard_visible.insert(v.name.to_owned(), id);
+            // Preserve the earlier native binding when new families share
+            // a variant name. Both remain available by their module qualifier.
+            r.standard_visible.entry(v.name.to_owned()).or_insert(id);
+            if let Some(namespace) = standard_errors::variant_namespace(owner) {
+                r.standard_visible
+                    .insert(format!("{namespace}.{}", v.name), id);
+            }
         }
     }
     r.scopes.push(HashMap::new());

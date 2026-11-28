@@ -107,10 +107,10 @@ impl Parser {
             if self.def_at(i) {
                 let type_head = self.type_head(i);
                 let is_type = type_head.is_some();
-                if is_type && n == "array" {
+                if is_type && matches!(n.as_str(), "array" | "cx") {
                     return Err(Error::new(
                         self.toks[i].start,
-                        "`array` is a built-in type name and cannot be redeclared",
+                        format!("`{n}` is a built-in type name and cannot be redeclared"),
                     ));
                 }
                 let is_sum =

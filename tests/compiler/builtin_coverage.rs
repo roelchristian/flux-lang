@@ -275,6 +275,61 @@ const MATHESIS: &[Case] = &[
     ("num.diff", "num.diff &line 3r 0.125r", "ok 1"),
 ];
 
+const ALGEBRA: &[Case] = &[
+    ("lin.eye", "lin.eye 2n", "array [2 2] [1 0 0 1]"),
+    (
+        "lin.diag",
+        "lin.diag (form [2] [1.20d 2.30d])",
+        "ok array [2 2] [1.20 0 0 2.30]",
+    ),
+    ("lin.trace", "lin.trace natural", "ok 1"),
+    ("lin.norm", "lin.norm (form [2] [3r 4r])", "ok 5"),
+    ("lin.frob", "lin.frob (form [2 2] [0r 3r 4r 0r])", "ok 5"),
+    ("lin.det", "lin.det natural", "ok -2"),
+    ("lin.rank", "@ &lin.rank (form [2 2] [1z 2z 2z 4z])", "ok 1"),
+    (
+        "lin.solve",
+        "lin.solve natural (form [2] [2n 3n])",
+        "ok array [2] [2 1]",
+    ),
+    (
+        "lin.inv",
+        "lin.inv (form [2 2] [2z 0z 0z 4z])",
+        "ok array [2 2] [1/2 0 0 1/4]",
+    ),
+    (
+        "lin.pow",
+        "lin.pow (form [2 2] [1z 1z 0z 1z]) 3n",
+        "ok array [2 2] [1 3 0 1]",
+    ),
+    (
+        "lin.lu",
+        "lin.lu matrix",
+        "ok {p := [2 1]; l := array [2 2] [1 0 0 1]; u := array [2 2] [1 1 0 2]}",
+    ),
+    (
+        "lin.qr",
+        "@ qr matrix_id",
+        "ok {q := array [2 2] [-1 0 0 -1]; r := array [2 2] [-1 0 0 -1]}",
+    ),
+    (
+        "lin.cholesky",
+        "lin.cholesky (form [2 2] [4r 2r 2r 2r])",
+        "ok array [2 2] [2 0 1 1]",
+    ),
+    (
+        "lin.lstsq",
+        "lin.lstsq 1e-12r (form [3 2] [1r 0r 0r 1r 0r 0r]) (form [3] [2r 3r 4r])",
+        "ok array [2] [2 3]",
+    ),
+    ("cx.make", "cx.make 3r 4r", "cx(3, 4)"),
+    ("cx.re", "cx.re a", "3"),
+    ("cx.im", "cx.im a", "4"),
+    ("cx.conj", "@ conj a", "cx(3, -4)"),
+    ("cx.abs", "cx.abs a", "5"),
+    ("cx.arg", "cx.arg (cx.make 1r 0r)", "0"),
+];
+
 fn expression_source(definitions: &str, expression: &str) -> String {
     format!("{PRELUDE}\n{definitions}\n!{{ ^= ! io.print {expression} {{ _ : (); }}; }};")
 }
@@ -312,6 +367,7 @@ fn every_runtime_registry_entry_has_a_strict_fixture() {
         TABLES,
         DENSE_ARRAYS,
         MATHESIS,
+        ALGEBRA,
     ]
     .into_iter()
     .flat_map(|cases| cases.iter().map(|case| case.0))
@@ -361,6 +417,21 @@ one(x:r):r := 1r;
 opts := .{ tol:=1e-10r; max:=1024n; };
 "#,
         MATHESIS,
+    );
+}
+
+#[test]
+fn all_registered_algebra_builtins_execute_in_hir() {
+    assert_cases_with(
+        r#"<< "lin"; << "cx";
+natural:array[n] := form [2 2] [0 2 1 1];
+matrix:array[r] := :r natural;
+matrix_id:array[r] := :r (lin.eye 2n);
+qr:array[r]->.{r:array[r];q:array[r];}^linerr := &lin.qr;
+a:cx := cx.make 3r 4r;
+conj:cx->cx := &{ cx.conj };
+"#,
+        ALGEBRA,
     );
 }
 

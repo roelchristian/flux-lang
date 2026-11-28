@@ -18,6 +18,7 @@ pub enum Prim {
     S,
     C,
     Unit,
+    Cx,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -14,6 +14,7 @@ impl fmt::Display for Prim {
             Self::S => "s",
             Self::C => "c",
             Self::Unit => "()",
+            Self::Cx => "cx",
         })
     }
 }

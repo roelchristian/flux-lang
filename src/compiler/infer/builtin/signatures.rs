@@ -15,6 +15,9 @@ impl Engine<'_> {
                 return Err(self.err(format!("{n} expects {arity} operands")));
             }
         }
+        if let Some(spec) = spec.filter(|spec| spec.algebra_signature().is_some()) {
+            return self.algebra_types(spec, xs);
+        }
         if let Some(spec) = spec.filter(|spec| spec.math_signature().is_some()) {
             return self.mathesis_types(spec, xs, want);
         }

@@ -15,6 +15,7 @@ pub const OWNERS: &[&str] = &[
     "dterr",
     "jsonerr",
     "solvererr",
+    "linerr",
 ];
 
 macro_rules! variants_for {
@@ -43,6 +44,20 @@ const SOLVER: &[StandardVariant] = variants_for!("solvererr";
     "nonfinite" => [], "noconverge" => [], "budget" => [],
 );
 
+const LIN: &[StandardVariant] = variants_for!("linerr";
+    "badshape" => [], "singular" => [], "nonposdef" => [], "rankdef" => [],
+    "badtol" => [], "nonfinite" => [], "noconverge" => [],
+);
+
+/// Native qualifiers disambiguate the overlapping numerical error names.
+pub(crate) fn variant_namespace(owner: &str) -> Option<&'static str> {
+    match owner {
+        "solvererr" => Some("num"),
+        "linerr" => Some("lin"),
+        _ => None,
+    }
+}
+
 pub fn variants(owner: &str) -> &'static [StandardVariant] {
     match owner {
         "ioerr" => IO,
@@ -52,6 +67,7 @@ pub fn variants(owner: &str) -> &'static [StandardVariant] {
         "dterr" => DT,
         "jsonerr" => JSON,
         "solvererr" => SOLVER,
+        "linerr" => LIN,
         _ => &[],
     }
 }

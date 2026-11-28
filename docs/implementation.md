@@ -96,6 +96,22 @@ Partial operations such as exponential, general array-to-array
 broadcasting, and arbitrary or recursive callbacks are not fused.
 This is not a second type checker, SIMD or parallel execution.
 
+## Algebra verification
+
+The `lin` and `cx` contracts live in the [language reference](specification.md).
+Kernels operate on admitted array domains and logical views. Check exact
+systems independently using rational arithmetic and a permutation determinant,
+and check real factorizations by reconstruction, orthogonality and residuals:
+
+```sh
+python3 benchmarks/algebra_oracle.py target/release/flux --rounds 48
+```
+
+Algebra's generic and optimized modes share numerical semantics. Shape and
+mathematical failures use `linerr`; work, memory, iteration and exact-bit
+exhaustion remain fatal. Complex products and quotients use bounded exact
+binary64 intermediates and round each component once.
+
 ## Runtime policy
 
 Rust hosts configure `ResourcePolicy` and `RuntimeOptions { resources,

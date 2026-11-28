@@ -46,6 +46,11 @@ Unless noted in the [manifest](manifest.json), run `flux PATH` from the root.
 [shared views and exact fallback](mathematics/dense-views.flx), and
 [matrix contraction](mathematics/matrix-contraction.flx).
 
+[Exact linear systems and rotations](mathematics/linear-systems.flx),
+[matrix factorizations and diagnostics](mathematics/matrix-factorizations.flx),
+[least-squares fitting](mathematics/least-squares.flx), and
+[complex rotations](mathematics/complex.flx).
+
 ## 5. Statistics and tables
 
 [Description](statistics/descriptive.flx), [percentiles](statistics/percentiles.flx),

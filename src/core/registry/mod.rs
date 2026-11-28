@@ -3,6 +3,8 @@
 use crate::core::{lifting::LiftMode, operation::CoreOp};
 use std::sync::LazyLock;
 
+#[macro_use]
+mod algebra;
 mod exports;
 // The macro expands into both registry entries and checked mathematical signatures.
 #[macro_use]
@@ -10,6 +12,7 @@ mod math;
 pub(crate) use crate::core::numeric_domain::BinaryDomain;
 pub use crate::core::numeric_domain::{promote, Numeric};
 use crate::types::Type;
+pub(crate) use algebra::AlgebraInput;
 pub use exports::module_items;
 pub(crate) use math::{MathShape, MathType};
 
@@ -162,6 +165,19 @@ macro_rules! action {
     };
 }
 
+macro_rules! algebra_registry {
+    ($($previous:expr,)*;
+     $($op:ident, $name:literal, $shape:expr, [$($input:ident),*] -> $output:ident;)*) => {
+        &[
+            $($previous,)*
+            $({
+                const INPUTS: &[AlgebraInput] = &[$(AlgebraInput::$input),*];
+                internal!($op, $name, INPUTS.len(), Household, $shape)
+            },)*
+        ]
+    };
+}
+
 // Preserve the public Rust Builtin struct while authoring runtime metadata and
 // arity together. The catalog produces both registry entries and the signature
 // lookup; adding an operation cannot silently omit either view.
@@ -169,13 +185,13 @@ macro_rules! math_registry {
     ($($previous:expr,)*;
      $($op:ident, $name:literal, $shape:expr, $family:ident,
         [$($input:ident),*] -> $output:ident;)*) => {
-        &[
+        with_algebra_catalog!(algebra_registry(
             $($previous,)*
             $({
                 const INPUTS: &[MathType] = &[$(MathType::$input),*];
                 internal!($op, $name, INPUTS.len(), Household, $shape)
             },)*
-        ]
+        ))
     };
 }
 

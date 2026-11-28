@@ -13,7 +13,10 @@ use crate::{
 };
 use crate::{core::operation::Operation, resolve::SymbolId};
 use lexical::validate_lexical_ownership;
-use operations::{dense_signature, is_new_dense_operation, layout_matches, mathesis_signature};
+use operations::{
+    algebra_signature, complex_arithmetic_signature, dense_signature, is_complex_arithmetic,
+    is_new_dense_operation, layout_matches, mathesis_signature,
+};
 use std::collections::{HashMap, HashSet};
 
 fn invalid(span: Span, detail: impl Into<String>) -> Error {
@@ -266,7 +269,13 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
                 if let Target::Builtin(op) = t {
                     let spec = builtins::for_operation(*op).expect("validated target");
                     let mathesis = spec.math_signature().is_some();
-                    if is_new_dense_operation(*op) || mathesis {
+                    let algebra = spec.algebra_signature().is_some();
+                    let complex = is_complex_arithmetic(*op)
+                        && node
+                            .ty
+                            .find_map(|t| matches!(t, Type::Prim(Prim::Cx)).then_some(()))
+                            .is_some();
+                    if is_new_dense_operation(*op) || mathesis || algebra || complex {
                         let mut output = &node.ty;
                         let mut inputs = Vec::with_capacity(spec.arity);
                         for _ in 0..spec.arity {
@@ -275,6 +284,8 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
                                     at,
                                     if mathesis {
                                         "incomplete HIR Mathesis callable type"
+                                    } else if algebra || complex {
+                                        "incomplete HIR Algebra callable type"
                                     } else {
                                         "incomplete HIR dense-array callable type"
                                     },
@@ -285,6 +296,10 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
                         }
                         if mathesis {
                             mathesis_signature(spec, &inputs, output, at)?;
+                        } else if algebra {
+                            algebra_signature(spec, &inputs, output, at)?;
+                        } else if complex {
+                            complex_arithmetic_signature([inputs[0], inputs[1]], output, at)?;
                         } else {
                             dense_signature(*op, &inputs, output, at)?;
                         }
@@ -299,10 +314,23 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
                 if let Target::Builtin(op) = t {
                     let spec = builtins::for_operation(*op).expect("validated target");
                     let mathesis = spec.math_signature().is_some();
-                    if is_new_dense_operation(*op) || mathesis {
+                    let algebra = spec.algebra_signature().is_some();
+                    if is_complex_arithmetic(*op) {
+                        let [left, right] = ids.as_slice() else {
+                            return Err(invalid(at, "invalid HIR binary arithmetic arity"));
+                        };
+                        complex_arithmetic_signature(
+                            [&p.arena[left.0].ty, &p.arena[right.0].ty],
+                            &node.ty,
+                            at,
+                        )?;
+                    }
+                    if is_new_dense_operation(*op) || mathesis || algebra {
                         let inputs: Vec<_> = ids.iter().map(|id| &p.arena[id.0].ty).collect();
                         if mathesis {
                             mathesis_signature(spec, &inputs, &node.ty, at)?;
+                        } else if algebra {
+                            algebra_signature(spec, &inputs, &node.ty, at)?;
                         } else {
                             dense_signature(*op, &inputs, &node.ty, at)?;
                         }
@@ -533,5 +561,76 @@ mod tests {
             .unwrap_err()
             .message
             .contains("incomplete HIR dense-array callable type"));
+    }
+    #[test]
+    fn forged_algebra_result_and_reference_domains_are_rejected() {
+        let ir = checked_hir(
+            r#"<<"lin"; m:array[n] := form [1 1] [2];
+                det:z^linerr := lin.det m; f:array[n]->z^linerr := &lin.det;"#,
+        );
+        validate(&ir).unwrap();
+        for reference in [false, true] {
+            let mut forged = ir.clone();
+            let node = forged
+                .arena
+                .iter_mut()
+                .find(|node| match node.kind {
+                    ExprKind::Reference(Target::Builtin(CoreOp::LinDet)) => reference,
+                    ExprKind::Call(Target::Builtin(CoreOp::LinDet), _) => !reference,
+                    _ => false,
+                })
+                .unwrap();
+            let value = match &mut node.ty {
+                Type::Fun(_, out) => out.as_mut(),
+                result => result,
+            };
+            let Type::Result(ok, _) = value else {
+                panic!("expected a checked fallible determinant")
+            };
+            **ok = Type::Prim(Prim::Q);
+            let diagnostic = validate(&forged).unwrap_err();
+            assert!(
+                diagnostic.message.contains("HIR lin.det signature"),
+                "{diagnostic}"
+            );
+        }
+    }
+    #[test]
+    fn forged_complex_arithmetic_and_projections_are_rejected() {
+        let base = checked_hir(
+            r#"<<"cx"; a := cx.make 1 2; b := + a a;
+                f:cx->cx->cx := &/; re:cx->r := &cx.re;"#,
+        );
+        validate(&base).unwrap();
+        for variant in [CoreOp::Add, CoreOp::Div, CoreOp::CxRe] {
+            let mut forged = base.clone();
+            let node = forged
+                .arena
+                .iter_mut()
+                .find(|node| match node.kind {
+                    ExprKind::Reference(Target::Builtin(op))
+                    | ExprKind::Call(Target::Builtin(op), _) => op == variant,
+                    _ => false,
+                })
+                .unwrap();
+            let real = Type::Prim(Prim::R);
+            match (&mut node.kind, &mut node.ty) {
+                (ExprKind::Call(_, _), ty) => {
+                    *ty = real.clone();
+                    let Some(Operation::Numeric { result, .. }) = &mut node.evidence else {
+                        panic!("expected arithmetic witness")
+                    };
+                    *result = real;
+                }
+                (ExprKind::Reference(_), Type::Fun(first, _)) => **first = real,
+                _ => panic!("expected a checked complex operation"),
+            }
+            let diagnostic = validate(&forged).unwrap_err();
+            assert!(
+                diagnostic.message.contains("HIR complex arithmetic")
+                    || diagnostic.message.contains("HIR cx.re signature"),
+                "{diagnostic}"
+            );
+        }
     }
 }

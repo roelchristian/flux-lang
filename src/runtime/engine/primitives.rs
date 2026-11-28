@@ -21,6 +21,7 @@ pub(super) enum WitnessedOp {
     Join(CoreOp),
     Relation(CoreOp),
     Combinator(CoreOp),
+    LinearAlgebra(CoreOp),
     ArrayOverload(CoreOp, usize),
 }
 
@@ -35,6 +36,8 @@ pub(super) fn witnessed_op(op: CoreOp) -> Option<WitnessedOp> {
         WitnessedOp::Relation(op)
     } else if combinators::handles(op) {
         WitnessedOp::Combinator(op)
+    } else if op.is_linear_algebra() {
+        WitnessedOp::LinearAlgebra(op)
     } else {
         let index = array::overloaded_operand(op)?;
         WitnessedOp::ArrayOverload(op, index)
@@ -118,6 +121,13 @@ impl Eval<'_> {
             WitnessedOp::Combinator(core) => {
                 combinators::apply(core, args, inputs, output, self, span)
             }
+            WitnessedOp::LinearAlgebra(core) => {
+                self.tick(span)?;
+                if args.len() != operation_arity(core, span)? || inputs.len() != args.len() {
+                    return Err(invariant(span, "invalid checked linear algebra arity"));
+                }
+                math::linear::apply(core, &args, inputs, self, span)
+            }
             WitnessedOp::ArrayOverload(core, index) => {
                 if inputs.get(index).and_then(Type::array_element).is_some() {
                     self.tick(span)?;
@@ -197,6 +207,13 @@ impl Eval<'_> {
                 ))
             }
             Reduce => return Err(invariant(span, "checked reduce requires operand evidence")),
+            LinEye | LinDiag | LinTrace | LinNorm | LinFrob | LinDet | LinRank | LinSolve
+            | LinInv | LinPow | LinLu | LinQr | LinCholesky | LinLstsq => {
+                return Err(invariant(
+                    span,
+                    "checked linear algebra requires operand evidence",
+                ));
+            }
             ArrayReshape | ArrayForm | ArrayShape | ArrayRavel | ArrayAt | ArrayMap | ArrayZip
             | ArrayOuter | ArrayRankMap | ArrayScan | ArrayWindows | ArraySelect | ArrayGrade
             | ArrayPermute | ArrayAxes | ArraySection | ArrayReduce | ArrayFold | ArrayScanAxis
@@ -484,6 +501,9 @@ impl Eval<'_> {
             Quantize => {
                 let scale = exact_index(&a()).map_err(fail)?;
                 decimal::quantize(&a(), scale)
+            }
+            CxMake | CxRe | CxIm | CxConj | CxAbs | CxArg => {
+                crate::hir_eval::numeric::complex::apply(op, args.as_slice())
             }
             MathFloor | MathCeil | MathTrunc | MathRound | MathSign | MathFrac | MathRecip
             | MathExp | MathExpm1 | MathLn | MathLog10 | MathLog1p | MathSin | MathCos

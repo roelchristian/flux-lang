@@ -193,6 +193,7 @@ An annotation is not a conversion.
 | Form | Meaning |
 |---|---|
 | `n`, `z`, `q`, `d`, `r` | Natural, signed integer, exact rational, exact decimal, approximate real |
+| `cx` | Approximate complex number with two finite binary64 components |
 | `b`, `c`, `s`, `()` | Boolean, Unicode scalar, string, unit |
 | `[a]`, `(a,b)` | Homogeneous sequence and heterogeneous tuple |
 | `array[a]` | Dense homogeneous array with checked dynamic shape |
@@ -870,6 +871,101 @@ of a root or an integration error bound. A fatal diagnostic in a
 callback is not caught and relabeled as a solver result. See
 [root finding](../examples/mathematics/numerical-roots.flx) and
 [integration and approximation](../examples/mathematics/integration.flx).
+
+### Linear algebra and complex numbers (Algebra)
+
+Import `<< "lin";` for shape-checked linear algebra, or `<< "cx";` for
+complex construction and inspection. They add no prelude callables.
+
+#### Linear algebra
+
+An operand `A` below is a dense array. `t` is one scalar domain from
+`n`, `z`, `q`, `d` or `r`; a binary operation requiring the same
+domain checks it statically. Convert differing explicit types with
+`:q` for exact arithmetic or `:r` for approximate arithmetic.
+Unsuffixed integers can adopt their ordinary numerical context. For
+`det`, `solve` and `inv`, annotate unresolved inputs when the result
+domain depends on them. Ranks and dimensions are checked at execution.
+Linear algebra operations do not broadcast.
+
+| Operation | Success type and contract |
+| --- | --- |
+| `lin.eye N` | `array[z]`. Exact identity with natural dimensions N × N. |
+| `lin.diag A` | `array[t]`. For a vector, construct a square diagonal matrix with typed zeros off the diagonal. For a matrix, extract the diagonal up to the smaller dimension. |
+| `lin.trace A` | `t`. Sum a square matrix's diagonal in index order. Decimal addition preserves the greatest diagonal scale. |
+| `lin.norm A`, `lin.frob A` | `r`. Scaled Euclidean norm of a rank-one real vector, or Frobenius norm of a rank-two real matrix, respectively. |
+| `lin.det A` | `z` for `n` or `z`, `q` for `q` or `d`, `r` for `r`. Determinant of a square matrix; an exact singular matrix has determinant zero. |
+| `lin.rank A` | `n`. Rank of a rectangular matrix. Exact inputs use exact zero tests; real inputs use a relative pivot tolerance. |
+| `lin.solve A B` | `array[q]` for exact inputs, `array[r]` for real inputs. For a square A, solve Ax = B. B can be a vector or a matrix with one right-hand side per column and the same number of rows as A. The output keeps B's rank. |
+| `lin.inv A` | `array[q]` for exact inputs, `array[r]` for real inputs. Invert a square matrix. |
+| `lin.pow A N` | `array[t]`. Raise a square matrix to a natural power by squaring. Power zero returns the identity in the input domain; decimal products and sums use ordinary scale rules. |
+| `lin.lu A` | `.{ p:[n]; l:array[r]; u:array[r]; }`. Partial-pivot LU of a nonsingular square real matrix; `l` is unit lower triangular and `u` is upper triangular. The one-based permutation `p` lists original row indices in pivot order, so A with its rows reordered by `p` equals LU up to rounding. Ties keep the first candidate row. |
+| `lin.qr A` | `.{ q:array[r]; r:array[r]; }`. Thin Householder QR of a real m × n matrix. With k = min(m,n), Q is m × k with orthonormal columns and R is upper trapezoidal, k × n. The decomposition also accepts rank-deficient input. |
+| `lin.cholesky A` | `array[r]`. Lower triangular L for a symmetric positive-definite real square matrix, with A ≈ LLᵀ. |
+| `lin.lstsq TOL A B` | `array[r]`. Solve full-column-rank least squares via Householder QR. A is real m × n with m ≥ n; B is a real vector of length m or a matrix with m rows. The output has n entries or rows and keeps B's rank. TOL is real and strictly between zero and one. |
+
+Except for `lin.eye`, the actual result type is the stated success type
+followed by `^linerr`. `badshape` covers invalid ranks or dimensions;
+`singular` covers unavailable LU, solution or inverse; `nonposdef`
+covers failed symmetry or positive-definiteness checks; `rankdef`
+and `badtol` cover least-squares rank and tolerance failures.
+`nonfinite` means approximate computation produced a nonfinite
+intermediate or output. `noconverge` is reserved for iterative linear
+methods. If both `lin` and `num` are imported, shared bare constructor
+names retain their `solvererr` meaning. In expressions or patterns,
+write `lin.singular` and `num.singular` to distinguish the owners
+(or use the corresponding import aliases). Work, memory, array and
+exact-number resource limits remain fatal diagnostics, not `linerr`.
+
+Integral determinants use fraction-free Bareiss elimination. Rational
+and decimal determinants, rank, solutions and inverses use exact
+elimination; exact work does not fall back to binary64. Real rank, LU,
+solve and inverse treat a pivot as numerically zero when its magnitude,
+divided by the greatest absolute input entry, is at most machine
+epsilon times the largest input dimension (at least one). Real
+determinants use computed zero pivots rather than that rank threshold.
+Least squares compares the QR diagonal relative to the greatest
+absolute entry of A using the supplied tolerance. Cholesky checks
+symmetry on the stored values; a computed pivot must be positive
+and exceed the default relative threshold against its original
+diagonal entry. These are numerical classifications rather than
+certificates of exact rank. Extreme scales can produce `nonfinite`
+even when a mathematical answer fits in binary64.
+
+The empty square matrix has determinant one and trace zero. Empty
+rectangular matrices have rank zero; the norm of an empty vector and
+Frobenius norm of a zero-volume matrix are zero. Inversion and powers
+preserve the empty square shape. QR and least squares retain their
+specified output shapes when a dimension is zero.
+
+See [exact systems and rotations](../examples/mathematics/linear-systems.flx),
+[matrix factorizations](../examples/mathematics/matrix-factorizations.flx)
+and [least-squares fitting](../examples/mathematics/least-squares.flx).
+
+#### Complex arithmetic
+
+The type `cx` is distinct from `r` and the character type `c`.
+Construct it explicitly with `cx.make REAL IMAGINARY`, where both
+operands are `r`. There is no complex literal suffix or implicit
+numeric promotion to `cx`. `cx.re Z`, `cx.im Z` and `cx.abs Z`
+return real part, imaginary part and magnitude as `r`. `cx.arg Z`
+returns the principal argument in radians, using `atan2(im,re)`
+including its signed-zero conventions at the origin. `cx.conj Z`
+returns the conjugate as `cx`. These named functions are scalar;
+use `@:` to apply them across a collection.
+
+The operators `+`, `-`, `*` and `/` accept two complex operands
+and return `cx`, with the ordinary one-level sequence or dense array
+lifting. Addition and subtraction round each component as binary64.
+Multiplication and division round each final component once, with
+exact zero components represented by positive zero. Division by
+complex zero and nonfinite outcomes are fatal domain diagnostics.
+The value supports componentwise equality (including structural
+`==`), treating the two signs of zero as equal. It does not support
+ordering, hashing or the existing real/exact `num` constraint.
+CSV and JSON define no automatic encoding for complex values.
+
+See [complex rotations](../examples/mathematics/complex.flx).
 
 ### CSV
 

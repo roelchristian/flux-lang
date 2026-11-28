@@ -10,6 +10,17 @@ obsolete specifications are not kept as duplicate files.
 - Consolidate shared Rust internals and streamline the reference and example
   index without changing the language. Group integration tests by topic.
 
+## Draft 0.22
+
+- Add `lin` for exact determinants, rank, solutions, inverses and matrix
+  powers, and checked real norms, LU, thin QR, Cholesky and least squares.
+  Shape and numerical failures have typed `linerr` results.
+- Add finite binary64 complex scalars (`cx`) with explicit construction,
+  inspection, arithmetic and equality. Existing exact numbers and character
+  literals keep their meaning.
+- Add reproducible examples for exact systems, transformations, matrix
+  factorization, least-squares fitting and complex rotations.
+
 ## Draft 0.21
 
 - Build compact dense arrays directly from checked, non-escaping integer ranges.

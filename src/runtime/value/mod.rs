@@ -21,6 +21,7 @@ pub(in crate::hir_eval) enum V {
     Exact(Exact),
     Wide(Rc<Wide>),
     Real(f64),
+    Complex([f64; 2]),
     Bool(bool),
     String(Rc<str>),
     Char(char),
