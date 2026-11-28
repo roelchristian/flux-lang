@@ -147,3 +147,43 @@ fn escapes_cannot_skip_the_nearest_boundary_or_cross_an_action() {
             .contains("nearest lexical"));
     }
 }
+
+#[test]
+fn named_call_target_is_checked_before_any_effects() {
+    let p = checked(
+        r#"data := 7z;
+f(x:z):z := x;
+g(x,y:z):z := + x y;
+!{ ^{ ^? ! print "not emitted"; ^? ! print f 3z; () } };"#,
+    );
+    let value = p
+        .groups
+        .iter()
+        .flatten()
+        .find(|d| d.formals.is_empty())
+        .unwrap()
+        .symbol;
+    let dyadic = p
+        .groups
+        .iter()
+        .flatten()
+        .find(|d| d.formals.len() == 2)
+        .unwrap()
+        .symbol;
+    for (replacement, reason) in [(value, "value binding"), (dyadic, "expects 2 operand")] {
+        let mut malformed = p.clone();
+        let call = malformed
+            .arena
+            .iter_mut()
+            .find_map(|node| match &mut node.kind {
+                ExprKind::Call(Target::Symbol(id), _) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        *call = replacement;
+        let mut sink = Vec::new();
+        let failure = hir_eval::run_with_output(&malformed, &mut sink).unwrap_err();
+        assert!(failure.message.contains(reason), "{failure}");
+        assert!(sink.is_empty());
+    }
+}

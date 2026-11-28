@@ -5,7 +5,7 @@ use crate::{
     diagnostic::{Category, Diagnostic},
     Error,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 fn invalid(span: Span, detail: impl Into<String>) -> Error {
     Diagnostic::new(Category::InvalidHir, span, detail).into_error()
@@ -32,9 +32,13 @@ fn definition(
     def: &Definition,
     limit: usize,
     symbols: &mut HashSet<SymbolId>,
+    callables: &mut HashMap<SymbolId, usize>,
 ) -> Result<(), Error> {
     edge(def.body, limit, def.span)?;
     introduce(symbols, def.symbol, def.span)?;
+    if !def.formals.is_empty() {
+        callables.insert(def.symbol, def.formals.len());
+    }
     for &formal in &def.formals {
         introduce(symbols, formal, def.span)?;
     }
@@ -47,12 +51,18 @@ fn constructor(p: &HirProgram, id: SymbolId, span: Span) -> Result<&ConstructorD
         .ok_or_else(|| invalid(span, format!("unknown HIR constructor {}", id.0)))
 }
 
+enum SymbolUse {
+    Load,
+    Reference,
+    Call(usize),
+}
+
 fn target(
     p: &HirProgram,
     target: &Target,
     arity: Option<usize>,
     span: Span,
-    references: &mut Vec<(SymbolId, Span)>,
+    references: &mut Vec<(SymbolId, Span, SymbolUse)>,
 ) -> Result<(), Error> {
     let expected = match target {
         Target::Builtin(op) => {
@@ -63,7 +73,11 @@ fn target(
         Target::Projection(_) => 1,
         Target::Constructor(id) => constructor(p, *id, span)?.payload.len(),
         Target::Symbol(id) => {
-            references.push((*id, span));
+            references.push((
+                *id,
+                span,
+                arity.map_or(SymbolUse::Reference, SymbolUse::Call),
+            ));
             return Ok(());
         }
     };
@@ -155,6 +169,7 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
         edge(entry, p.arena.len(), Span::default())?;
     }
     let mut bindings = HashSet::new();
+    let mut callables = HashMap::new();
     for (&id, def) in &p.constructors {
         if id != def.id {
             return Err(invalid(
@@ -174,7 +189,7 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
         }
     }
     for d in p.groups.iter().flatten() {
-        definition(d, p.arena.len(), &mut bindings)?;
+        definition(d, p.arena.len(), &mut bindings, &mut callables)?;
     }
     let mut references = Vec::new();
     let mut source_ids = HashSet::new();
@@ -247,7 +262,7 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
         }
         match &node.kind {
             ExprKind::Literal(_) => {}
-            ExprKind::Load(id) => references.push((*id, at)),
+            ExprKind::Load(id) => references.push((*id, at, SymbolUse::Load)),
             ExprKind::Reference(t) => target(p, t, None, at, &mut references)?,
             ExprKind::Call(t, ids) => {
                 target(p, t, Some(ids.len()), at, &mut references)?;
@@ -306,10 +321,10 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
                 if !boundaries.insert(*boundary) {
                     return Err(invalid(at, "duplicate HIR error boundary"));
                 }
-                validate_steps(steps, *tail, i, at, &mut bindings)?;
+                validate_steps(steps, *tail, i, at, &mut bindings, &mut callables)?;
             }
             ExprKind::Block { steps, tail, .. } => {
-                validate_steps(steps, *tail, i, at, &mut bindings)?;
+                validate_steps(steps, *tail, i, at, &mut bindings, &mut callables)?;
             }
             ExprKind::Raise { boundary, payload } => {
                 child(*payload)?;
@@ -355,9 +370,23 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
             }
         }
     }
-    for (id, at) in references {
+    for (id, at, usage) in references {
         if !bindings.contains(&id) {
             return Err(invalid(at, format!("unknown HIR symbol {}", id.0)));
+        }
+        let given = match usage {
+            SymbolUse::Load => continue,
+            SymbolUse::Reference => None,
+            SymbolUse::Call(n) => Some(n),
+        };
+        let expected = callables
+            .get(&id)
+            .ok_or_else(|| invalid(at, "HIR callable target refers to a value binding"))?;
+        if given.is_some_and(|n| n != *expected) {
+            return Err(invalid(
+                at,
+                format!("HIR callable target expects {expected} operand(s)"),
+            ));
         }
     }
     for (id, at) in escapes {
@@ -371,7 +400,6 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
 /// Lowering owns a contiguous, post-order tree, not a shared expression DAG.
 /// This gives an exact scope test without walking ancestor chains per load.
 fn validate_lexical_ownership(p: &HirProgram) -> Result<(), Error> {
-    use std::collections::HashMap;
     let mut begins = Vec::with_capacity(p.arena.len());
     let mut owned = vec![false; p.arena.len()];
     let mut parents = vec![None; p.arena.len()];
@@ -572,10 +600,11 @@ fn validate_steps(
     limit: usize,
     span: Span,
     bindings: &mut HashSet<SymbolId>,
+    callables: &mut HashMap<SymbolId, usize>,
 ) -> Result<(), Error> {
     for step in steps {
         match step {
-            Step::Define(def) => definition(def, limit, bindings)?,
+            Step::Define(def) => definition(def, limit, bindings, callables)?,
             Step::Evaluate { binding, body } => {
                 edge(*body, limit, span)?;
                 if let Some(id) = binding {
