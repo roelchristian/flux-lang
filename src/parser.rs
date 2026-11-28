@@ -197,9 +197,42 @@ pub fn parse_type_annotation(source: &str) -> PResult<TypeAnnotation> {
     annotation_tokens(&tokens, source.len())
 }
 
+/// Shared recognition for annotations, row tails, sum headers and
+/// qualifiers. The general lexer still emits the Boolean operator `~` as a
+/// separate token and does not invent a notation in value expressions.
+fn adjacent_type_variable(tokens: &[Token], i: usize, eof: usize) -> PResult<Token> {
+    let Some(sign) = tokens.get(i).filter(|t| t.text == "~") else {
+        return Err(Error::new(
+            tokens.get(i).map_or(eof, |t| t.start),
+            "expected a type variable such as `~a`",
+        ));
+    };
+    let Some(name) = tokens
+        .get(i + 1)
+        .filter(|t| sign.end == t.start && is_ident(&t.text))
+    else {
+        return Err(Error::new(
+            sign.start,
+            "write the type variable with adjacent tilde and name, such as `~a`",
+        ));
+    };
+    Ok(Token {
+        text: format!("~{}", name.text),
+        start: sign.start,
+        end: name.end,
+    })
+}
+
 fn annotation_tokens(input: &[Token], end: usize) -> PResult<TypeAnnotation> {
     let mut ts: Vec<Token> = Vec::with_capacity(input.len());
-    for token in input {
+    let mut i = 0;
+    while let Some(token) = input.get(i) {
+        if token.text == "~" {
+            ts.push(adjacent_type_variable(input, i, end)?);
+            i += 2;
+            continue;
+        }
+        i += 1;
         // Punctuation which is compound in expressions is separate in types.
         let words: &[&str] = match token.text.as_str() {
             "^?" => &["^", "?"],
@@ -404,8 +437,8 @@ impl AnnotationParser<'_> {
                     }
                     if self.eat("|") {
                         let row = self.peek().to_owned();
-                        if !row.strip_prefix('\'').is_some_and(is_ident) {
-                            return self.err("expected a row type variable after `|`");
+                        if !row.strip_prefix('~').is_some_and(is_ident) {
+                            return self.err("expected a row type variable such as `~r` after `|`");
                         }
                         self.i += 1;
                         self.expect("}")?;
@@ -427,7 +460,7 @@ impl AnnotationParser<'_> {
                     }
                 }
             }
-            name if name.strip_prefix('\'').is_some_and(is_ident) => Variable(name.to_owned()),
+            name if name.strip_prefix('~').is_some_and(is_ident) => Variable(name.to_owned()),
             name if is_ident(name) || is_qualified_ident(name) => {
                 if self.peek() == "[" && self.t[start].end == self.t[self.i].start {
                     self.i += 1;
@@ -1617,10 +1650,10 @@ impl Parser {
                     .end_of_group(j)
                     .map(|k| k + 1)
                     .ok_or_else(|| Error::new(start, "malformed constructor payload type"))?;
-            } else if is_ident(self.at(j))
-                || is_qualified_ident(self.at(j))
-                || self.at(j).strip_prefix('\'').is_some_and(is_ident)
-            {
+            } else if self.at(j) == "~" {
+                adjacent_type_variable(&self.toks, j, self.eof)?;
+                j += 2;
+            } else if is_ident(self.at(j)) || is_qualified_ident(self.at(j)) {
                 j += 1;
                 if self.at(j) == "[" && self.toks[j - 1].end == self.toks[j].start {
                     j = self
@@ -1662,13 +1695,8 @@ impl Parser {
         let mut type_params = Vec::new();
         if self.eat("[") {
             loop {
-                let param = self.next()?;
-                if !param.text.strip_prefix('\'').is_some_and(is_ident) {
-                    return Err(Error::new(
-                        param.start,
-                        "expected a sum type parameter such as `'a`",
-                    ));
-                }
+                let param = adjacent_type_variable(&self.toks, self.pos, self.eof)?;
+                self.pos += 2;
                 if type_params.contains(&param.text) {
                     return Err(Error::new(param.start, "duplicate sum type parameter"));
                 }
@@ -1757,10 +1785,8 @@ impl Parser {
                 if !matches!(class.as_str(), "num" | "eq" | "ord" | "hash") {
                     return self.err(format!("unknown type constraint `{class}`"));
                 }
-                let var = self.next()?;
-                if !var.text.strip_prefix(char::from(39)).is_some_and(is_ident) {
-                    return Err(Error::new(var.start, "expected a quantified type variable"));
-                }
+                let var = adjacent_type_variable(&self.toks, self.pos, self.eof)?;
+                self.pos += 2;
                 let pair = (class, var.text);
                 if qualifiers.contains(&pair) {
                     return Err(Error::new(var.start, "duplicate type constraint"));
@@ -2680,7 +2706,7 @@ mod tests {
     #[test]
     fn declarations_store_canonical_types_with_source_offsets() {
         use TypeAnnotationKind::*;
-        let source = "row :: { x:q; }; err :: { | bad (q^err); }; f(x,y:'a,g:.[z]):z := 0;";
+        let source = "row :: { x:q; }; err :: { | bad (q^err); }; f(x,y:~a,g:.[z]):z := 0;";
         let source = source.replace(".[z]", ".{data:#[z q]; tag:?{s:z};}");
         let p = parse(&source).unwrap();
         let Stmt::Schema { fields, .. } = &p.defs[0] else {
@@ -2700,7 +2726,7 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(&source[ts[0].as_ref().unwrap().span.clone()], "'a");
+        assert_eq!(&source[ts[0].as_ref().unwrap().span.clone()], "~a");
         assert_eq!(ts[0], ts[1]);
         let Record(fields) = &ts[2].as_ref().unwrap().kind else {
             panic!()
@@ -2985,7 +3011,7 @@ f(x:q^err^e):q := 0;";
 
     #[test]
     fn generic_sum_headers_payloads_and_match_origins() {
-        let source = "tree['a] :: { | leaf 'a; | node tree['a] tree['a]; }; f(t:tree[q]):q := ?= t { leaf x : x; node _ _ : 0q; };";
+        let source = "tree[~a] :: { | leaf ~a; | node tree[~a] tree[~a]; }; f(t:tree[q]):q := ?= t { leaf x : x; node _ _ : 0q; };";
         let p = parse(source).unwrap();
         let Stmt::Sum {
             type_params,
@@ -2995,7 +3021,7 @@ f(x:q^err^e):q := 0;";
         else {
             panic!("expected generic sum");
         };
-        assert_eq!(type_params, &["'a"]);
+        assert_eq!(type_params, &["~a"]);
         assert_eq!(variants[1].payload.len(), 2);
         assert!(matches!(&variants[1].payload[0].kind,
             TypeAnnotationKind::NamedApply(name, args) if name == "tree" && args.len() == 1));
@@ -3014,7 +3040,7 @@ f(x:q^err^e):q := 0;";
                     && &source[span.clone()] == "x")
         );
         let formatted = crate::format_source(source).unwrap();
-        assert!(formatted.contains("tree['a]"));
+        assert!(formatted.contains("tree[~a]"));
         assert!(formatted.contains("tree[q]"));
         parse(&formatted).unwrap();
         assert_eq!(crate::format_source(&formatted).unwrap(), formatted);
@@ -3033,10 +3059,10 @@ f(x:q^err^e):q := 0;";
                 "unknown or unexported match constructor",
             ),
             (
-                "tree['a,'a] :: { | leaf 'a; };",
+                "tree[~a,~a] :: { | leaf ~a; };",
                 "duplicate sum type parameter",
             ),
-            ("tree['a] :: { field:q; };", "only on nominal sums"),
+            ("tree[~a] :: { field:q; };", "only on nominal sums"),
         ] {
             assert!(
                 parse(source).unwrap_err().message.contains(fragment),
@@ -3049,7 +3075,7 @@ f(x:q^err^e):q := 0;";
     #[test]
     fn explicit_open_row_annotation_parses_without_changing_closed_records() {
         use TypeAnnotationKind::*;
-        let p = parse("keep(t:#.{ field:q; | 'r }):#.{ | 'r } := t;").unwrap();
+        let p = parse("keep(t:#.{ field:q; | ~r }):#.{ | ~r } := t;").unwrap();
         let Stmt::Def {
             param_types,
             result_type,
@@ -3066,20 +3092,20 @@ f(x:q^err^e):q := 0;";
         };
         assert_eq!(fields[0].0, "field");
         assert!(matches!(fields[0].1.kind, Primitive(TypePrimitive::Q)));
-        assert_eq!(row, "'r");
+        assert_eq!(row, "~r");
         let Table(t) = &result_type.as_ref().unwrap().kind else {
             panic!("expected table")
         };
-        assert!(matches!(&t.kind, OpenRecord(fields, row) if fields.is_empty() && row == "'r"));
+        assert!(matches!(&t.kind, OpenRecord(fields, row) if fields.is_empty() && row == "~r"));
         assert!(
             matches!(parse_type_annotation(".{ value:q }").unwrap().kind, Record(fields) if fields.len() == 1)
         );
 
-        let input = "keep(t:#.{ field:q; x:n; | 'r }):#.{ | 'r } := t;";
+        let input = "keep(t:#.{ field:q; x:n; | ~r }):#.{ | ~r } := t;";
         let formatted = crate::format_source(input).unwrap();
         let reparsed = parse(&formatted).unwrap();
         assert_eq!(p.defs.len(), reparsed.defs.len());
-        assert!(formatted.contains("| 'r"));
+        assert!(formatted.contains("| ~r"));
         assert!(formatted.contains("field : q;"));
         assert!(formatted.contains("x     : n;"));
         assert_eq!(crate::format_source(&formatted).unwrap(), formatted);
@@ -3090,12 +3116,12 @@ f(x:q^err^e):q := 0;";
         for input in [
             ".{ | }",
             ".{ | r }",
-            ".{ x:q | 'r }",
-            ".{ x:q; | 'r; }",
-            ".{ | 'r | 't }",
-            ".{ | 'r x:q; }",
-            ".{ x:q; x:s; | 'r }",
-            ".{ x:q; .. 'r }",
+            ".{ x:q | ~r }",
+            ".{ x:q; | ~r; }",
+            ".{ | ~r | ~t }",
+            ".{ | ~r x:q; }",
+            ".{ x:q; x:s; | ~r }",
+            ".{ x:q; .. ~r }",
         ] {
             assert!(parse_type_annotation(input).is_err(), "{input}");
         }
@@ -3112,7 +3138,7 @@ f(x:q^err^e):q := 0;";
             members,
         }];
         let src =
-            r#"<< "./dep.flx" : d; keep(x:.{ value:d.item; | 'r }):.{ value:d.item; | 'r } := x;"#;
+            r#"<< "./dep.flx" : d; keep(x:.{ value:d.item; | ~r }):.{ value:d.item; | ~r } := x;"#;
         let program = parse_module(src, 200, Some("main"), &imports).unwrap();
         let Stmt::Def {
             result_type: Some(ty),
@@ -3125,14 +3151,14 @@ f(x:q^err^e):q := 0;";
             panic!("expected open record")
         };
         assert!(matches!(&fields[0].1.kind, Named(name) if name == &linked));
-        assert_eq!(row, "'r");
+        assert_eq!(row, "~r");
         assert!(ty.span.start >= 200);
     }
 
     #[test]
     fn built_in_array_type_needs_no_import_even_in_modules() {
         let p = parse_module(
-            ">> (keep); keep(a:array['a]):array['a] := a; array := 1z;",
+            ">> (keep); keep(a:array[~a]):array[~a] := a; array := 1z;",
             0,
             Some("test"),
             &[],
@@ -3150,7 +3176,7 @@ f(x:q^err^e):q := 0;";
             if name == "array" && args.len() == 1)
         );
         assert!(parse("array := 1z;").is_ok());
-        for bad in ["array :: { x:q; };", "array['a] :: { | leaf 'a; };"] {
+        for bad in ["array :: { x:q; };", "array[~a] :: { | leaf ~a; };"] {
             assert!(parse(bad).unwrap_err().message.contains("built-in type"));
         }
     }
@@ -3244,7 +3270,7 @@ f(x:q^err^e):q := 0;";
             ("f/65 := &+;", "64"),
             ("f/2:q -> q := &+;", "at least 2"),
             ("f/1:_ -> q := &.;", "complete type"),
-            ("f/1 | num 'a := &.;", "complete named function"),
+            ("f/1 | num ~a := &.;", "complete named function"),
             ("f/1 := 1z;", "right-hand side"),
             ("f/1 := (&.,1z);", "right-hand side"),
         ] {
@@ -3254,5 +3280,45 @@ f(x:q^err^e):q := 0;";
             );
         }
         assert!(parse("x := / 4z 2z; f/1 := (&.);").is_ok());
+    }
+
+    #[test]
+    fn tilde_variables_are_adjacent_only_in_all_type_positions() {
+        let p = parse(
+            "tree[~a] :: { | leaf ~a; | node tree[~a] tree[~a]; }; keep/1: ~a -> ~a | eq ~a := &.;",
+        )
+        .unwrap();
+        let Stmt::Sum {
+            type_params,
+            variants,
+            ..
+        } = &p.defs[0]
+        else {
+            panic!("sum")
+        };
+        assert_eq!(type_params, &["~a"]);
+        assert_eq!(variants[0].payload[0].source(), "~a");
+        let Stmt::Def { start, .. } = &p.defs[1] else {
+            panic!("definition")
+        };
+        assert_eq!(p.constraints[start], vec![("eq".into(), "~a".into())]);
+        for source in [
+            "id(x:~ a):~a := x;",
+            "id(x:~-- split
+a):~a := x;",
+            "f(x:.{ | ~ r }):q := 0q;",
+            "tree[~ a] :: { | leaf ~a; };",
+            "tree[~a] :: { | leaf ~ a; };",
+            "f(x:~a):~a | eq ~ a := x;",
+        ] {
+            assert!(
+                parse(source)
+                    .unwrap_err()
+                    .message
+                    .contains("adjacent tilde"),
+                "{source}"
+            );
+        }
+        assert!(parse("no(b:b):b := ~b; e := ~= 0.1r 1r 1r; c := 'a';").is_ok());
     }
 }

@@ -186,8 +186,8 @@ fn explicit_generic_functions_are_reinstantiated_and_function_values_keep_their_
         "identity.flx",
         r#"
 >> (id, square, twice);
-id(x:'a):'a := x;
-square(x:'a):'a | num 'a := * x x;
+id(x:~a):~a := x;
+square(x:~a):~a | num ~a := * x x;
 twice:z->z := \x -> * x 2z;
 "#,
     );

@@ -5,7 +5,7 @@ transformation and scripting. It uses strict prefix notation: `+ 2 3` means
 “add 2 and 3”. Formulas compose as functions, while file and terminal operations
 run only when explicitly requested.
 
-This repository contains the **Draft 0.12.1** reference interpreter in Rust.
+This repository contains the **Draft 0.13** reference interpreter in Rust.
 The language is still experimental.
 
 ## Quickstart

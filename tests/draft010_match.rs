@@ -99,9 +99,9 @@ fn rejects(source: &str, words: &[&str]) {
 }
 
 const TREE: &str = r#"
-tree['a] :: {
-    | leaf 'a;
-    | node tree['a] tree['a];
+tree[~a] :: {
+    | leaf ~a;
+    | node tree[~a] tree[~a];
 };
 "#;
 
@@ -114,7 +114,7 @@ total(t:tree[z]):z := ?= t {
     leaf x : x;
     node l r : + total l total r;
 };
-first(t:tree['a]):'a := ?= t {
+first(t:tree[~a]):~a := ?= t {
     leaf x : x;
     node l _ : first l;
 };
@@ -172,7 +172,7 @@ never:?s := ?0;
 fn reports_a_missing_case_under_nested_constructor_payloads() {
     rejects(
         r#"
-maybe['a] :: { | wrap ?'a; };
+maybe[~a] :: { | wrap ?~a; };
 f(x:maybe[z]):z := ?= x { wrap ?1 y : y; };
 "#,
         &["exhaustive"],
@@ -199,11 +199,11 @@ fn reports_duplicate_binders_and_incompatible_arm_or_payload_types() {
     rejects("f(x:(z,z)):z := ?= x { (y,y) : y; };", &["duplicate", "y"]);
     rejects("f(x:b):z := ?= x { 0b : 0z; 1b : \"one\"; };", &["E0200"]);
     rejects(
-        "maybe['a] :: { | wrap 'a; }; x:maybe[z] := wrap \"text\";",
+        "maybe[~a] :: { | wrap ~a; }; x:maybe[z] := wrap \"text\";",
         &["E0200"],
     );
     rejects(
-        "maybe['a] :: { | wrap 'a; }; f(x:maybe[z]):z := ?= x { wrap 1b : 0z; _ : 1z; };",
+        "maybe[~a] :: { | wrap ~a; }; f(x:maybe[z]):z := ?= x { wrap 1b : 0z; _ : 1z; };",
         &["E0200"],
     );
 }
@@ -214,7 +214,7 @@ fn imported_generic_constructors_preserve_nominal_identity_across_aliases() {
         r#"
 << "tree.flx" : t;
 << "./tree.flx" : same;
-head(x:t.tree['a]):'a := ?= x {
+head(x:t.tree[~a]):~a := ?= x {
     same.leaf v : v;
     same.node l _ : head l;
 };

@@ -78,7 +78,7 @@ fn rejected(source: &str, fragment: &str) -> String {
 fn generalizes_nonexpansive_closures_and_tacit_values_independently() {
     works(
         r#"
-identity:'a->'a := \x -> x;
+identity:~a->~a := \x -> x;
 square := &{ @* * . . };
 alias := square;
 !{ ^{
@@ -104,7 +104,7 @@ s := @ weak "s";
     let error = rejected(
         r#"
 id(x) := x;
-claimed:'a->'a := @ &id &id;
+claimed:~a->~a := @ &id &id;
 only_one := @ claimed 1z;
 "#,
         "value restriction",
@@ -122,24 +122,24 @@ specialized:z->z := @ &id &id;
 
 #[test]
 fn declared_schemes_check_rigidity_and_captured_variables() {
-    rejected("specialized(x:'a):'a := + x 1z;", "annotated type variable");
+    rejected("specialized(x:~a):~a := + x 1z;", "annotated type variable");
     rejected(
         r#"
 outer(f) := {
-    pretend(x:'a):'a := @ f x;
+    pretend(x:~a):~a := @ f x;
     pretend "s"
 };
 "#,
         "escapes",
     );
-    rejected("missing(x:'a):'a := * x x;", "lacks");
+    rejected("missing(x:~a):~a := * x x;", "lacks");
 }
 
 #[test]
 fn recursive_headers_are_monomorphic_in_the_group_and_generalize_afterwards() {
     works(
         r#"
-walk(k:n,x:'a):'a := ?{
+walk(k:n,x:~a):~a := ?{
     = k 0n : x;
     _ : walk (- k 1n) x;
 };
@@ -154,7 +154,7 @@ walk(k:n,x:'a):'a := ?{
 fn named_higher_order_and_tacit_numeric_composition_share_domains() {
     works(
         r#"
-square(x:'a):'a | num 'a := * x x;
+square(x:~a):~a | num ~a := * x x;
 apply(f,x) := @ f x;
 tacit := &{ @* * . . };
 !{ ^{
@@ -178,7 +178,7 @@ value := @ lib.claimed 7z;
         fixture.0.join("lib.flx"),
         r#">> (claimed);
 id(x) := x;
-claimed:'a->'a := @ &id &id;
+claimed:~a->~a := @ &id &id;
 "#,
     )
     .unwrap();

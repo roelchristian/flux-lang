@@ -138,7 +138,7 @@ fn calls_forward_and_recursive_declarations_in_lexical_scopes() {
         r#"
 first := later 3z 4z;
 later/2:z->z->z := &+;
-tree['a] :: { | leaf 'a; | branch tree['a] tree['a]; };
+tree[~a] :: { | leaf ~a; | branch tree[~a] tree[~a]; };
 total/1:tree[z]->z := \t -> ?= t {
     leaf x : x;
     branch l r : + (total l) (total r);
@@ -158,8 +158,8 @@ local(x:z):z := {
 fn numeric_qualifiers_and_open_rows_reinstantiate_per_call() {
     Fixture::new(
         r#"
-square/1:'a->'a | num 'a := &{ @* * . . };
-get/1:.{ value:'a; | 'r }->'a := &.value;
+square/1:~a->~a | num ~a := &{ @* * . . };
+get/1:.{ value:~a; | ~r }->~a := &.value;
 !{ ^{
     ^? ! print (square 3n,square 0.5q,square 1.20d,
         get .{value:=7n;label:="one";},get .{flag:=1b;value:="two";});

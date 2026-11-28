@@ -69,7 +69,7 @@ fn missing_entry_or_call_child_is_not_an_index_panic() {
 #[test]
 fn generic_valid_hir_preserves_each_checked_application() {
     let src = r#"
-id(x:'a):'a := x;
+id(x:~a):~a := x;
 both := (id 8n,id "well");
 square := &{ @* * . . };
 !{ ^= ! print (both,@ square 3q) { _ : (); }; };

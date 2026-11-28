@@ -1,9 +1,9 @@
 >> (identity, twice, ordered, tidy, clean);
 << "str" : text;
 
-identity: 'a -> 'a := &.;
-twice(x: 'a): 'a | num 'a := + x x;
-ordered(x, y: 'a): b | ord 'a := <= x y;
+identity: ~a -> ~a := &.;
+twice(x: ~a): ~a | num ~a := + x x;
+ordered(x, y: ~a): b | ord ~a := <= x y;
 
 tidy: s -> s := &{ @. text.lower text.trim };
 -- This helper is deliberately absent from the export list.

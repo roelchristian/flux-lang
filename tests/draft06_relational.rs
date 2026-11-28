@@ -401,8 +401,8 @@ fn generic_projection_instantiates_output_schema_even_when_empty() {
         r#"
 << "df";
 << "csv";
-wrap(x:('a,s)):.{ value:'a; } := .{ value := .1 x; };
-project(t:#('a,s)):#.{ value:'a; } := df.select &wrap t;
+wrap(x:(~a,s)):.{ value:~a; } := .{ value := .1 x; };
+project(t:#(~a,s)):#.{ value:~a; } := df.select &wrap t;
 ints:#(z,s) := #[(1z,"one") (2z,"two")];
 moneys:#(d,s) := #[];
 !{ ^{

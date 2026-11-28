@@ -215,9 +215,7 @@ fn annotation(env: &Env, text: &str) -> R<T> {
                     Ok(Dict(bx(k), bx(v)))
                 }
                 _ if self.env.rows.contains_key(&tok) => Ok(Record(tok)),
-                _ if tok.starts_with('\'') => {
-                    Err("polymorphic type variables are not supported in this prototype".into())
-                }
+                "~" => Err("polymorphic type variables are not supported in this prototype".into()),
                 _ => Err(format!("unknown or unsupported type {tok}")),
             }
         }
@@ -1783,7 +1781,7 @@ mod tests {
         check_error("x:d := 1;", "not supported");
         verify("x:r := 1.0r;").unwrap();
         check_error(
-            "id(x:'a):'a := x;",
+            "id(x:~a):~a := x;",
             "polymorphic type variables are not supported",
         );
     }

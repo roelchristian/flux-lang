@@ -29,9 +29,9 @@ fn rebuilding_empty_open_rows_replays_order_through_a_first_class_call() {
         r#"
 << "csv";
 << "df";
-build(t:#.{ value:q; | 'r }):#.{ value:q; | 'r } := #: :# t;
-relay(t:#.{ value:q; | 'r }):#.{ value:q; | 'r } := @ &build t;
-squares(t:#.{ value:q; | 'r }):#.{ value:q; squared:q; | 'r } :=
+build(t:#.{ value:q; | ~r }):#.{ value:q; | ~r } := #: :# t;
+relay(t:#.{ value:q; | ~r }):#.{ value:q; | ~r } := @ &build t;
+squares(t:#.{ value:q; | ~r }):#.{ value:q; squared:q; | ~r } :=
     df.extend .{ squared := ^ .value t 2n; } t;
 empty:#.{ id:s; value:q; flag:b; } := #[];
 !{ ^{

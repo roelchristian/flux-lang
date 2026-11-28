@@ -1,7 +1,7 @@
 use flux_lang::{hir, infer, parser, resolve, semantic};
 
 const SOURCE: &str = r#"
-id(x:'a):'a := x;
+id(x:~a):~a := x;
 copy:z->z := &{ @* + . . };
 !{
     ^{

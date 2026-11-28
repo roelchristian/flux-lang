@@ -203,7 +203,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
                 if bytes.get(i + 1).is_some_and(|b| ident_start(*b)) {
                     let end = take_while(bytes, i + 2, ident_continue);
                     if bytes.get(end) != Some(&b'\'') {
-                        end // Apostrophe-prefixed type variable.
+                        return Err(Error::new(
+                            start,
+                            format!(
+                                "apostrophe-prefixed type variables are retired; use `~{}`",
+                                &source[start + 1..end]
+                            ),
+                        ));
                     } else {
                         literal_end(bytes, i, b'\'')?
                     }
@@ -308,10 +314,19 @@ mod tests {
 
     #[test]
     fn raw_strings_characters_and_names() {
-        let s = r#"'a 'x' '\n' "\u{e9}--" m.f .name _"#;
+        let s = r#"~a 'x' '\n' "\u{e9}--" m.f .name _"#;
         assert_eq!(
             parts(s),
-            ["'a", "'x'", r"'\n'", r#""\u{e9}--""#, "m.f", ".name", "_"]
+            [
+                "~",
+                "a",
+                "'x'",
+                r"'\n'",
+                r#""\u{e9}--""#,
+                "m.f",
+                ".name",
+                "_"
+            ]
         );
         for bad in [r#""\u{d800}""#, r#""\x""#, "'xy'", "_name", "\"no close"] {
             assert!(lex(bad).is_err(), "{bad}");
@@ -364,5 +379,14 @@ mod tests {
             ]
         );
         assert!(tokens.iter().all(|t| t.text == source[t.start..t.end]));
+    }
+
+    #[test]
+    fn retired_type_marker_has_migration_hint_without_affecting_characters() {
+        let error = lex("x:'key_2").unwrap_err();
+        assert_eq!(error.start, 2);
+        assert!(error.message.contains("use `~key_2`"));
+        assert!(lex("'a' '\\n' '\\u{e9}'").is_ok());
+        assert_eq!(parts("~n ~ n ~="), ["~", "n", "~", "n", "~="]);
     }
 }
