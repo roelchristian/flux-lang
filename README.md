@@ -5,7 +5,7 @@ transformation and scripting. It uses strict prefix notation: `+ 2 3` means
 “add 2 and 3”. Formulas compose as functions, while file and terminal operations
 run only when explicitly requested.
 
-This repository contains the **Draft 0.8** reference interpreter in Rust.
+This repository contains the **Draft 0.9** reference interpreter in Rust.
 The language is still experimental.
 
 ## Quickstart
@@ -60,10 +60,9 @@ commands, sample inputs and expected outputs.
 
 ## Reference and development
 
-- [Syntax](docs/specification.md), [layout](docs/draft-0.8-layout.md) and [type system](docs/draft-0.4.md)
-- [Tacit function algebra](docs/draft-0.7-tacit.md) and [source modules](docs/draft-0.4.3.md)
-- [Standard library and typed results](docs/draft-0.5-stdlib.md), [numerics](docs/draft-0.5-numerics.md) and [tables](docs/draft-0.6-relational.md)
-- [Implementation notes](docs/implementation.md) and [performance](docs/performance.md)
+- [Flux language reference](docs/specification.md): source, types, evaluation, tables, effects and modules.
+- [Implementation guide](docs/implementation.md) and [performance](docs/performance.md).
+- [Historical drafts and reviews](docs/archive/README.md).
 
 Run `cargo test --locked` for the full suite or
 `cargo test --locked --test example_corpus` for the public examples.

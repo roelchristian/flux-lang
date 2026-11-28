@@ -1,237 +1,551 @@
-# Flux Language Specification
+# Flux language reference
 
-**Draft 0.3 • Aesthetic and surface revision**
+This is the normative reference for the implemented Draft 0.9 language.
+Unless marked **Limited** or **Proposed**, the rules describe the behavior
+of the Rust reference interpreter. Limited features have the scope stated
+here. Proposed features are not available and do not reserve a design.
+For dated proposals, read the [archive](archive/README.md); for compiler
+structure and validation, read the [implementation guide](implementation.md).
 
-Flux is a statically typed, predominantly functional, array-oriented language for general-purpose scripting, exact numerical work and tabular analysis. Its source is ASCII and its expressions use strict Polish notation. This document changes the surface rules in [Draft 0.2](draft-0.2.md); sections of that baseline not superseded here still describe the intended language. The old spreadsheet specimens and old program-entry rule are superseded. A draft rule is a design commitment, not a claim that the Rust prototype implements it. See [Implementation Notes](implementation.md) for that distinction.
+The linked runnable programs are part of [the checked example corpus](../examples/README.md).
+The fragments in tables and grammar blocks illustrate individual rules;
+they are not complete programs.
 
-| Status | Scope |
-|---|---|
-| Adopted in this draft | Flux name; anonymous executable body; unit from a trailing-semicolon effect block; tuple application with `@@`; removal of dedicated I/O signs from the core |
-| Working conventions | `.flx` extension and `flux` CLI spelling; command/API details can change before release |
-| Provisional language/library proposals | Open row polymorphism, the full standard library and package system; table overload of `=.` |
-| Aesthetic revision | Default import aliases, short unary lambda, signed default, doc comments; prototype forms for prefix pipelines and structural table construction; `take` preferred over compatible `[:` |
+## Source, grammar and layout
 
-## 1. Source, values and expressions
+Flux source is ASCII. An identifier matches `[a-z][a-z0-9_]*`; `_` is a separate wildcard. Qualified names such as `csv.read` and selectors such as `.reading` and `.1` are distinct tokens. The lexer takes the longest applicable token. Keep compound punctuation together, and use whitespace where adjacent characters would change the token: `-2z` is a literal, whereas `- 2z 1z` is a call. Double quotes enclose strings and single quotes enclose a single character; escapes include `\n`, `\t`, and `\u{HEX}` for a Unicode scalar. The Boolean literals are `0b` and `1b`. A type variable, for example `'a`, has no closing quote. Unescaped control characters are not allowed in literals. Outside literals, `--` begins a line comment; a standalone `---` line is also a documentation convention. Comments have no runtime effect.
 
-Identifiers match `[a-z][a-z0-9_]*`. Strings can contain escaped Unicode; source bytes are ASCII. `--` begins a line comment outside a literal. `:=` defines an immutable binding, `=` compares elementwise, and `==` compares whole structures. Whitespace is significant only for lexical boundaries. Use maximal munch for compound signs; there is no infix fallback. A qualified name such as `csv.read` accesses a module binding; `.value t` is prefix projection. Types and values occupy distinct namespaces. Application arity is a property of a name's lexical binding, not its inferred type.
-
-```flux
-sq(x:q) := * x x;
-dp(x,y:[q]):q := +/ (* x y);
-p(n,r:n):n := ? {
-    > r n : 0;
-    _     : */ (.. (+ (- n r) 1) n);
-};
-```
-
-This retains nominal records, tuples, immutable sequences, dictionaries and ordered typed tables; exact `n`, `z`, `q` and `d`; approximate finite binary64 `r`; and the baseline's explicit conversions, constraints and scope rules. Private signatures may use inference; exported functions require fully specified signatures. Evaluation is strict and deterministic unless a form expressly specifies a lazy branch (e.g. conditional, guard, match or optional fallback). Do not infer a new grammar from a library example.
-
-## 2. Program entry and effects
-
-A source file used as a script consists of declarations followed by at most one anonymous effect block, terminated by a semicolon. It must be the last top-level item. There is no magic `main` binding; an ordinary binding called `main` does not run. An imported module contains declarations only. An entry block in an imported file is an error, not silently skipped or run.
-
-```flux
-<< "io";
-sq(x:z) := * x x;
-!{
-    x := .. 1 10;
-    y := @: &sq x;
-    ! io.print y;
-};
-```
-
-Outside this distinguished module position, `!{ ... }` constructs a suspended action of type `!a`, without running it. `! e` executes an action in an effectful context or at the REPL, not in a pure expression. Within an effect block, definitions and semicolon-terminated expressions run in order; each expression statement discards its result. A final expression without a semicolon gives the resulting value. An empty effect block or one ending in a semicolon yields `()`; pure blocks still require a final expression. `!{ ... };` has two distinct boundaries: its inside statement semicolons say what is discarded; the final semicolon terminates the outer entry item.
-
-Entry results are `()` for success or a natural for a process status. A portable entry should use 0–255; a larger value is a host-boundary diagnostic rather than silent truncation. A declaration-only file has no entry to dispatch. The REPL evaluates submitted expressions and reports their results; action values are not automatically executed merely by evaluating an expression.
-
-Core `<@`, `@>` and `!>` are retired and not reserved as active operators. A frontend should recognize these obsolete spellings for targeted migration diagnostics rather than split them silently into different active tokens. Use a module action such as `! io.print x`, `! csv.read path` or `! csv.write path t`. Other formats are not special language forms. Host arguments and environment access are planned as explicitly effectful system-library operations.
-
-## 3. First-class and tuple application
-
-`&f` obtains a curried function value from a referenceable callable. Values that happen to be functions are not automatically applied by juxtaposition. `@ f x` applies one argument; `@@ f args` spreads a tuple value into successive unary applications of the curried function. Both operators have exactly two syntactic operands, independent of tuple length. The tuple expression can be grouped literal `(x,y)` or a variable whose static type is a tuple; unit is not a zero-argument tuple spread.
-
-```flux
-add(x,y:q):q := + x y;
-f := &add;
-a := @ (@ f 2) 3;
-b := @@ f (2,3);
-```
-
-`@ f (x,y)` instead gives a single pair to `f`. In `@@`, evaluate the function expression and then the tuple expression once, left to right; subsequently apply tuple fields in order. This agrees with nested unary application when tuple fields and intermediate applications are total and pure, but need not give identical error ordering. Too many or ill-typed arguments are errors; supplying fewer than the curried function accepts returns a residual function.
-
-### Structural grammar changes
+The following grammar is schematic: `TYPE` is the type grammar below, and a direct call takes exactly the operands declared by its lexical binding. Curly braces in the grammar's quoted terminals are source characters; unquoted braces mean repetition.
 
 ```text
-module       = { declaration } [ entry ] ;
-entry        = effect_block ';' ;
-effect_block = '!' '{' { def | expr ';' } [ expr ] '}' ;
-application  = '@' expr expr | '@@' expr expr ;
+file        = { import | export | declaration } [ action ";" ] ;
+declaration = name [ "(" parameters ")" ] [ ":" TYPE ] [ qualifiers ]
+              ":=" expression ";"
+            | name "::" "{" { field ":" TYPE ";" } "}" ";"
+            | name "::" "{" variant { variant } "}" ";" ;
+variant     = "|" name { payload-type } ";" ;
+block       = "{" { declaration } expression "}" ;
+action      = "!{" { declaration | expression ";" } [ expression ] "}" ;
+fallible    = "^{" { declaration | expression ";" } expression "}" ;
+parameters  = parameter { "," parameter } ;
+parameter   = name [ ":" TYPE ] ;
 ```
 
-`declaration` is the union of Draft 0.2 import, export, type declaration and definition. `application` records the fixed arity of these operators; it is not an additional overlapping parse where the generic callable rule already handles them. At the REPL, the context is submission rather than script entry. A second entry, declaration after entry, or a top-level bare expression in a file is rejected.
+An import, export, or declaration cannot follow the final anonymous entry action. There is no special `main` name. A library has no entry. Types and values have distinct namespaces. Consecutive parameter names can share the type written on the last name of their group: `add(x, y: z): z`. A parameter list can omit all types; giving the result type of a named function requires its parameter types as well. Signature qualifiers belong to complete named-function signatures. See the [function examples](../examples/basics/functions.flx) and [geometry module](../examples/modules/geometry/demo.flx).
 
-## 4. Tabular analysis independent of storage
+Indentation and line endings are not statement terminators. Four spaces per structural level, vertical operands for substantial prefix expressions, and aligned related guard/field margins are the layout convention; explicit delimiters and semicolons still determine structure. `flux fmt FILE` writes formatted source to stdout without editing the file; `flux fmt --check FILE` is quiet for canonical source and reports noncanonical or invalid input. The formatter is idempotent and preserves the token sequence, explicit parentheses, literals, and comment wording; it may change spacing and remove trailing horizontal whitespace. It formats only the requested source file, not its imported files. See the [formatted pipeline](../examples/basics/pipeline.flx).
 
-A table has an ordered sequence of rows and a fixed schema. It retains duplicates and preserves row order under filter. `#:` converts a sequence of compatible rows into a table, and `:#` extracts the ordered rows. `@:` over a table returns a sequence; it does not infer a new table automatically. Named records remain the explicit input schema path; anonymous structural records can describe intermediate or inferred output schemas. These rules apply whether input came from CSV, JSON, Parquet, a database or a manual literal.
+## Expressions and evaluation
 
-| Purpose | Form |
+Expressions include literals, values, strict prefix calls, function references and lambdas, tuples and sequences, record and table construction, grouping, guarded cases, blocks, pipelines, and the effect and typed-failure forms described below. There is no infix fallback. Parentheses around one expression group it; `()` is unit; `(a, b)` is a tuple with two or more fields, and `[a b]` is an ordered sequence with no commas. Named records use `schema { field := value; }`; structural records use `.{ field := value; }`. Both require unique field names. Use `.field value` for named projection, or `.1 pair` for the first positional field. `:=` defines an immutable binding; it is not equality or assignment to an existing cell.
+
+Ordinary evaluation is strict and evaluates operands from left to right. The conditional `? CONDITION YES NO` selects one branch. In `?{ CONDITION : VALUE; ... _ : DEFAULT; }`, guards are tested in order, only the chosen value is evaluated, and the final default is required. Boolean `&&` and `||` are ordinary strict operations, not short-circuit control flow. Optional fallback `?? FALLBACK OPTIONAL` checks the optional first and evaluates the fallback only on absence. Typed recovery evaluates an arm only on the matching failure. See [guards](../examples/basics/guards.flx) and [optionals](../examples/library/optionals.flx).
+
+A pure block `{ ... }` contains local declarations and a required final expression; use `()` for a unit result. A pipeline `|{ SOURCE; STAGE; ... FINAL }` evaluates its source once, then evaluates each later stage in order. Within a stage, each `$` refers to the same preceding value. The pipeline itself does not bind `$` in its source expression. It needs at least one stage after the source, and the final expression has no trailing semicolon. The pipeline returns that final value. It is immediate evaluation, not a way to define a reusable function. See [pipelines](../examples/basics/pipeline.flx).
+
+## Named and first-class functions
+
+A named callable such as `add(x, y: z): z := + x y;` consumes two expressions when written as `add 2z 3z`. The parser determines call arity before type inference. Named callable headers are visible throughout their lexical scope, allowing forward calls and checked recursion; values held in ordinary bindings are not implicitly called. Local value initialization is sequential: an eagerly evaluated expression cannot read a later, uninitialized local value. A parameter or local name can shadow an outer name, and the visible binding determines whether the token is a callable or a value.
+
+`&add` obtains the curried function value of a referenceable callable. Builtin operators and selectors can also be referenceable, for example `&+` and `&.reading`; not all special forms can be referenced. Write a lambda as `\x -> EXPR` or `\(x: z, y: z) -> EXPR`; explicit action construction, not a lambda alone, is needed to suspend effects.
+
+- `@ F X` applies a function value to one argument. If `X` is a tuple it stays one argument.
+- `@@ F ARGS` spreads a tuple value into successive unary applications. It evaluates `F` and then the tuple once before applying its fields in order. It requires a tuple, not unit. Supplying fewer arguments than the curried function accepts leaves a function.
+- `@: F XS` maps explicitly over a supported collection. A user-defined function does not automatically lift over a sequence or table.
+
+See [functions and inference](../examples/basics/functions.flx) and [explicit mapping](../examples/basics/collections.flx).
+
+## Tacit function algebra
+
+A tacit block builds an ordinary first-class function. Its content is one strict prefix expression:
+
+```text
+tacit-block = "&{" tacit-expr "}" ;
+tacit-expr  = "." | callable-or-function-value
+            | "@." tacit-expr tacit-expr
+            | "@*" tacit-expr tacit-expr tacit-expr
+            | "@?" tacit-expr tacit-expr
+            | "(" tacit-expr ")" ;
+```
+
+Use a bare referenceable callable, operator, nonnullary constructor, selector, or lexical function-valued binding as an atom. Do not prefix it with `&` inside the block. Scalars, action execution and pipeline `$` are not tacit atoms. Outside a block, the standalone adjacent spelling `&.` gives identity; bare period and the tacit combinators are not ordinary expressions. Compact ordinary application such as `@.field` or `@.1` still uses the existing selector token. Separate tacit operators and operands when needed to retain their token boundaries.
+
+| Tacit form | Applied to `x` |
+| --- | --- |
+| `.` | `x` |
+| `@. G H` | `@ G (@ H x)` |
+| `@* F G H` | `@@ F ((@ G x), (@ H x))` |
+| `@? F H` | `@@ F (x, (@ H x))` |
+
+A fork evaluates the left branch and then the right exactly once each before applying the combiner. A hook uses identity for its left branch, not a condition. Tacit functions infer and generalize under the ordinary checker, including its restrictions on numeric lifting and open rows. Constructing a tacit value does not run its body, and applying a tacit function does not implicitly execute actions or unwrap optionals or results. A tacit declaration such as `square := &{ @* * . . };` binds a value: call it as `@ square 5z`, not `square 5z`. See [composition](../examples/tacit/composition.flx), [forks](../examples/tacit/forks.flx), and [hooks](../examples/tacit/hooks.flx).
+## Types and inference
+
+Flux is statically typed. An annotation uses `:` in a binding or parameter
+declaration. Omitted types are inferred where there is sufficient context.
+A type annotation is not a numeric conversion; use an explicit conversion
+when the value has the wrong domain.
+
+| Form | Meaning |
 |---|---|
-| Project, filter, count | `.price t`, `?: (> .price t 100) t`, `# t` |
-| Summarise | `+/ .price t`, `avg .price t`, `sd .price t`, `pct 95 .price t` |
-| Group by key | `=: &.category t` gives a dictionary of same-kind groups, first-seen key order |
-| Stable sort | `>: &.price t` ascending; `<: &.price t` descending |
-| Join | `*= &.id &.id t u` inner; `*? &.id &.id t u` left |
-| Concatenate | `+: t u`, requiring compatible schemas |
-| Distinct | Stable `=. xs` on a sequence, so `#: (=. (:# t))` on an equality-capable row schema; direct `=. t` is provisional |
+| `n`, `z`, `q`, `d`, `r` | Natural, signed integer, exact rational, exact decimal, approximate real |
+| `b`, `c`, `s`, `()` | Boolean, Unicode scalar, string, unit |
+| `[a]`, `(a,b)` | Homogeneous sequence and heterogeneous tuple |
+| `.{ field:a; }`, a declared type name | Structural record and nominal type |
+| `#row`, `#(a,b)`, `#.{ field:a; }` | Table of nominal, positional or structural rows |
+| `{k:v}` | Dictionary keyed by `k`, with values of type `v` |
+| `a->b` | Function taking one `a` and returning `b`; arrows associate to the right |
+| `?a`, `a^e`, `!a` | Optional, typed result, suspended action |
 
-Join output contains paired rows, not automatically flattened fields. A left join wraps the right row in an optional. Duplicate matches produce all pairs in left-input then matching-right-input order. An optional absent key matches another absent key under structural equality; remove absent keys first for SQL-style null nonmatching. Shorter/longer Boolean masks are shape errors. Missing cells use declared `?a`; malformed nonempty input remains an error, not a zero or an absent value. Statistical optionals represent undefined results rather than I/O errors. An optional numeric column must be explicitly handled before a numeric aggregation.
+Prefix type constructors bind more tightly than the result constructor:
+`?q^e` means `(?q)^e`, and `!q^e` is a result whose success is an action.
+Write `!(q^e)` for an action that returns a result. Delimiters separate
+containers, so `[q^e]` is a sequence of results, not a result containing
+a sequence. Parenthesize a nested result rather than chaining bare carets.
 
-### Exploratory measurements (proposed CSV adapter; REPL)
+### Schemes, constraints and recursion
 
-```flux
-<< "csv" : csv;
-obs :: { station:s; value:q; valid:b; };
-t:#obs := ! csv.read "observations.csv";
-u := ?: (&& (.valid t) (> .value t 0)) t;
-# u;
-avg .value u;
-sd .value u;
-pct 95 .value u;
-g := =: &.station u;
-@: (\(x)-> avg (.value x)) g;
-```
+Flux uses rank-one polymorphism. A reference to an eligible binding
+freshens its quantified variables and their constraints. Type variables
+free in surrounding captures are not generalized. A named function can be
+generalized once its dependency group has been checked. Value bindings are
+generalized only for nonexpansive expressions: literals, unit, names,
+function references and lambdas, plus tuples, sequences and records
+containing only such expressions. This includes tacit values that lower to
+references or lambdas. Applications, applied constructors, pipelines, and
+fallible and action blocks do not qualify. Any unresolved variables in an
+expansive binding are shared monotypes; a universal annotation on such a
+binding is rejected, although a concrete annotation is allowed.
 
-Here the adapter uses the binding annotation to determine input schema; the last expression yields a keyed dictionary, not a table. A cleaned, grouped report can instead use an explicit output schema:
+A type variable such as `'a` in a named signature is rigid when its body is
+checked. The body cannot specialize it, equate it with another distinct
+quantified variable, or make it escape into an enclosing monomorphic
+binding. Type variables in a lambda's parameter annotations are local
+inference variables, not a separately quantified signature. They may be
+generalized by an enclosing eligible binding. For an executable example,
+see [inference, annotations and function values](../examples/basics/functions.flx).
 
-```flux
-<< "csv" : csv;
-<< "table" : df;
-obs :: { station:s; value:q; valid:b; };
-stat :: { station:s; count:n; mean:?q; };
-summ(k:s,t:#obs):stat := stat {
-    station := k;
-    count   := # t;
-    mean    := avg .value t;
-};
-!{
-    t:#obs := ! csv.read "observations.csv";
-    u := ?: (.valid t) t;
-    a := df.agg &.station &summ u;
-    ! csv.write "summary.csv" a;
-};
-```
+Named signatures attach class constraints with a qualifier such as
+`| num 'a`. The supported classes are `num`, `eq`, `ord` and `hash`.
+They require a numeric operand, semantic equality, a supported order, or
+hashable key equality, respectively. The checker enforces these constraints
+before lowering; for example, functions and actions cannot be compared
+by structural equality. Join and group keys admit primitives and
+recursively hashable tuple and optional values; arbitrary records and
+functions are not keys. Declared qualifiers must cover the operations
+used by an explicitly quantified signature.
 
-Proposed adapter arities: `csv.read` takes a path and constructs a schema-directed action; `csv.write` takes path and table and constructs a unit action. Provisional `df.agg` is pure and takes key function, curried key/group summarizer, and table; it returns a table of summary records in first-seen group order. These names and signatures are design examples, not required built-ins. A financial reconciliation can use `*?` to retain unreconciled ledger rows; a time series can be sorted by validated timestamps before windowing; and a batch job can explicitly run read, transform, then write actions. Timestamp/window APIs and write/overwrite policy belong to a library draft.
+Recursive functions use monomorphic headers within their dependency
+group. Eager value cycles are rejected, and polymorphic recursion is not
+inferred. Separately quantified rigid variables in mutually recursive
+signatures are not silently equated. **Current limitation:** local function
+bodies are checked in declaration order. A forward callee remains
+monomorphic until its body and reachable local callable dependencies have
+been checked; put a generic local callee first if it must be used with
+different types in the caller's body.
 
-### In-memory reconciliation and cleaning (language-level specimen)
+### Checking and elaboration
 
-```flux
-ledger :: { id:s; amount:q; };
-receipt :: { id:s; received:q; };
-book:#ledger := #[ledger { id := "a1"; amount := 12q; }
-                  ledger { id := "b2"; amount := 9q; }];
-paid:#receipt := #[receipt { id := "a1"; received := 12q; }];
-paired := *? &.id &.id book paid;
-unpaid := ?: (~ (@: &?+ (.2 paired))) paired;
-```
+Checking resolves names and constructor identities, unifies structural
+requirements and infers types. For numerical operations it resolves
+scalar or one-dimensional lift shape, checks applicable constraints and
+selects the checked domain and operation. The evaluator uses typed HIR
+and checked callable instances for direct, indirect and tacit applications;
+it does not choose a different static overload from the particular value
+it happens to see. The runtime still checks dynamic bounds, compatible
+sequence lengths and domain failures. The reference compiler does not
+provide arbitrary overload search or a user-defined class system.
 
-The left join keeps both ledger rows; the mask retains rows for which the optional receipt is absent. Matching receipt presence is not evidence that its amount balances: a production report compares amounts separately. To deduplicate a same-schema import without a proposed table overload, use `#: (=. (:# t))`; to inspect the first ten rows after a stable ascending sort by a declared temporal key, use `[: 10 (>: &.timestamp t)`. The latter orders already-validated keys, not raw timestamps in arbitrary string formats. In a batch, repeat the same classification for each input and concatenate compatible reports before running one write action.
+## Exact and approximate numerics
 
-### Structural extension and library boundary
+An integral literal without a suffix uses its numerical context or
+defaults to `z`; an unsuffixed fractional literal defaults to exact `q`.
+A suffix fixes the domain. Scientific notation requires an explicit `r`
+suffix. Naturals are nonnegative. Exact integers and reduced rationals
+with positive denominators are not restricted by the inline machine
+representation. Decimal literals preserve their written scale:
+`1.20d` is the coefficient 120 at scale 2. Decimal has no separate
+negative zero. Approximate reals are finite IEEE 754 binary64 values.
 
-The retired proposed opener was `{.`; the current opener is `.{`. `df.map` is not a core operation. A concrete `#obs` does not mean “any row with a `value` field”; open row polymorphism remains future work.
+- Exact mixed-domain promotion widens in the order `n`, `z`, `d`, `q`.
+  There is no implicit conversion from an exact domain to `r`.
+- Addition and subtraction on decimals preserve the greater scale,
+  multiplication adds scales, and exponentiation multiplies the base
+  scale by its natural exponent. Negation and absolute value preserve
+  scale. A promoted integer enters the decimal domain at scale zero.
+- The exact `/` operation returns a rational, including with integer and
+  decimal operands; real `/` takes two real operands. Integral `//` is
+  floor division and `% a b` is `a - b * floor(a/b)`. A nonzero remainder
+  has the sign of the divisor. Powers take a natural exponent and
+  preserve the base domain; the zeroth power is the multiplicative
+  identity.
+- Natural subtraction underflow, unchecked division by zero and
+  nonfinite approximate results are runtime diagnostics. The explicit
+  operation `math.div` instead returns an exact quotient or a recoverable
+  `numerr` such as `divzero`.
+- `:n` and `:z` require an integral value, and `:n` also requires
+  nonnegativity. `:d` requires an exact finite decimal expansion;
+  `math.quantize SCALE VALUE` rounds an exact value to the requested
+  natural decimal scale, nearest with ties to even. It is not implicit.
+- `:q` on a finite real recovers that binary64 value exactly, including
+  subnormals. `:d` on a real converts the stored binary64 value exactly,
+  not its shortest displayed decimal. Explicit exact-to-real conversion
+  rounds directly to binary64, nearest with ties to even; overflow
+  produces a diagnostic rather than infinity.
 
-## 5. Priorities after 0.3
+Numbers compare numerically, so decimal display scale does not affect
+equality or key identity. Signed real zeros compare equal. Where allowed,
+pointwise operations preserve one-dimensional sequence shape and
+broadcast a scalar operand. Two sequence operands must have matching
+lengths. Structural equality `==` compares whole compatible values,
+without lifting. The runtime has resource bounds, including limits on
+exact-number sizes and decimal scale; these are diagnostics rather
+than fixed-width wrapping or rounding.
 
-Draft 0.4 should settle typed result/propagation (distinct from `?a` and `!a`), numeric overload and conversion inference, structural records/row polymorphism, nullable operations and module interfaces. Draft 0.5 should specify libraries for data adapters, dimensional/temporal semantics, statistics, strings and filesystem operations. Iteration, efficient collection folds, foreign/Arrow interoperability, controlled mutation and tensors follow as separate designs; concurrency is later. Keep strict deterministic semantics even where the implementation introduces lazy range or table representations.
+See [wide arithmetic](../examples/mathematics/exact.flx),
+[exact rational calculations](../examples/mathematics/rational.flx),
+[rounding](../examples/mathematics/rounding.flx), and
+[approximation](../examples/mathematics/approximation.flx).
 
-## 6. Aesthetic revision rules
+## Collections, records and tables
 
-This section overrides the corresponding Draft 0.2 rules and carries forward the Draft 0.3 entry and tuple-application rules above. The prototype implementation can be narrower; check the implementation notes and the example index.
+Sequences preserve order and duplicates. Tuple components may have
+different types. A record has uniquely named fields; its structural type
+is determined by their names and types. `.{ field := value; }` constructs
+a structural record. `row :: { field:a; };` declares a nominal record and
+`row { field := value; }` constructs that type. Two separately declared
+nominal types are distinct even if their field layouts match. Select a
+field with `.field` or a tuple position with a one-based selector such as
+`.1`. A table selector returns the named column or tuple component as a
+sequence.
 
-### 6.1 Signs and opening delimiters
+Projection can infer a structural requirement instead of fixing all
+fields: a function that projects `.value` can be used with structural
+records containing appropriately typed `value` fields and other fields.
+**Current limitation:** explicit open-row source annotations, general
+row-polymorphic table transformations, and replacing nominal type identity
+with structural compatibility are not provided. See the
+[tacit projection example](../examples/tacit/projection.flx).
 
-Use these associations to judge new operators, not to invent user-defined punctuation: `:` defines, annotates and transforms; `.` accesses fields and structure; `/` divides and reduces; `?` selects and signals absence; `!` describes and runs effects; `#` counts and denotes table structure; `@` applies; `&` references; `*` combines products or relations; `\` abstracts. Specialized prefixes precede the delimiter: `{` computation, `!{` action, `?{` guards, `#{` dictionary, `#[` table, `.{` structural record and `|{` pipeline. The alternative `{.` opener is obsolete. Canonical formatting uses compact adjacent openers (legacy spaces in guards may be accepted). No significant indentation, infix fallback, implicit function-valued variable application or object method chains.
+Tables are ordered homogeneous collections of record or tuple rows.
+`#[…]` constructs a table; `#:` reconstructs one from a row sequence
+or a nonempty named record of equally sized columns (which can have zero rows), and `:#`
+extracts its row sequence. Field order is retained for the checked schema
+and for schema-driven interchange, including CSV. Supply context for
+ambiguous empty sequences or tables; an empty table still carries
+its row schema. See [projection and reconstruction](../examples/tables/projection.flx)
+and [checked observations](../examples/tables/observations.flx).
 
-### 6.2 Prefix pipelines
+`@:` maps function values, and `?:` filters sequences and tables with
+a compatible boolean mask or predicate, retaining source order. A mask
+must have precisely the input length.
+`/:` folds with a seed and `\:` scans including the initial seed.
+`+:` concatenates compatible collections, preserving duplicates.
+`&:` zips equal-length sequences and `*:` forms a Cartesian product.
+`.:` is one-based lookup for sequences and tables, or key lookup for
+dictionaries; a missing key, zero index or out-of-range index returns
+absence. Dictionaries can be obtained by grouping with `=:`; dictionary
+literal syntax is not executable. Nested sequences are available, but
+a separate multidimensional array type, rank and general broadcasting
+are proposed rather than implemented. See
+[functional collections](../examples/basics/collections.flx) and
+[descriptive statistics](../examples/statistics/descriptive.flx).
 
-```flux
-u := |{
-    t;
-    ?: (> .value $ 0) $;
-    <: &.value $;
-    take 10 $
-};
+### Sequence operators and reductions
 
-x := |{
-    .. 1 100;
-    ^ $ 2;
-    ?: (> $ 100) $;
-    +/ $
-};
-```
+`# X` measures cardinality (Unicode scalar count for a string, row count
+for a table). `.. LOW HIGH` is an inclusive ascending integral range;
+when LOW exceeds HIGH it is empty. `take N X` (also `[: N X`) and
+`drop N X` retain a prefix or omit it, clamped to length. `slice START
+COUNT X` takes up to COUNT items from a one-based START; zero is an error
+and an out-of-range positive start gives an empty result. These operations
+and `rev X` preserve sequence, table or string kind. String positions
+count Unicode scalars. `flat XSS` flattens one sequence level; `tr XSS`
+transposes equal-length sequence rows and rejects ragged input.
+`>: KEY X` sorts ascending and `<: KEY X` descending; equal keys retain
+their input order.
 
-A pipeline has at least one expression stage, separated by semicolons, and a final expression without a semicolon. Evaluate each stage once in order, binding its value immutably as `$` for the following stage. Repeating `$` refers to the same value (not a recomputation). The seed has no new placeholder; inside a nested pipeline its seed can see a surrounding stage's existing `$`, while its subsequent stages shadow it. Leaving a nested pipeline restores the enclosing binding. A `$` with no preceding visible stage is an error. Stages preserve lexical scope in inner expressions: any closure or delayed action that references a visible `$` captures the stage value, never a mutable slot. `$` is neither assignable nor a parameter name. A pipeline does not run effects implicitly or create an effect context; `!` must still be explicitly written and legal at its lexical position. Pipeline block and tuple application are prototype features to stress-test before freezing grammar.
+Reductions consume sequences rather than tables. Project a table column
+first. `+/ X` and `*/ X` return the sum and product in the checked
+numeric domain, with empty identities zero and one; `&&/ X` and `||/ X`
+use the Boolean identities true and false. `>/ X` and `</ X` return
+optional numeric extrema, absent on empty input.
 
-### 6.3 Structural rows and column reconstruction
+`avg X`, `med X` and `var X` take exact numeric sequences and return
+an optional exact rational mean, median or population variance. `pct P X`
+uses an exact P between 0 and 100 and exact numeric inputs, with linear
+interpolation at zero-based position `(length - 1) * P / 100` in sorted
+order. `sd X` returns optional approximate population standard deviation.
+These statistics return absence for empty input; none drops optional
+items silently. See [percentiles](../examples/statistics/percentiles.flx)
+and [descriptive statistics](../examples/statistics/descriptive.flx).
 
-```flux
-u := #: .{
-    date    := .date t;
-    account := .account t;
-    net     := - .gross t .tax t;
-    margin  := / .profit t .gross t;
-};
+## Relational operations
 
-v := df.extend .{
-    net    := - .gross t .tax t;
-    margin := / .profit t .gross t;
-} t;
-```
+Table joins take a left key function, a right key function, the left
+table, and the right table. A key function receives a row and returns
+the same hashable type on both sides. The operations do not coerce
+different key types dynamically.
 
-`.{ field := expr; ... }` builds an immutable structural record. Field names are unique and case-sensitive under lowercase identifier rules; a duplicate is an error even if its values or types agree. Fields evaluate once, left-to-right in written order, and do not become local bindings for siblings. Structural schemas carry field names and types in source order, which is preserved by row display and CSV output. Named field projection resolves statically. A structural literal does not implicitly coerce to a nominal record, and structural equality/compatibility must not erase field distinctions by comparing values alone. Generalized or open rows remain future work.
+| Operation | Result |
+|---|---|
+| `*= keyL keyR left right` | Inner join; pairs `(a,b)` |
+| `*? keyL keyR left right` | Left join; pairs `(a,?b)` |
+| `df.semi keyL keyR left right` | Left rows with a right match |
+| `df.anti keyL keyR left right` | Left rows with no right match |
 
-`#:` still takes compatible row sequences. Its additional overload takes a nonempty structural record of sequence-valued fields. All columns have equal lengths, including legal length zero when each column's element type is known; mismatched lengths and scalar fields are errors, and no scalar broadcasting is implied. A zero-column record supplies no row count and cannot make a table. Rows are formed by position in the input columns, without reordering; the field list establishes the output schema's field order. `df.extend` preserves original row order and old schema field order, then appends new fields in their written order. New fields may not duplicate existing names; this is an extension, not silent replacement. New column lengths must match row count even for empty input.
+A pair-emitting join preserves left input order and right match order
+within each left row. Duplicates produce all matching combinations.
+A left join emits one pair with an absent right row when no match exists;
+the semi/anti variants preserve each retained left occurrence only once.
+The right input is keyed before the left, with one call per row keyed.
+Tuple keys compare component by component. Missing optional keys match
+one another, unlike SQL NULL; a match with an absent field is not the
+same as an absent right row. Empty outputs preserve the checked paired or
+left schema. See [joins, duplicate matches and absent keys](../examples/tables/joins.flx).
 
-### 6.4 Bindings, imports and arithmetic
+`=:` forms a dictionary of groups; `df.agg` uses a key callback and a
+summarizer accepting that key followed by the group's table. First key
+appearance determines group order; rows retain their input order inside a
+group. Empty output uses a checked schema without evaluating a sample
+summarizer. See [compound-key aggregation](../examples/tables/aggregation.flx).
 
-```flux
-<< "csv";
-<< "statistics" : st;
-<< "table" : df;
+`df.distinct` retains the first occurrence of each comparable full row.
+`df.union` is a stable set union: visit left rows and then right rows,
+retaining only first occurrences and preserving the left schema's field
+order. It is not concatenation. `df.select` constructs a new table from
+a checked function that produces a closed row for each input row.
+`df.extend` appends nonconflicting named columns of the table's height.
+`df.dropna` retains rows whose chosen optional value is present;
+`df.fill` substitutes a supplied default in an optional sequence; and
+`df.present` removes absences without rearranging present payloads.
+Present zero is never missing. See [set operations](../examples/tables/duplicates.flx),
+[nullable transformations](../examples/tables/missing.flx) and the
+[calibration reconciliation](../examples/applications/calibration/README.md).
+## Actions and typed failure
 
-sq:q->q := \x -> ^ x 2;
-plus:q q->q := \(x,y) -> + x y;
-recip := \(x:q) -> / 1 x;
-```
+An optional `?a` represents presence or ordinary absence. A result `a^e`
+contains a success of type `a` or a recoverable error of type `e`. An
+action `!a` suspends a computation that produces `a`. These are different
+constructors: `!q^e` means `(!q)^e`; an action returning a result is
+`!(q^e)`. Parenthesize nested results rather than writing `a^e^f`.
 
-A bare lowercase module name can supply its own alias; the explicit `: alias` form remains available and alias collisions within a scope are errors. A path that does not itself form a lowercase identifier must use an explicit alias unless the module system separately specifies a canonical basename rule. `\x -> expr` is exactly one untyped parameter; parentheses are mandatory for multiple parameters or a typed parameter. `->` is retained and scope is lexical. Short library aliases are customary: `io`, `fs`, `sys`, `math`, `stat`, `df`, `str`, `rx`, `dt`, `csv`, `json`, `sql`, `net`. This list is not a module-availability guarantee.
+- `!{ ... }` constructs an action; `! ACTION` executes it where effects
+  are permitted. A call such as `print VALUE` constructs an action, not a
+  write to the host. Named function and lambda bodies are not effect
+  contexts; they may return independently suspended actions.
+- `^{ ... }` evaluates its statements in order and wraps its final value
+  in a success. It neither permits effects on its own nor flattens a
+  result-valued tail.
+- `^: ERROR` evaluates the error once and exits the nearest lexical
+  fallible boundary. `^? RESULT` evaluates its operand once, unwraps one
+  success layer, or exits with its failure. All exits to one boundary
+  must agree on the error type. A function body, lambda, or independently
+  suspended action starts a new propagation context; ordinary pure
+  blocks, pipeline stages and recovery arms do not.
+- `^= RESULT { PATTERN : BODY; ... }` returns the success unchanged or
+  evaluates only the first matching arm. An exhaustive set of nominal
+  alternatives, or a final catch-all, is required. A constructor
+  pattern selects by identity and binds its immediate payloads in
+  declaration order; `_` discards, and a catch-all identifier binds
+  the whole error. Scope is the arm. Duplicate, wrong-arity and
+  unreachable alternatives are errors. A non-nominal error requires a
+  catch-all. The successful arm value must agree with the result's
+  success type.
+- Forwarding a failure retains its diagnostic origin; raising a new
+  error introduces a new origin. A discarded result is a static error,
+  including an unused result-valued pipeline stage. A fatal diagnostic,
+  such as ordinary division by zero or forced extraction of an absent
+  optional, is not a recoverable result. Completed effects are not
+  rolled back.
 
-An unsuffixed integral literal defaults to signed `z`, including positive values; `- 3 5` therefore yields `-2 : z`. An explicit `n` suffix or a compatible natural-number context keeps `n`; a negative literal does not fit `n`, and a natural underflow is a diagnostic rather than wrapping. Unsuffixed fraction `0.125` is exact `q`; `0.125d` denotes exact decimal, `0.125r` approximate real. Division `/ 1 3` is exact rational; `//` is integer quotient. Explicit suffixes are distinct from contextual inference.
+A script entry runs its action and may complete with unit or a natural
+exit status in 0–255, directly or inside a successful result. Unit exits
+with status 0. An uncaught error exits with status 1 and a diagnostic on
+stderr; recovered errors are not printed as terminal failures. See the
+[stdin example](../examples/io/streams.flx) and the
+[optional example](../examples/library/optionals.flx).
 
-`take` is preferred over the compatibility sign `[:`. Preserve the familiar symbolic set `@:`, `?:`, `=:`, `>:`, `<:`, `+/`, `*/`, `/:`, `\:`, `=.`; prefer the short names `drop`, `slice`, `rev`, `flat`, `tr`, `med`, `var` rather than new symbols. Library contracts and prototype availability are separate. When present, `med` is percentile 50, and `var` is population variance; both return optionals for empty input. `sd` denotes population standard deviation.
+## Source modules and native namespaces
 
-### 6.5 Written and interactive form
+`<< "module" : alias;` imports into one namespace. The alias is optional
+when the registry name or source basename is a valid identifier. Native
+imports resolve through the library registry. Source imports name local
+relative `.flx` files, relative to the **importing file's canonical
+directory**, not the working directory. Dot and parent segments are
+allowed; absolute paths and remote or package fetching are not. An
+import alias must be unambiguous within its source file.
 
-A triple hyphen `---` begins a documentation comment; one or more consecutive doc-comment lines directly before a declaration are its documentation. Plain `--` comments and both comment styles are ignored as executable syntax. The formatter must not drop comments, change the token stream, or alter string content. Prefer four spaces, compact declarations and lambdas, blank lines between logical sections, and modest alignment in guarded cases and field lists; avoid artificially expanding small expressions. For complex nested expressions, add grouping only when it makes the prefix structure easier to read.
+Export with `>> (NAME, ...);`. Public functions require explicit
+parameter and result annotations; public values require an annotation;
+public nominal types expose their declared schema or alternatives.
+Public interfaces cannot expose a private nominal type. An exported
+function-valued binding remains a value and is applied with `@` or
+`@@`; it does not acquire the prefix arity of a named function. The parser discovers exported names and arities before parsing the
+importer; typed interfaces are checked after linked inference. Use the
+importer alias to qualify public members, including exported source
+types and constructors. Private names and transitive members are not
+implicitly re-exported.
 
-The REPL is distinct from source grammar. Semicolon-ended submissions can display values and their types; a table view should show ordered fields, types, and row/column counts. Interactive commands include `:type`, `:schema`, `:load`, `:time`, `:help`, `:quit`, with `:history` and explicit `:replay` for the current session. `:load` checks and loads declarations without running a script entry; run a script separately with `flux FILE`. A command such as `:type avg .value t;` inspects a type, not a value-producing or effect-running statement. `:schema t;` should reflect the static/opened schema and not reload data. Explicitly executing an action at the prompt is distinct from displaying a suspended action.
+The loader identifies files by canonical path and rejects dependency
+cycles, reporting the import chain. A source dependency cannot have a
+script entry. A diamond import shares its dependency's nominal
+identities and initializers. The program executes with one typed HIR:
+dependency initializers run in dependency order once per execution,
+then the root entry runs. Constructing an action does not execute it;
+checking the graph runs neither initializers nor actions. Diagnostics
+use each original source file's coordinates. Native error constructors
+are brought into lexical scope by their namespaces (the prelude
+provides `ioerr`); for example a CSV recovery pattern uses
+`fileerr e`, not `csv.fileerr e`. See the
+[geometry](../examples/modules/geometry/demo.flx) and
+[transformations](../examples/modules/transformations/demo.flx) examples.
 
-### 6.6 Typed CSV and grouped summaries
+## Standard library and host
 
-`csv.read` and `csv.write` construct actions. A typed read such as `t:#obs := ! csv.read "observations.csv";` uses its expected named schema and column types to match/reorder exact header names and decode each field in a parsed CSV record, rejecting missing, duplicate or unexpected names; the untyped grid reader, where provided, returns strings and is not the same result. A nonempty malformed cell is an error even in an optional column; an empty optional field represents absence. Empty strings in a required string column are string values, not automatic nulls. Logical cells accept `true`, `false`, `1b` and `0b` in the prototype. Neither aggregation nor ingestion silently fills gaps. `df.agg key summarize t` is pure: it partitions an ordered table by the key function, calls the curried summarizer once per key and same-schema group, and returns one structural or nominal summary row per group in first-seen order. The schema of a zero-group result comes from the summarizer's static result, not by inventing or evaluating an empty group. Summary field order follows the record constructor. The prototype writes that field order to the CSV header, quotes cells as needed, and refuses to overwrite an existing destination. In successful scripts, output and writing still require explicit `!`; never execute actions because they appear within a pipeline, struct literal, top-level definition or module import.
+Native library calls retain fixed prefix arity. Arguments in the
+signatures below are shown in operand order; these tables are not new
+annotation syntax. See the [registry](../src/builtins.rs) for the
+implemented member and alias inventory. The `df` namespace is covered
+under relational data; the `math` namespace provides exact
+`math.div X Y : q^numerr` and `math.quantize SCALE VALUE : d`.
+`numerr` has nullary alternatives `divzero` and `range`. The
+`stat` aliases `avg`/`mean`, `pct` and `sd` use the corresponding
+checked numeric operations. Correlation (`cor`) is recognized but
+not implemented.
+
+| Operation | Type |
+|---|---|
+| `print VALUE`, `io.print VALUE`, `io.println VALUE` | `a -> !(()^ioerr)` |
+| `io.read PATH` | `s -> !(s^ioerr)` |
+| `io.write PATH TEXT` | `s s -> !(()^ioerr)` |
+| `io.exists PATH`, `fs.exists PATH` | `s -> !(b^ioerr)` |
+| `io.readln` | `!((?s)^ioerr)` |
+| `fs.ls PATH`, `fs.mkdir PATH` | `s -> !([s]^ioerr)`, `s -> !(()^ioerr)` respectively |
+| `fs.base PATH`, `fs.join LEFT RIGHT` | `s -> ?s`, `s s -> s` respectively |
+| `sys.args`, `sys.pid`, `sys.env NAME` | `![s]`, `!n`, `s -> !((?s)^ioerr)` respectively |
+
+Print writes the value followed by a newline. Ordinary file operations
+use the process working directory and honor host permissions. Reads
+require bounded regular UTF-8 files. Writes create a new file and do not
+clobber an existing path. Existence checks give successful false for a
+missing path and do not guarantee later access. `fs.ls` returns sorted
+basenames, rejecting non-Unicode names. `fs.mkdir` creates one level.
+Base and join are native lexical path operations, not sandbox or
+containment guarantees. `sys.args` returns the arguments after the
+CLI's `--` without the executable or script name. `sys.env` distinguishes
+missing variables from invalid host text; `sys.pid` reads the process ID.
+`io.readln` strips a terminating LF and its preceding CR; a final bare CR
+is data. EOF is absent, a blank line is present, and invalid UTF-8 or a
+line over 1 MiB is an error. An oversized read need not drain the line.
+
+`ioerr` alternatives `missing s`, `denied s`, `exists s`, `readerr s`,
+`writeerr s` and `encoding s` carry the operation subject (for example a
+path, stream label or environment name), not the OS diagnostic. See
+[files](../examples/io/files.flx) and
+[arguments](../examples/io/arguments.flx). The Rust host API can supply a
+regular-file input implementation, buffered line input, script arguments
+and an output sink; this does not virtualize filesystem writes, directory
+operations, or process metadata.
+
+### CSV
+
+`csv.read PATH` constructs `!([[s]]^csverr)` without a typed table
+context, or `!(#row^csverr)` for a supported closed named schema.
+`csv.write PATH TABLE` constructs `!(()^csverr)` for a table with
+supported named columns. `io.read_csv` and `io.write_csv` are aliases.
+Raw reads do not validate a typed header. Typed reads validate record
+structure and the header, then convert cells in source-record and schema
+field order, allowing reordered input columns. A correctly headed empty
+table is valid. Blank optional cells represent absence; malformed nonblank
+cells are not absent. Exact wide integers and rationals stay exact, and
+typed decimals retain their scale. Writes use schema field order and the
+same no-clobber policy as text writes.
+
+| `csverr` alternative | Payload |
+|---|---|
+| `fileerr ioerr` | File or encoding failure |
+| `header s` | Header or schema validation detail |
+| `duplicate s`, `absent s` | Duplicate or required missing column name |
+| `cellerr n s s` | Logical record number, field name, decoded text before conversion |
+| `rowerr n` | Malformed logical record number |
+
+Record numbers start at 1 and include the header when present; quoted
+newlines do not advance the record number. See
+[typed CSV](../examples/io/csv-typed.flx).
+
+### Optionals and results
+
+`?0` constructs absence in a checked optional context. `?1 VALUE`
+constructs presence, `?+ VALUE` tests presence and `?! VALUE` extracts
+a present payload or raises a fatal diagnostic. These are scalar
+operations; use explicit mapping for a nullable sequence.
 
 
-## Draft 0.7: typed tacit programming
+| Operation | Type |
+|---|---|
+| `opt.map F VALUE` | `(a->b) ?a -> ?b` |
+| `opt.bind F VALUE` | `(a->?b) ?a -> ?b` |
+| `opt.result ERROR VALUE` | `e ?a -> a^e` |
+| `res.map F RESULT` | `(a->b) (a^e) -> b^e` |
+| `res.maperr F RESULT` | `(e->f) (a^e) -> a^f` |
+| `res.collect RESULTS` | `[a^e] -> [a]^e` |
+| `res.partition RESULTS` | `[a^e] -> ([a],[e])` |
+| `res.ok RESULT`, `res.optional RESULT` | `(a^e) -> b`, `(a^e) -> ?a` respectively |
 
-[The tacit function algebra](draft-0.7-tacit.md) specifies the `&{ ... }`
-subgrammar, identity, composition, fork and hook. It extends the typed HIR
-interpreter without changing ordinary Polish call arities or implicit
-effects. A tacit function binding remains a first-class value.
+Optional callbacks run only on presence; bind adds no optional layer.
+`opt.result` evaluates its error argument normally and uses it only for
+absence. Result mapping applies only to the matching branch;
+`res.maperr` changes the error payload while keeping provenance.
+`res.collect` preserves success order or returns the first failure from
+an already evaluated sequence. Partition preserves relative order on
+both sides but returns plain payloads. `res.optional` discards failures
+and their provenance. None executes actions implicitly.
 
-## Draft 0.8: layout
+### Text, regular expressions and dates
 
-The [typographical conventions](draft-0.8-layout.md) describe how to place
-complex prefix calls, guards, tacit functions and effects on the page.
-Indentation is not part of Flux grammar. The formatter does not change
-tokens or insert punctuation.
+`str.upper`, `str.lower` and `str.trim` take and return text using Unicode
+rather than locale-specific rules. `str.split DELIMITER TEXT : [s]`
+preserves empty fields, including endpoint empties for an empty
+delimiter. `str.join DELIMITER PARTS : s` inserts delimiters only between
+parts. `rx.find PATTERN TEXT : (?s)^rxerr` returns the first leftmost whole
+match or absence. Invalid or over-complex patterns yield `badpattern s`
+carrying the pattern; the Unicode regex engine excludes backreferences
+and lookaround. The reference limits include a 64 KiB pattern and an
+8 MiB search string. `dt.days DATE : z^dterr` and
+`dt.date DAYS : s^dterr` convert between proleptic Gregorian
+`YYYY-MM-DD` (years 0001–9999) and days relative to 1970-01-01. Invalid
+values yield `baddate s`. There are no time zones or time-of-day operations.
+
+### Typed JSON
+
+`json.encode VALUE : s^jsonerr` and `json.decode TEXT : a^jsonerr` are
+pure. Decode requires a concrete target from checked context, not a
+dynamic JSON value. Supported shapes are `n`, `z`, `q`, `d`, `b`,
+`s`, `c`, unit, optionals, sequences, tuples and closed structural or
+nominal records. Approximate real `r` is not a supported decode target.
+Null represents unit or absence according to the checked shape; targets
+such as `?()` or nested optionals that would conflate two values are
+rejected. Encode also rejects a present value that encodes as null.
+
+JSON integer tokens can exceed machine widths; numerals are read without
+conversion through binary floating point. Exact decimals preserve scale.
+A rational can be encoded as a JSON number only with a finite decimal
+expansion. Objects reconstruct fields in schema order and reject
+duplicate, missing and unexpected keys. Duplicate keys are a shape
+failure even when the JSON syntax is otherwise valid. Malformed text
+yields `invalidjson s`; shape, unsupported representation and resource
+failures yield `jsonshape s`. The reference limits input and output to
+1 MiB and also bounds nesting, nodes and numeric expansion, including a
+1,000,000-digit decode budget. The
+[JSON example](../examples/library/json.flx) round-trips
+`170141183460469231731687303715884105728` and `101.2300` without losing
+digits or scale, then recovers explicitly from a duplicate `id` field.
+
+## Proposed and unimplemented
+
+The language has checked nominal sums, recovery patterns, inferred structural
+field constraints, and rank-one sequence operations. This revision does not
+introduce general algebraic pattern matching, parameterized nominal sums,
+explicit row constraints, distinct ranked arrays, a package registry, a
+columnar engine or native compilation. The historical design notes do not
+grant syntax or semantics for those features.
