@@ -361,7 +361,7 @@ fn structure(
 
         // Treat a consistent group of field definitions, guards, or recovery
         // arms as a related series. Never line up unrelated local statements.
-        if matches!(open, "!{" | "^{" | "|{" | "&{") {
+        if matches!(open, "!{" | "!^{" | "^{" | "|{" | "&{") {
             continue;
         }
         let mut fields = vec![];

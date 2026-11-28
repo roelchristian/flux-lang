@@ -2,7 +2,7 @@
 
 Flux is a statically typed, array-oriented language for exact arithmetic,
 data transformation and scripting. It uses strict prefix notation: `+ 2 3`
-adds 2 and 3. This is the experimental **Draft 0.16** reference interpreter.
+adds 2 and 3. This is the experimental **Draft 0.17** reference interpreter.
 
 ## Quickstart
 
@@ -27,17 +27,14 @@ The first command prints `Salve, munde.`; the second installs the CLI.
 ```flux
 sq := &{ @* * . . };
 
-!{
-    ^{
-        ^? ! print (@: sq (.. 1z 5z));
-        ()
-    }
+!^{
+    ! print (@: sq (.. 1z 5z));
 };
 ```
 
 This prints `[1 4 9 16 25]`. The tacit block multiplies two copies of its
 input. `@:` maps the resulting function over a range; `!` executes the print
-action, and `^?` propagates a typed failure.
+action, and the combined block propagates a failed unit action.
 
 ## Learn and develop
 

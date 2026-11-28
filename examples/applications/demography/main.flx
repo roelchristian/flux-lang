@@ -70,28 +70,25 @@ share(x: classified, whole: n) :=
         share     := / .residents x whole;
     };
 
-!{
-    ^{
-        census:#census := ^= ! csv.read "examples/data/population.csv" {
-            e : ^: data e;
-        };
-        totals := df.agg &key &aggregate census;
-        before := ?: (= .year totals 2020z) totals;
-        after := ?: (= .year totals 2025z) totals;
-        joined := *? &.district &.district after before;
-        ^= ! print (df.select &report joined) {
-            e : ^: output e;
-        };
+!^{
+    census:#census := ^= ! csv.read "examples/data/population.csv" {
+        e : ^: data e;
+    };
+    totals := df.agg &key &aggregate census;
+    before := ?: (= .year totals 2020z) totals;
+    after := ?: (= .year totals 2025z) totals;
+    joined := *? &.district &.district after before;
+    ^= ! print (df.select &report joined) {
+        e : ^: output e;
+    };
 
-        regions:#classification := ^= ! csv.read "examples/data/regions.csv" {
-            e : ^: data e;
-        };
-        classified := df.select &tag (*= &.district &.district after regions);
-        regional := df.agg &.region &region_sum classified;
-        whole := +/ .residents regional;
-        ^= ! print (df.select (\ x -> share x whole) regional) {
-            e : ^: output e;
-        };
-        ()
-    }
+    regions:#classification := ^= ! csv.read "examples/data/regions.csv" {
+        e : ^: data e;
+    };
+    classified := df.select &tag (*= &.district &.district after regions);
+    regional := df.agg &.region &region_sum classified;
+    whole := +/ .residents regional;
+    ^= ! print (df.select (\ x -> share x whole) regional) {
+        e : ^: output e;
+    };
 };

@@ -61,8 +61,10 @@ impl<'a> EagerIndex<'a> {
     }
 
     fn gather_expr(&mut self, e: &'a Expr) {
-        if let Expr::Block(stmts, tail) | Expr::Action(stmts, tail) | Expr::Fallible(stmts, tail) =
-            e
+        if let Expr::Block(stmts, tail)
+        | Expr::Action(stmts, tail)
+        | Expr::Fallible(stmts, tail)
+        | Expr::FallibleActionBody(stmts, tail) = e
         {
             self.blocks.push((stmts, tail.as_deref()));
             self.gather_stmts(stmts);
@@ -428,7 +430,7 @@ impl<'a> EagerWalk<'a, '_> {
                     fallback
                 }
             }
-            Expr::Raise(body) | Expr::Propagate(body) => {
+            Expr::Raise(body) | Expr::Propagate(body) | Expr::AutoPropagate(body) => {
                 self.expression(body)?;
                 Known::Unknown
             }
@@ -458,7 +460,9 @@ impl<'a> EagerWalk<'a, '_> {
                 }
                 Known::Unknown
             }
-            Expr::Block(ss, tail) | Expr::Fallible(ss, tail) => self.block(ss, tail.as_deref())?,
+            Expr::Block(ss, tail)
+            | Expr::Fallible(ss, tail)
+            | Expr::FallibleActionBody(ss, tail) => self.block(ss, tail.as_deref())?,
             Expr::Array(es) | Expr::Tuple(es) | Expr::Pipeline(es) => {
                 for x in es {
                     self.expression(x)?;

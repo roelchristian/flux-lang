@@ -222,7 +222,9 @@ struct Engine<'r> {
     schema_scopes: Vec<HashMap<String, NominalId>>,
     sums: HashMap<NominalId, Vec<SymbolId>>,
     sum_arities: HashMap<NominalId, usize>,
-    boundaries: Vec<(SyntaxId, Type)>,
+    boundaries: Vec<(SyntaxId, Type, bool)>,
+    combined_error_defaults: Vec<Type>,
+    raised_error_types: Vec<Type>,
     discarded_results: Vec<(Type, usize, usize)>,
     entry_natural_tail: Option<SyntaxId>,
     entry_boundary: Option<SyntaxId>,
@@ -811,13 +813,13 @@ impl Engine<'_> {
             .collect()
     }
     fn at_boundary(&mut self, e: &Expr) -> R<Type> {
-        let (id, err) = self
-            .boundaries
-            .last()
-            .ok_or_else(|| self.err("no lexically enclosing fallible boundary"))?
-            .clone();
-        self.result.boundaries.insert(self.syntax_id(e), id);
-        Ok(err)
+        let id_of_site = self.syntax_id(e);
+        let Some((id, err, used)) = self.boundaries.last_mut() else {
+            return Err(self.err("no lexically enclosing fallible boundary"));
+        };
+        *used = true;
+        self.result.boundaries.insert(id_of_site, *id);
+        Ok(err.clone())
     }
     fn recover(
         &mut self,
@@ -980,6 +982,40 @@ impl Engine<'_> {
                     })
                 }
                 _ => {}
+            }
+        }
+        Ok(())
+    }
+    fn default_combined_errors<'a>(
+        &mut self,
+        from: usize,
+        arguments: impl Iterator<Item = &'a Type>,
+        visible: &Env,
+    ) -> R<()> {
+        if self.combined_error_defaults.len() == from {
+            return Ok(());
+        }
+        // Let all contextual constraints in this inference scope settle first.
+        // A parameter or a real raise may establish a generic error type.
+        let protected = arguments
+            .flat_map(|ty| self.cx.free_vars(ty))
+            .chain(
+                self.raised_error_types
+                    .iter()
+                    .flat_map(|ty| self.cx.free_vars(ty)),
+            )
+            .chain(visible.values().flat_map(|scheme| {
+                self.cx
+                    .free_vars(&scheme.ty)
+                    .into_iter()
+                    .filter(|id| !scheme.vars.contains(id))
+            }))
+            .collect::<HashSet<_>>();
+        for ty in self.combined_error_defaults.split_off(from) {
+            if let Type::Var(id) = self.cx.resolve(&ty) {
+                if !self.explicit_variables.contains(&id) && !protected.contains(&id) {
+                    self.unify(&ty, &p(Prim::Unit))?;
+                }
             }
         }
         Ok(())
@@ -1234,7 +1270,7 @@ impl Engine<'_> {
                     this.block_body(env, defs, tail.as_deref(), expected.as_ref(), true)
                 })?)
             }
-            Expr::Fallible(defs, tail) => {
+            Expr::Fallible(defs, tail) | Expr::FallibleActionBody(defs, tail) => {
                 self.saw_result = true;
                 let (ok, err) = match want.map(|x| self.cx.resolve(x)) {
                     Some(Type::Result(ok, err)) => (*ok, *err),
@@ -1242,9 +1278,9 @@ impl Engine<'_> {
                 };
                 let id = self.syntax_id(e);
                 self.result.boundaries.insert(id, id);
-                self.boundaries.push((id, err.clone()));
+                self.boundaries.push((id, err.clone(), false));
                 let output = self.block_body(env, defs, tail.as_deref(), Some(&ok), effects);
-                self.boundaries.pop();
+                let (_, _, used) = self.boundaries.pop().expect("active fallible boundary");
                 let output = output?;
                 if output != Type::Never {
                     self.unify(&ok, &output)?;
@@ -1255,6 +1291,12 @@ impl Engine<'_> {
                     // path has a trivially valid unit process success type.
                     self.unify(&ok, &p(Unit))?;
                 }
+                if matches!(e, Expr::FallibleActionBody(..))
+                    && !used
+                    && matches!(self.cx.resolve(&err), Type::Var(_))
+                {
+                    self.combined_error_defaults.push(err.clone());
+                }
                 result(ok, err)
             }
             Expr::Raise(value) => {
@@ -1263,6 +1305,7 @@ impl Engine<'_> {
                 let typed = self.expr(env, value, Some(&err), effects);
                 self.raise_payload = old;
                 typed?;
+                self.raised_error_types.push(err);
                 Type::Never
             }
             Expr::Propagate(value) => {
@@ -1272,6 +1315,26 @@ impl Engine<'_> {
                     Type::Never
                 } else {
                     ok
+                }
+            }
+            Expr::AutoPropagate(value) => {
+                let executed = self.expr(env, value, None, effects)?;
+                match self.cx.resolve(&executed) {
+                    Type::Never => Type::Never,
+                    Type::Prim(Unit) => p(Unit),
+                    Type::Result(ok, err) => {
+                        if self.unify(&ok, &p(Unit)).is_err() {
+                            return Err(self.err(
+                                "standalone execution has a non-unit success value; bind or explicitly handle its result",
+                            ));
+                        }
+                        let expected = self.at_boundary(e)?;
+                        self.unify(&err, &expected)?;
+                        p(Unit)
+                    }
+                    _ => return Err(self.err(
+                        "standalone execution must produce unit or a unit result; bind or explicitly handle its value",
+                    )),
                 }
             }
             Expr::Match(value, cases) => self.match_expr(env, value, cases, want, effects)?,
@@ -3220,6 +3283,7 @@ impl Engine<'_> {
         Some(z)
     }
     fn group(&mut self, defs: Vec<&Stmt>, env: &mut Env, effect: bool) -> R<()> {
+        let default_from = self.combined_error_defaults.len();
         // Ordinary immutable values do not add a recursive header. Infer them
         // against the existing environment instead of cloning every prior value.
         if let [stmt @ Stmt::Def {
@@ -3242,6 +3306,7 @@ impl Engine<'_> {
                 let pos = self.literals.len();
                 self.body(env, stmt, &sig, effect)?;
                 self.default_literals(pos)?;
+                self.default_combined_errors(default_from, sig.args.iter(), env)?;
                 self.start = *start;
                 self.finish_signature(&sig, env)?;
                 if matches!(body,Expr::Array(es) if es.is_empty())
@@ -3287,6 +3352,13 @@ impl Engine<'_> {
             self.body(env, stmt, sig, effect)?;
         }
         self.default_literals(literals)?;
+        if !sigs.is_empty() {
+            self.default_combined_errors(
+                default_from,
+                sigs.iter().flat_map(|(_, sig)| &sig.args),
+                &outer,
+            )?;
+        }
         for (stmt, sig) in sigs {
             let Stmt::Def {
                 params,
@@ -3353,7 +3425,7 @@ impl Engine<'_> {
                 _ => {}
             }
         }
-        let mut pending: Vec<(SymbolId, &Stmt, Signature)> = Vec::new();
+        let mut pending: Vec<(SymbolId, &Stmt, Signature, Vec<Type>)> = Vec::new();
         let mut checked = HashSet::new();
         for stmt in defs {
             match stmt {
@@ -3361,10 +3433,12 @@ impl Engine<'_> {
                     let id = self.resolver.declaration(stmt).expect("local symbol");
                     let sig = signatures.remove(&id).expect("local header signature");
                     let pos = self.literals.len();
+                    let defaults = self.combined_error_defaults.len();
                     self.body(env, stmt, &sig, effect)?;
                     self.default_literals(pos)?;
+                    let defaults = self.combined_error_defaults.split_off(defaults);
                     checked.insert(id);
-                    pending.push((id, stmt, sig));
+                    pending.push((id, stmt, sig, defaults));
                     // A candidate can be generalized exactly when its whole
                     // reachable local-callable set has been checked.
                     let ready = |i| {
@@ -3400,7 +3474,16 @@ impl Engine<'_> {
                                 .filter(|(n, _)| !local_names.contains(n.as_str()))
                                 .map(|(n, t)| (n.clone(), t.clone())),
                         );
-                        for (_, stmt, sig) in done {
+                        let default_from = self.combined_error_defaults.len();
+                        for (_, _, _, defaults) in &mut done {
+                            self.combined_error_defaults.append(defaults);
+                        }
+                        self.default_combined_errors(
+                            default_from,
+                            done.iter().flat_map(|(_, _, sig, _)| sig.args.iter()),
+                            &visible,
+                        )?;
+                        for (_, stmt, sig, _) in done {
                             let Stmt::Def { name, start, .. } = stmt else {
                                 unreachable!()
                             };
@@ -3452,7 +3535,7 @@ fn immediate_raise(e: &Expr) -> bool {
                 || immediate_raise(x)
         }
         Recover(x, cs) => immediate_raise(x) || cs.iter().any(|c| immediate_raise(&c.body)),
-        Propagate(x) => immediate_raise(x),
+        Propagate(x) | AutoPropagate(x) => immediate_raise(x),
         _ => false,
     }
 }
@@ -3489,7 +3572,9 @@ fn find_entry_natural_tail(p: &Program, resolver: &Resolution) -> Option<SyntaxI
     let Expr::Action(_, Some(tail)) = p.entry.as_ref()? else {
         return None;
     };
-    let Expr::Fallible(_, Some(final_)) = tail.as_ref() else {
+    let (Expr::Fallible(_, Some(final_)) | Expr::FallibleActionBody(_, Some(final_))) =
+        tail.as_ref()
+    else {
         return None;
     };
     let nonnegative = match final_.as_ref() {
@@ -3527,13 +3612,18 @@ pub(crate) fn infer_live(p: &Program, resolver: &Resolution) -> R<InferResult> {
         sums: HashMap::new(),
         sum_arities: HashMap::new(),
         boundaries: vec![],
+        combined_error_defaults: vec![],
+        raised_error_types: vec![],
         discarded_results: vec![],
         entry_natural_tail: find_entry_natural_tail(p, resolver),
         entry_boundary: p.entry.as_ref().and_then(|e| {
             if let Expr::Action(_, Some(tail)) = e {
-                matches!(tail.as_ref(), Expr::Fallible(..))
-                    .then(|| resolver.syntax_id(tail))
-                    .flatten()
+                matches!(
+                    tail.as_ref(),
+                    Expr::Fallible(..) | Expr::FallibleActionBody(..)
+                )
+                .then(|| resolver.syntax_id(tail))
+                .flatten()
             } else {
                 None
             }
@@ -3559,6 +3649,7 @@ pub(crate) fn infer_live(p: &Program, resolver: &Resolution) -> R<InferResult> {
         e.expr(&env, entry, None, false)?;
         e.default_literals(pos)?;
     }
+    e.default_combined_errors(0, std::iter::empty(), &env)?;
     if e.saw_result {
         for (t, start, end) in &e.discarded_results {
             if matches!(e.cx.resolve(t), Type::Result(..)) {

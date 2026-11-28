@@ -627,9 +627,10 @@ impl Resolver {
                     self.scopes.pop();
                 }
             }
-            Expr::Block(stmts, tail) | Expr::Action(stmts, tail) | Expr::Fallible(stmts, tail) => {
-                self.block(stmts, tail.as_deref())?
-            }
+            Expr::Block(stmts, tail)
+            | Expr::Action(stmts, tail)
+            | Expr::Fallible(stmts, tail)
+            | Expr::FallibleActionBody(stmts, tail) => self.block(stmts, tail.as_deref())?,
             Expr::Int(_)
             | Expr::Num(_)
             | Expr::Str(_)
@@ -641,7 +642,8 @@ impl Resolver {
             | Expr::Cases(_, _)
             | Expr::Record(_)
             | Expr::Raise(_)
-            | Expr::Propagate(_) => e.try_for_each_child(|child| self.expression(child))?,
+            | Expr::Propagate(_)
+            | Expr::AutoPropagate(_) => e.try_for_each_child(|child| self.expression(child))?,
         }
         Ok(())
     }

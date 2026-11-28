@@ -1,0 +1,9 @@
+show(text: s): !(() ^ ioerr) := !^{
+    ! print text;
+};
+
+message := show "Executed twice";
+!^{
+    ! message;
+    ! message;
+};

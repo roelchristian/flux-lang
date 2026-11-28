@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for Draft 0.16. **Limited** features
+This is the normative reference for Draft 0.17. **Limited** features
 work only as stated; **Proposed** features are unavailable and do not
 reserve a design. See the [example corpus](../examples/README.md) for
 complete programs, the [implementation guide](implementation.md) for Rust
@@ -31,7 +31,7 @@ declaration = name [ "(" parameters ")" ] [ ":" TYPE ] [ qualifiers ]
               "{" variant { variant } "}" ";" ;
 variant     = "|" name { payload-type } ";" ;
 block       = "{" { declaration } expression "}" ;
-action      = "!{" { declaration | expression ";" } [ expression ] "}" ;
+action      = ( "!{" | "!^{" ) { declaration | expression ";" } [ expression ] "}" ;
 fallible    = "^{" { declaration | expression ";" } expression "}" ;
 parameters  = parameter { "," parameter } ;
 parameter   = name [ ":" TYPE ] ;
@@ -637,6 +637,30 @@ computation. See [type precedence](#types-and-inference) for compositions.
   such as ordinary division by zero or forced extraction of an absent
   optional, is not a recoverable result. Completed effects are not
   rolled back.
+
+### Combined fallible actions
+
+A contiguous `!^{ ... }` constructs a suspended action with type
+`!(a^e)`. Its statements run only when explicitly executed or when
+it is the final anonymous entry. If there is no final expression,
+the success value is unit. Otherwise the final expression determines
+the success type, without flattening result-valued tails.
+
+An immediate statement written `! ACTION;` automatically propagates
+a failure only when the executed action returns `()^e`. An infallible
+unit action is also accepted. Bind or handle non-unit success values
+explicitly. This convenience does not apply to declaration initializers,
+arguments, pipelines, arbitrary result-valued statements, or the
+immediate statements of nested ordinary blocks. Explicit `^?`, `^:`
+and `^=` retain their meaning, and suspended actions establish independent
+failure boundaries.
+
+Propagated errors must agree on one checked type; convert heterogeneous
+errors explicitly. With no type context or constraint on the error type,
+it defaults to unit. The first propagated failure retains its origin
+and stops later statements, without undoing prior effects.
+See [fallible actions](../examples/io/fallible-actions.flx) and the
+[array-and-tacit script](../examples/mathematics/array-tacit-script.flx).
 
 The final anonymous action is executed and may complete with unit or a natural
 exit status in 0–255, directly or inside a successful result. Unit exits

@@ -803,7 +803,7 @@ impl Lower<'_> {
                 tail: tail.as_deref().map(|v| self.expr(v, span)).transpose()?,
                 suspended: matches!(e, Expr::Action(..)),
             },
-            Expr::Fallible(stmts, tail) => Fallible {
+            Expr::Fallible(stmts, tail) | Expr::FallibleActionBody(stmts, tail) => Fallible {
                 boundary: self.boundary(e, span)?,
                 steps: self.steps(stmts)?,
                 tail: tail.as_deref().map(|v| self.expr(v, span)).transpose()?,
@@ -816,6 +816,24 @@ impl Lower<'_> {
                 boundary: self.boundary(e, span)?,
                 result: self.expr(result, span)?,
             },
+            Expr::AutoPropagate(value) => {
+                let id = self
+                    .resolution
+                    .syntax_id(e)
+                    .ok_or_else(|| Boundary::missing(span, "syntax identity"))?;
+                if self.inference.boundary_at(id).is_some() {
+                    Propagate {
+                        boundary: self.boundary(e, span)?,
+                        result: self.expr(value, span)?,
+                    }
+                } else {
+                    Block {
+                        steps: Vec::new(),
+                        tail: Some(self.expr(value, span)?),
+                        suspended: false,
+                    }
+                }
+            }
             Expr::Match(value, cases) => {
                 let value = self.expr(value, span)?;
                 let arms = cases

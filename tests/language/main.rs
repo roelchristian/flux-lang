@@ -2,6 +2,7 @@
 mod support;
 
 mod callable_declarations;
+mod fallible_actions;
 mod fixture;
 mod inference_basics;
 mod nary_tacit;

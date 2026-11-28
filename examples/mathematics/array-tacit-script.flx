@@ -1,0 +1,18 @@
+sq/1 := &{ @* * . . };
+affine/3 := &{ 3: @* + (@* * $1 $2) $3 };
+
+m: array[z] := form [2 3] [
+    1 2 3
+    4 5 6
+];
+v: array[z] := form [3] [10 20 30];
+corrected := + m v;
+squares := @: &sq corrected;
+totals := +/ squares;
+
+!^{
+    ! print dim corrected;
+    ! print ,. corrected;
+    ! print ,. totals;
+    ! print affine 3 4 5;
+};
