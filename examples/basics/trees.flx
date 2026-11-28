@@ -1,0 +1,22 @@
+--- Count leaves and select the first element of a recursive sum.
+tree['a] :: {
+    | leaf 'a;
+    | node tree['a] tree['a];
+};
+
+size(t: tree['a]): n := ?= t {
+    leaf _   : 1n;
+    node l r : + size l size r;
+};
+first(t: tree['a]): 'a := ?= t {
+    leaf x   : x;
+    node l _ : first l;
+};
+
+samples := node (leaf "north") (node (leaf "south") (leaf "east"));
+!{
+    ^{
+        ^? ! print (size samples, first samples);
+        ()
+    }
+};

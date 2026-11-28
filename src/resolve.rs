@@ -1,6 +1,7 @@
 //! Lexical identities and dependency ordering for a parsed Flux program.
 use crate::parser::{
-    standard_owners, Expr, Program, RecoveryCase, RecoveryPattern, Stmt, SyntaxId, Variant,
+    standard_owners, Expr, MatchPattern, MatchPatternKind, Program, RecoveryCase, RecoveryPattern,
+    Stmt, SyntaxId, Variant,
 };
 use crate::{builtins, errors041, Error};
 use std::{
@@ -53,6 +54,8 @@ pub struct Resolution {
     variants: HashMap<usize, SymbolId>,
     recovery_symbols: HashMap<usize, Vec<SymbolId>>,
     recovery_ctors: HashMap<usize, SymbolId>,
+    match_bindings: HashMap<usize, SymbolId>,
+    match_constructors: HashMap<usize, SymbolId>,
     standard: Vec<(&'static str, &'static str, SymbolId)>,
 }
 
@@ -123,6 +126,12 @@ impl Resolution {
     }
     pub fn recovery_constructor(&self, arm: &RecoveryCase) -> Option<SymbolId> {
         self.recovery_ctors.get(&arm.start).copied()
+    }
+    pub fn match_binding(&self, pat: &MatchPattern) -> Option<SymbolId> {
+        self.match_bindings.get(&pat.span.start).copied()
+    }
+    pub fn match_constructor(&self, pat: &MatchPattern) -> Option<SymbolId> {
+        self.match_constructors.get(&pat.span.start).copied()
     }
     pub fn standard_owner(&self, owner: &str) -> Option<SymbolId> {
         errors041::owner_id(owner).map(SymbolId)
@@ -514,6 +523,42 @@ impl Resolver {
         self.scopes.pop();
         Ok(())
     }
+    fn collect_pattern<'p>(
+        &mut self,
+        pat: &'p MatchPattern,
+        bindings: &mut Vec<(&'p str, usize)>,
+    ) -> Result<(), Error> {
+        match &pat.kind {
+            MatchPatternKind::Bind(name) => bindings.push((name, pat.span.start)),
+            MatchPatternKind::Constructor(name, args) => {
+                let id = self
+                    .lookup(name)
+                    .filter(|&id| matches!(self.out.symbol(id).kind, SymbolKind::Constructor(n) if n == args.len()))
+                    .ok_or_else(|| Error::new(pat.span.start, format!("unknown match constructor or arity mismatch for `{name}`")))?;
+                self.edge(id);
+                self.out.match_constructors.insert(pat.span.start, id);
+                for arg in args {
+                    self.collect_pattern(arg, bindings)?;
+                }
+            }
+            MatchPatternKind::Tuple(items) => {
+                for item in items {
+                    self.collect_pattern(item, bindings)?;
+                }
+            }
+            MatchPatternKind::Record(fields) => {
+                for (_, field) in fields {
+                    self.collect_pattern(field, bindings)?;
+                }
+            }
+            MatchPatternKind::Optional(Some(payload)) => self.collect_pattern(payload, bindings)?,
+            MatchPatternKind::Optional(None)
+            | MatchPatternKind::Wildcard
+            | MatchPatternKind::Unit
+            | MatchPatternKind::Bool(_) => {}
+        }
+        Ok(())
+    }
     fn expression(&mut self, e: &Expr) -> Result<(), Error> {
         self.out.offsets.insert(
             self.out.syntax_id(e).expect("indexed expression"),
@@ -598,6 +643,21 @@ impl Resolver {
                     let ids = self.parameter_scope(&bindings)?;
                     self.offset = saved;
                     self.out.recovery_symbols.insert(arm.start, ids);
+                    self.expression(&arm.body)?;
+                    self.scopes.pop();
+                }
+            }
+            Expr::Match(body, arms) => {
+                self.expression(body)?;
+                for arm in arms {
+                    let mut bindings = Vec::new();
+                    self.collect_pattern(&arm.pattern, &mut bindings)?;
+                    self.scopes.push(HashMap::new());
+                    for (name, start) in bindings {
+                        let id = self.fresh(name, SymbolKind::Parameter, start);
+                        self.bind(id)?;
+                        self.out.match_bindings.insert(start, id);
+                    }
                     self.expression(&arm.body)?;
                     self.scopes.pop();
                 }
@@ -722,6 +782,12 @@ impl<'a> EagerIndex<'a> {
                     self.gather_expr(&arm.body);
                 }
             }
+            Expr::Match(body, arms) => {
+                self.gather_expr(body);
+                for arm in arms {
+                    self.gather_expr(&arm.body);
+                }
+            }
             Expr::Cases(pairs, tail) => {
                 for (c, v) in pairs {
                     self.gather_expr(c);
@@ -751,6 +817,7 @@ impl<'a> EagerIndex<'a> {
                 depth: 0,
                 fuel: 20_000,
                 masked: Vec::new(),
+                pattern_values: HashMap::new(),
             };
             walk.expression(e)?;
         }
@@ -761,12 +828,25 @@ impl<'a> EagerIndex<'a> {
             return Known::Unknown;
         }
         match expr {
-            Expr::Name(_) => self
-                .resolution
-                .reference(expr)
-                .and_then(|id| self.defs.get(&id))
-                .and_then(|&(body, n)| (n == 0).then_some(body))
-                .map_or(Known::Unknown, |body| self.known(body, fuel - 1)),
+            Expr::Name(_) => {
+                let id = self.resolution.reference(expr);
+                if let Some(id) =
+                    id.filter(|&id| self.resolution.symbol(id).kind == SymbolKind::Constructor(0))
+                {
+                    Known::Variant(id, &[])
+                } else {
+                    id.and_then(|id| self.defs.get(&id))
+                        .and_then(|&(body, n)| (n == 0).then_some(body))
+                        .map_or(Known::Unknown, |body| self.known(body, fuel - 1))
+                }
+            }
+            Expr::Call(_, args)
+                if self.resolution.reference(expr).is_some_and(|id| {
+                    matches!(self.resolution.symbol(id).kind, SymbolKind::Constructor(_))
+                }) =>
+            {
+                Known::Variant(self.resolution.reference(expr).unwrap(), args)
+            }
             Expr::Ref(_) => self
                 .resolution
                 .reference(expr)
@@ -790,7 +870,16 @@ impl<'a> EagerIndex<'a> {
                     .project(&n[1..])
                     .map_or(Known::Unknown, |e| self.known(e, fuel - 1))
             }
+            Expr::Call(op, args)
+                if matches!(op.as_str(), "?0" | "?1")
+                    && self.resolution.reference(expr).is_some_and(|id| {
+                        self.resolution.symbol(id).kind == SymbolKind::External
+                    }) =>
+            {
+                Known::Optional(args.first())
+            }
             Expr::Bool(b) => Known::Bool(*b),
+            Expr::Unit => Known::Unit,
             _ => Known::Unknown,
         }
     }
@@ -800,9 +889,11 @@ impl<'a> EagerIndex<'a> {
 enum Known<'a> {
     Unknown,
     Bool(bool),
+    Unit,
+    Variant(SymbolId, &'a [Expr]),
     Tuple(&'a [Expr]),
     Record(&'a [(String, Expr)]),
-    Optional(bool),
+    Optional(Option<&'a Expr>),
     Function(&'a Expr, usize),
     Action(&'a Expr, &'a [Stmt], Option<&'a Expr>),
 }
@@ -819,6 +910,7 @@ struct EagerWalk<'a, 's> {
     index: &'s EagerIndex<'a>,
     pending: &'s std::collections::HashSet<SymbolId>,
     masked: Vec<SymbolId>,
+    pattern_values: HashMap<SymbolId, Known<'a>>,
     active: std::collections::HashSet<SyntaxId>,
     depth: usize,
     fuel: usize,
@@ -883,6 +975,95 @@ impl<'a> EagerWalk<'a, '_> {
         self.masked.truncate(mark);
         result
     }
+    fn known_value(&self, e: &'a Expr, fuel: usize) -> Known<'a> {
+        self.index
+            .resolution
+            .reference(e)
+            .and_then(|id| self.pattern_values.get(&id).copied())
+            .unwrap_or_else(|| self.index.known(e, fuel))
+    }
+    fn known_match(
+        &self,
+        pattern: &MatchPattern,
+        value: Known<'a>,
+        bindings: &mut Vec<(SymbolId, Known<'a>)>,
+    ) -> Option<bool> {
+        use MatchPatternKind::*;
+        fn merge(values: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+            let mut unknown = false;
+            for v in values {
+                match v {
+                    Some(false) => return Some(false),
+                    None => unknown = true,
+                    Some(true) => {}
+                }
+            }
+            (!unknown).then_some(true)
+        }
+        match (&pattern.kind, value) {
+            (Bind(_), _) => {
+                if let Some(id) = self.index.resolution.match_binding(pattern) {
+                    bindings.push((id, value));
+                }
+                Some(true)
+            }
+            (Wildcard, _) | (Unit, Known::Unit) => Some(true),
+            (Bool(a), Known::Bool(b)) => Some(*a == b),
+            (Optional(None), Known::Optional(payload)) => Some(payload.is_none()),
+            (Optional(Some(_)), Known::Optional(None)) => Some(false),
+            (Optional(Some(inner)), Known::Optional(Some(item))) => {
+                self.known_match(inner, self.known_value(item, 32), bindings)
+            }
+            (Constructor(_, patterns), Known::Variant(id, items)) => {
+                if self.index.resolution.match_constructor(pattern)? != id {
+                    return Some(false);
+                }
+                if patterns.len() != items.len() {
+                    return None;
+                }
+                merge(
+                    patterns
+                        .iter()
+                        .zip(items)
+                        .map(|(p, e)| self.known_match(p, self.known_value(e, 32), bindings)),
+                )
+            }
+            (Tuple(patterns), Known::Tuple(items)) if patterns.len() == items.len() => merge(
+                patterns
+                    .iter()
+                    .zip(items)
+                    .map(|(p, e)| self.known_match(p, self.known_value(e, 32), bindings)),
+            ),
+            (Record(patterns), Known::Record(fields)) => {
+                merge(patterns.iter().map(|(name, pattern)| {
+                    let (_, item) = fields.iter().find(|(field, _)| field == name)?;
+                    self.known_match(pattern, self.known_value(item, 32), bindings)
+                }))
+            }
+            _ => None,
+        }
+    }
+    fn match_body(
+        &mut self,
+        body: &'a Expr,
+        bindings: Vec<(SymbolId, Known<'a>)>,
+    ) -> Result<Known<'a>, Error> {
+        // Nested re-entry can encounter the same syntactic arm. Restore any
+        // outer abstract values on exit, rather than clearing them blindly.
+        let previous: Vec<_> = bindings
+            .into_iter()
+            .map(|(id, value)| (id, self.pattern_values.insert(id, value)))
+            .collect();
+        let result = self.expression(body);
+        for (id, prior) in previous.into_iter().rev() {
+            if let Some(prior) = prior {
+                self.pattern_values.insert(id, prior);
+            } else {
+                self.pattern_values.remove(&id);
+            }
+        }
+        result
+    }
     fn expression(&mut self, e: &'a Expr) -> Result<Known<'a>, Error> {
         // Recursion/highly shared call graphs cannot turn the checker into an
         // unbounded evaluator; unresolved paths retain the runtime guard.
@@ -905,7 +1086,7 @@ impl<'a> EagerWalk<'a, '_> {
                         ),
                     ));
                 }
-                self.index.known(e, 128)
+                self.known_value(e, 128)
             }
             Expr::Call(n, args) => {
                 let id = r.reference(e);
@@ -913,8 +1094,8 @@ impl<'a> EagerWalk<'a, '_> {
                 if external && n == "??" {
                     if let [fallback, optional] = args.as_slice() {
                         return match self.expression(optional)? {
-                            Known::Optional(true) => Ok(Known::Unknown),
-                            Known::Optional(false) => self.expression(fallback),
+                            Known::Optional(Some(_)) => Ok(Known::Unknown),
+                            Known::Optional(None) => self.expression(fallback),
                             _ => {
                                 self.expression(fallback)?;
                                 Ok(Known::Unknown)
@@ -926,6 +1107,11 @@ impl<'a> EagerWalk<'a, '_> {
                     .iter()
                     .map(|x| self.expression(x))
                     .collect::<Result<Vec<_>, _>>()?;
+                if let Some(id) =
+                    id.filter(|&id| matches!(r.symbol(id).kind, SymbolKind::Constructor(_)))
+                {
+                    return Ok(Known::Variant(id, args));
+                }
                 match (external, n.as_str(), values.as_slice()) {
                     (true, selector, [value])
                         if selector.starts_with('.') && !matches!(selector, ".." | ".:") =>
@@ -934,8 +1120,8 @@ impl<'a> EagerWalk<'a, '_> {
                             .project(&selector[1..])
                             .map_or(Known::Unknown, |e| self.index.known(e, 128))
                     }
-                    (true, "?0", []) => Known::Optional(false),
-                    (true, "?1", [_]) => Known::Optional(true),
+                    (true, "?0", []) => Known::Optional(None),
+                    (true, "?1", [_]) => Known::Optional(args.first()),
                     (true, "@", [f, _]) => self.apply(*f, 1)?,
                     (true, "@@", [f, Known::Tuple(es)]) => self.apply(*f, es.len())?,
                     (true, "!", [Known::Action(owner, ss, tail)]) => {
@@ -980,6 +1166,25 @@ impl<'a> EagerWalk<'a, '_> {
                 self.expression(body)?;
                 for arm in arms {
                     self.expression(&arm.body)?;
+                }
+                Known::Unknown
+            }
+            Expr::Match(body, arms) => {
+                let value = self.expression(body)?;
+                let mut uncertain = false;
+                for arm in arms {
+                    let mut bindings = Vec::new();
+                    match self.known_match(&arm.pattern, value, &mut bindings) {
+                        Some(false) => continue,
+                        Some(true) => {
+                            let selected = self.match_body(&arm.body, bindings)?;
+                            return Ok(if uncertain { Known::Unknown } else { selected });
+                        }
+                        None => {
+                            uncertain = true;
+                            self.match_body(&arm.body, bindings)?;
+                        }
+                    }
                 }
                 Known::Unknown
             }
@@ -1341,5 +1546,75 @@ mod tests {
             panic!()
         };
         assert_eq!(r.reference(tail), r.declaration(&ss[0]));
+    }
+
+    #[test]
+    fn nested_match_binders_have_arm_local_identity() {
+        let p = parse("tree['a] :: { | leaf 'a; | node tree['a] tree['a]; }; f(t:tree[q]):q := ?= t { leaf x : x; node (leaf x) _ : x; _ : 0q; };").unwrap();
+        let res = resolve(&p).unwrap();
+        let Stmt::Def {
+            body: Expr::Match(_, arms),
+            ..
+        } = &p.defs[1]
+        else {
+            panic!("expected match");
+        };
+        let MatchPatternKind::Constructor(_, first) = &arms[0].pattern.kind else {
+            panic!("expected constructor");
+        };
+        let MatchPatternKind::Constructor(_, second) = &arms[1].pattern.kind else {
+            panic!("expected constructor");
+        };
+        let MatchPatternKind::Constructor(_, nested) = &second[0].kind else {
+            panic!("expected nested constructor");
+        };
+        assert!(res.match_constructor(&arms[0].pattern).is_some());
+        assert_eq!(
+            res.match_constructor(&arms[0].pattern),
+            res.match_constructor(&second[0])
+        );
+        let l = res.match_binding(&first[0]).unwrap();
+        let r = res.match_binding(&nested[0]).unwrap();
+        assert_ne!(l, r);
+        assert_eq!(res.reference(&arms[0].body), Some(l));
+        assert_eq!(res.reference(&arms[1].body), Some(r));
+    }
+
+    #[test]
+    fn eager_resolution_follows_only_the_statically_selected_match_arm() {
+        let source = "color :: { | red; | blue; }; !{ safe := ?= COLOR { red : 1z; blue : read (); }; delayed := 7z; read(x:()):z := delayed; () };";
+        let good = parse(&source.replace("COLOR", "red")).unwrap();
+        resolve(&good).unwrap();
+        let bad = parse(&source.replace("COLOR", "blue")).unwrap();
+        assert!(resolve(&bad)
+            .unwrap_err()
+            .message
+            .contains("before its initializer"));
+    }
+
+    #[test]
+    fn checks_eager_reads_through_known_match_payload_bindings() {
+        for (header, value, pattern) in [
+            ("", "(&f,())", "(g,())"),
+            ("box :: { | wrap (()->z); };", "wrap &f", "wrap g"),
+            ("", "?1 &f", "?1 g"),
+            ("", ".{ get := &f; }", ".{ get := g; }"),
+        ] {
+            let fallback = if pattern == "?1 g" { "_ : 0z;" } else { "" };
+            let eager = format!("{header} !{{ a := ?= {value} {{ {pattern} : @ g (); {fallback} }}; f(x:()):z := a; () }};");
+            let p = parse(&eager).unwrap();
+            assert!(
+                resolve(&p)
+                    .unwrap_err()
+                    .message
+                    .contains("before its initializer"),
+                "{eager}"
+            );
+
+            let deferred = format!(
+                r"{header} !{{ a := ?= {value} {{ {pattern} : \x -> @ g x; }}; f(x:()):z := @ a x; () }};"
+            );
+            resolve(&parse(&deferred).unwrap()).unwrap();
+        }
     }
 }

@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for the implemented Draft 0.9 language.
+This is the normative reference for the implemented Draft 0.10 language.
 Unless marked **Limited** or **Proposed**, the rules describe the behavior
 of the Rust reference interpreter. Limited features have the scope stated
 here. Proposed features are not available and do not reserve a design.
@@ -37,7 +37,7 @@ Indentation and line endings are not statement terminators. Four spaces per stru
 
 ## Expressions and evaluation
 
-Expressions include literals, values, strict prefix calls, function references and lambdas, tuples and sequences, record and table construction, grouping, guarded cases, blocks, pipelines, and the effect and typed-failure forms described below. There is no infix fallback. Parentheses around one expression group it; `()` is unit; `(a, b)` is a tuple with two or more fields, and `[a b]` is an ordered sequence with no commas. Named records use `schema { field := value; }`; structural records use `.{ field := value; }`. Both require unique field names. Use `.field value` for named projection, or `.1 pair` for the first positional field. `:=` defines an immutable binding; it is not equality or assignment to an existing cell.
+Expressions include literals, values, strict prefix calls, pattern matching, function references and lambdas, tuples and sequences, record and table construction, grouping, guarded cases, blocks, pipelines, and the effect and typed-failure forms described below. There is no infix fallback. Parentheses around one expression group it; `()` is unit; `(a, b)` is a tuple with two or more fields, and `[a b]` is an ordered sequence with no commas. Named records use `schema { field := value; }`; structural records use `.{ field := value; }`. Both require unique field names. Use `.field value` for named projection, or `.1 pair` for the first positional field. `:=` defines an immutable binding; it is not equality or assignment to an existing cell.
 
 Ordinary evaluation is strict and evaluates operands from left to right. The conditional `? CONDITION YES NO` selects one branch. In `?{ CONDITION : VALUE; ... _ : DEFAULT; }`, guards are tested in order, only the chosen value is evaluated, and the final default is required. Boolean `&&` and `||` are ordinary strict operations, not short-circuit control flow. Optional fallback `?? FALLBACK OPTIONAL` checks the optional first and evaluates the fallback only on absence. Typed recovery evaluates an arm only on the matching failure. See [guards](../examples/basics/guards.flx) and [optionals](../examples/library/optionals.flx).
 
@@ -205,6 +205,41 @@ See [wide arithmetic](../examples/mathematics/exact.flx),
 [exact rational calculations](../examples/mathematics/rational.flx),
 [rounding](../examples/mathematics/rounding.flx), and
 [approximation](../examples/mathematics/approximation.flx).
+
+## Algebraic types and matching
+
+Declare a nominal sum with `name :: { | constructor PAYLOAD; ... };`.
+Constructor arity is its number of payload types; a constructor with no
+payloads is a value. Export the sum's name to expose its constructors
+as namespace-qualified members. A separately declared sum is a distinct
+type, irrespective of its constructor spellings.
+
+Use adjacent brackets to declare and apply type parameters:
+`tree['a] :: { | leaf 'a; | node tree['a] tree['a]; };` declares one
+parameter. `tree[z]` and `tree[s]` are different applications of the
+same nominal type. Multiple parameters and arguments are comma-separated.
+Constructors infer their type arguments at each use, retaining the
+constraints of their payloads. A phantom parameter may require an expected
+type. A recursive payload can refer to the nominal type without unrolling
+the declaration. Parameterized records, higher-kinded types, GADTs and
+structural equality on parameterized sums are not provided.
+
+`?= VALUE { PATTERN : BODY; ... }` evaluates VALUE once. Arms are
+checked against its type and one common output type. The first matching
+arm runs, with fresh immutable bindings; none of the unselected bodies
+runs. The checker rejects incomplete matches and unreachable arms,
+including on nested finite alternatives.
+
+Patterns are `_` (discard), unqualified binders, visible fixed-arity
+constructors, `(P, Q)` tuples, `.{ field := P; }` record fields,
+`?0`/ `?1 P` optionals, `0b`/ `1b` booleans, and `()`.
+A constructor in scope is interpreted as a constructor, not a binder.
+Record patterns can omit fields but cannot repeat them; binders cannot
+repeat in the same arm. Ranges, arbitrary scalar constants and sequence
+length patterns are not implemented. Coverage checks are resource-bounded;
+if a very large match is rejected, split it into smaller matches.
+The [recursive tree example](../examples/basics/trees.flx) uses nested
+constructors and inferred polymorphism.
 
 ## Collections, records and tables
 
@@ -543,9 +578,5 @@ digits or scale, then recovers explicitly from a duplicate `id` field.
 
 ## Proposed and unimplemented
 
-The language has checked nominal sums, recovery patterns, inferred structural
-field constraints, and rank-one sequence operations. This revision does not
-introduce general algebraic pattern matching, parameterized nominal sums,
-explicit row constraints, distinct ranked arrays, a package registry, a
-columnar engine or native compilation. Earlier proposals in Git history do not define syntax or semantics
-for those features.
+Explicit row constraints, distinct ranked arrays, a package registry,
+a columnar engine and native compilation are not provided.

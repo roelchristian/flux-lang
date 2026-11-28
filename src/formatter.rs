@@ -126,10 +126,14 @@ fn spacing(source: &str, tokens: &[Token], i: usize) -> usize {
     {
         return usize::from(!adjacent);
     }
-    if second == "(" && adjacent && first.as_bytes()[0].is_ascii_lowercase() {
-        return 0; // A declaration's parameter list.
+    if matches!(second, "(" | "[") && adjacent && first.as_bytes()[0].is_ascii_lowercase() {
+        return 0; // A declaration's parameter list or a nominal type application.
     }
     1
+}
+
+fn nominal_bracket(left: &Token, right: &Token) -> bool {
+    right.text == "[" && left.text.as_bytes()[0].is_ascii_lowercase()
 }
 
 fn logical_lines(mut text: &str, mut each: impl FnMut(&str, bool)) {
@@ -259,7 +263,9 @@ fn apply_prefix(
             let end = tokens.partition_point(|t| t.end <= end_byte);
             if start <= head
                 || end <= start
-                || tokens[start - 1].text == "#" && tokens[start - 1].end == tokens[start].start
+                || (tokens[start - 1].text == "#"
+                    || nominal_bracket(&tokens[start - 1], &tokens[start]))
+                    && tokens[start - 1].end == tokens[start].start
             {
                 continue;
             }
@@ -485,7 +491,10 @@ pub(crate) fn format(
             .map(|t| &t.text)
             .eq(new.iter().map(|t| &t.text))
             && tokens.windows(2).zip(new.windows(2)).all(|(old, new)| {
-                if (old[0].text == "&" && old[1].text == ".") || old[0].text == "#" {
+                if (old[0].text == "&" && old[1].text == ".")
+                    || old[0].text == "#"
+                    || nominal_bracket(&old[0], &old[1])
+                {
                     (old[0].end == old[1].start) == (new[0].end == new[1].start)
                 } else {
                     true

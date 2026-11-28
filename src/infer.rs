@@ -1,4 +1,6 @@
 //! Rank-one inference for the Draft 0.4 checked subset.
+mod matches;
+
 use crate::{
     parser::{
         Expr, Program, RecoveryCase, RecoveryPattern, Stmt, SyntaxId, TypeAnnotation,
@@ -155,6 +157,12 @@ fn scan_dependencies(
     let mut visit = |e: &Expr| scan_dependencies(e, res, local, out);
     match e {
         Raise(x) | Propagate(x) => visit(x),
+        Match(value, cases) => {
+            visit(value);
+            for case in cases {
+                visit(&case.body);
+            }
+        }
         Recover(value, cases) => {
             visit(value);
             for case in cases {
@@ -200,7 +208,7 @@ fn num(t: Prim) -> bool {
 }
 fn type_has_nominal(t: &Type) -> bool {
     match t {
-        Type::Nominal(_) => true,
+        Type::Nominal(_) | Type::Applied(_, _) => true,
         Type::Seq(t) | Type::Table(t) | Type::Optional(t) | Type::Action(t) => type_has_nominal(t),
         Type::Fun(a, b) | Type::Dict(a, b) | Type::Result(a, b) => {
             type_has_nominal(a) || type_has_nominal(b)
@@ -249,6 +257,7 @@ struct Engine<'r> {
     schemas: HashMap<NominalId, Row>,
     schema_scopes: Vec<HashMap<String, NominalId>>,
     sums: HashMap<NominalId, Vec<SymbolId>>,
+    sum_arities: HashMap<NominalId, usize>,
     boundaries: Vec<(SyntaxId, Type)>,
     discarded_results: Vec<(Type, usize, usize)>,
     entry_natural_tail: Option<SyntaxId>,
@@ -467,11 +476,35 @@ impl Engine<'_> {
                 TypePrimitive::C => Prim::C,
                 TypePrimitive::Unit => Prim::Unit,
             }),
-            K::Named(name) => Type::Nominal(
-                self.schema_id(name)
+            K::Named(name) => {
+                let id = self
+                    .schema_id(name)
                     .ok_or_else(|| self.err(format!("unknown type {name}")))?
-                    .clone(),
-            ),
+                    .clone();
+                if let Some(arity @ 1..) = self.sum_arities.get(&id).copied() {
+                    return Err(self.err(format!("type {name} expects {arity} type arguments")));
+                }
+                Type::Nominal(id)
+            }
+            K::NamedApply(name, args) => {
+                let id = self
+                    .schema_id(name)
+                    .ok_or_else(|| self.err(format!("unknown type {name}")))?
+                    .clone();
+                let arity = self.sum_arities.get(&id).copied().unwrap_or(0);
+                if arity == 0 || arity != args.len() {
+                    return Err(self.err(format!(
+                        "type {name} expects {arity} type arguments, found {}",
+                        args.len()
+                    )));
+                }
+                Type::Applied(
+                    id,
+                    args.iter()
+                        .map(|a| self.annotation(a, vars))
+                        .collect::<R<_>>()?,
+                )
+            }
             K::Variable(name) => vars
                 .entry(name.clone())
                 .or_insert_with(|| self.cx.fresh())
@@ -626,7 +659,25 @@ impl Engine<'_> {
                     .last_mut()
                     .expect("lexical schema scope")
                     .insert(name.clone(), id.clone());
-                self.result.bindings.insert(symbol, mono(Type::Nominal(id)));
+                let ty = if let Stmt::Sum { type_params, .. } = stmt {
+                    self.sum_arities.insert(id.clone(), type_params.len());
+                    let distinct = type_params.iter().collect::<HashSet<_>>();
+                    if distinct.len() != type_params.len() {
+                        return Err(self.err("duplicate sum type parameter"));
+                    }
+                    if type_params.is_empty() {
+                        mono(Type::Nominal(id))
+                    } else {
+                        let args = type_params
+                            .iter()
+                            .map(|_| self.cx.fresh())
+                            .collect::<Vec<_>>();
+                        self.cx.generalize(&Type::Applied(id, args), &[], &[])
+                    }
+                } else {
+                    mono(Type::Nominal(id))
+                };
+                self.result.bindings.insert(symbol, ty);
             }
         }
         for stmt in defs {
@@ -645,6 +696,7 @@ impl Engine<'_> {
                 }
                 Stmt::Sum {
                     name,
+                    type_params,
                     variants,
                     start,
                 } => {
@@ -656,19 +708,42 @@ impl Engine<'_> {
                         let id = self.resolver.variant(variant).ok_or_else(|| {
                             self.err(format!("missing constructor identity for {}", variant.name))
                         })?;
+                        let mut vars = type_params
+                            .iter()
+                            .map(|name| (name.clone(), self.cx.fresh()))
+                            .collect::<HashMap<_, _>>();
+                        let args = type_params
+                            .iter()
+                            .map(|name| vars[name].clone())
+                            .collect::<Vec<_>>();
+                        let declared = args
+                            .iter()
+                            .flat_map(|t| self.cx.free_vars(t))
+                            .collect::<HashSet<_>>();
                         let mut payload = Vec::new();
                         for spelling in &variant.payload {
-                            let mut vars = HashMap::new();
                             let t = self.annotation(spelling, &mut vars)?;
-                            if !vars.is_empty() || !self.cx.free_vars(&t).is_empty() {
-                                return Err(
-                                    self.err("sum constructor payload requires a closed type")
-                                );
+                            if self
+                                .cx
+                                .free_vars(&t)
+                                .iter()
+                                .any(|id| !declared.contains(id))
+                            {
+                                return Err(self.err(
+                                    "undeclared type variable or hole in sum constructor payload",
+                                ));
                             }
                             payload.push(t);
                         }
-                        let ty = function(payload.iter().cloned(), Type::Nominal(owner.clone()));
-                        self.result.bindings.insert(id, mono(ty));
+                        let result = if args.is_empty() {
+                            Type::Nominal(owner.clone())
+                        } else {
+                            Type::Applied(owner.clone(), args)
+                        };
+                        let ty = function(payload.iter().cloned(), result);
+                        self.result
+                            .bindings
+                            .insert(id, self.cx.generalize(&ty, &[], &[]));
                         self.result.constructors.insert(
                             id,
                             Constructor {
@@ -686,12 +761,51 @@ impl Engine<'_> {
         }
         Ok(())
     }
-    fn constructor_type(&self, e: &Expr) -> Option<Type> {
-        let c = self.result.constructors.get(&self.resolver.reference(e)?)?;
-        Some(function(
-            c.payload.iter().cloned(),
-            Type::Nominal(c.owner.clone()),
-        ))
+    fn constructor_type(&mut self, e: &Expr) -> Option<Type> {
+        let id = self.resolver.reference(e)?;
+        self.result.constructors.get(&id)?;
+        let scheme = self.result.bindings.get(&id)?;
+        Some(self.cx.instantiate(scheme).0)
+    }
+    fn match_constructor_signature(&mut self, id: SymbolId) -> R<(Type, Vec<Type>)> {
+        let arity = self
+            .result
+            .constructors
+            .get(&id)
+            .ok_or_else(|| self.err("unknown constructor"))?
+            .payload
+            .len();
+        let scheme = self
+            .result
+            .bindings
+            .get(&id)
+            .ok_or_else(|| self.err("missing constructor scheme"))?;
+        let (mut result, _) = self.cx.instantiate(scheme);
+        let mut payload = Vec::with_capacity(arity);
+        for _ in 0..arity {
+            let Type::Fun(arg, rest) = result else {
+                return Err(self.err("invalid checked constructor scheme"));
+            };
+            payload.push(*arg);
+            result = *rest;
+        }
+        Ok((result, payload))
+    }
+    fn match_constructor(&mut self, id: SymbolId, subject: &Type) -> R<Vec<Type>> {
+        let (result, payload) = self.match_constructor_signature(id)?;
+        self.unify(&result, subject)?;
+        Ok(payload.iter().map(|p| self.cx.resolve(p)).collect())
+    }
+    fn match_constructors(&mut self, t: &Type) -> R<Vec<(SymbolId, Vec<Type>)>> {
+        let ty = self.cx.resolve(t);
+        let owner = match &ty {
+            Type::Nominal(owner) | Type::Applied(owner, _) => owner,
+            _ => return Ok(vec![]),
+        };
+        let ids = self.sums.get(owner).cloned().unwrap_or_default();
+        ids.into_iter()
+            .map(|id| Ok((id, self.match_constructor(id, &ty)?)))
+            .collect()
     }
     fn at_boundary(&mut self, e: &Expr) -> R<Type> {
         let (id, err) = self
@@ -724,7 +838,7 @@ impl Engine<'_> {
             if catchall {
                 return Err(self.err("unreachable recovery case after catchall"));
             }
-            if let Type::Nominal(owner) = self.cx.resolve(&err) {
+            if let Type::Nominal(owner) | Type::Applied(owner, _) = self.cx.resolve(&err) {
                 if self
                     .sums
                     .get(&owner)
@@ -737,27 +851,21 @@ impl Engine<'_> {
             }
             let mut nested = env.clone();
             if let Some(id) = self.resolver.recovery_constructor(case) {
-                let c = self
-                    .result
-                    .constructors
-                    .get(&id)
-                    .cloned()
-                    .ok_or_else(|| self.err("unknown recovery constructor"))?;
                 if !seen.insert(id) {
                     return Err(self.err("duplicate recovery constructor case"));
                 }
-                self.unify(&err, &Type::Nominal(c.owner))?;
+                let payload = self.match_constructor(id, &err)?;
                 let names = match &case.pattern {
                     RecoveryPattern::Constructor(_, xs) => xs.as_slice(),
                     _ => &[],
                 };
-                if names.len() != c.payload.len() {
+                if names.len() != payload.len() {
                     return Err(self.err("wrong recovery constructor arity"));
                 }
                 let ids = self.resolver.recovery_bindings(case);
                 for ((name, ty), id) in names
                     .iter()
-                    .zip(c.payload)
+                    .zip(payload)
                     .filter(|(n, _)| n.as_str() != "_")
                     .zip(ids)
                 {
@@ -783,8 +891,9 @@ impl Engine<'_> {
             self.start = previous;
         }
         if !catchall {
-            let Type::Nominal(owner) = self.cx.resolve(&err) else {
-                return Err(self.err("nonexhaustive recovery; add a catchall"));
+            let owner = match self.cx.resolve(&err) {
+                Type::Nominal(owner) | Type::Applied(owner, _) => owner,
+                _ => return Err(self.err("nonexhaustive recovery; add a catchall")),
             };
             let variants = self
                 .sums
@@ -1162,6 +1271,7 @@ impl Engine<'_> {
                     ok
                 }
             }
+            Expr::Match(value, cases) => self.match_expr(env, value, cases, want, effects)?,
             Expr::Recover(value, cases) => {
                 self.saw_result = true;
                 self.recover(env, value, cases, want, effects)?
@@ -1552,7 +1662,11 @@ impl Engine<'_> {
     fn known_callee(&self, env: &Env, e: &Expr) -> bool {
         match e {
             Expr::Name(name) | Expr::Ref(name) => {
-                env.contains_key(name) || self.constructor_type(e).is_some()
+                env.contains_key(name)
+                    || self
+                        .resolver
+                        .reference(e)
+                        .is_some_and(|id| self.result.constructors.contains_key(&id))
             }
             _ => false,
         }
@@ -3199,6 +3313,12 @@ fn visit_inference_exprs(p: &Program, mut f: impl FnMut(&Expr) -> R<()>) -> R<()
                 visit(x, f)?;
             }
             Lambda(_, x) | TypedLambda(_, _, x) | Raise(x) | Propagate(x) => visit(x, f)?,
+            Match(x, cs) => {
+                visit(x, f)?;
+                for c in cs {
+                    visit(&c.body, f)?;
+                }
+            }
             Recover(x, cs) => {
                 visit(x, f)?;
                 for c in cs {
@@ -3307,6 +3427,7 @@ pub(crate) fn infer_live(p: &Program, resolver: &Resolution) -> R<InferResult> {
         schemas: HashMap::new(),
         schema_scopes: vec![HashMap::new()],
         sums: HashMap::new(),
+        sum_arities: HashMap::new(),
         boundaries: vec![],
         discarded_results: vec![],
         entry_natural_tail: find_entry_natural_tail(p, resolver),
