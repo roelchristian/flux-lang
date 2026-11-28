@@ -10,6 +10,11 @@ obsolete specifications are not kept as duplicate files.
 - Consolidate shared Rust internals and streamline the reference and example
   index without changing the language. Group integration tests by topic.
 
+## Draft 0.21 groundwork
+
+- Establish a checked Machina II benchmark baseline and numerical equivalence
+  gate. This preparation adds no Flux syntax or runtime behavior.
+
 ## Draft 0.20
 
 - Reorganize the single Rust crate by compiler, shared contracts, typed runtime,

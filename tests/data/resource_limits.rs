@@ -79,6 +79,47 @@ m := form [8n 8n] (.. 1z 64z);
 }
 
 #[test]
+fn tracked_memory_admission_depends_on_physical_layout() {
+    let fixture = Script::new(
+        "flux-machina-layout-budget",
+        "test.flx",
+        r#"
+!^{
+    ! print "entered";
+    a := form [2n] [4z 5z];
+    ! print (# a, ?! (.: [1n] a));
+};
+"#,
+    );
+    fixture.check_hir();
+    // Two compact i64s fit; two generic Values do not. Avoid flattening,
+    // which would itself materialize a generic output buffer in either mode.
+    let policy = [("FLUX_MAX_MEMORY", "24")];
+    for mode in [None, Some("run-hir")] {
+        let mut optimized = fixture.command(mode);
+        configuration(&mut optimized, false, &policy);
+        let optimized = optimized.output().expect("invoke optimized Flux");
+        assert!(
+            optimized.status.success() && optimized.stderr.is_empty(),
+            "{mode:?}: {}",
+            String::from_utf8_lossy(&optimized.stderr)
+        );
+        assert_eq!(optimized.stdout, b"entered\n(2, 4)\n");
+
+        let mut generic = fixture.command(mode);
+        configuration(&mut generic, true, &policy);
+        let generic = generic.output().expect("invoke generic Flux");
+        assert!(!generic.status.success(), "{mode:?}");
+        assert_eq!(generic.stdout, b"entered\n");
+        let error = String::from_utf8_lossy(&generic.stderr);
+        assert!(
+            error.contains("R0001") && error.contains("memory"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn exact_arithmetic_does_not_escape_the_host_bit_budget_on_a_packed_path() {
     equivalent(
         r#"

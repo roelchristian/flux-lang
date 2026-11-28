@@ -4,9 +4,15 @@
 Use locked release binaries. Example (small 0.17-only smoke run):
   python3 benchmarks/machina.py OLD OLD --groups shared dense matrix --runs 3
 
-Large vectors and 128–1024 square products are opt-in and require deliberate
-host budgets. See --help. Timing includes setup, checking and output; a
-setup-only workload is included as a separate measurement.
+Compare construction and in-process phases (Draft 0.20 and later):
+  python3 benchmarks/machina.py FLUX_020 FLUX_021 --generic --phases --groups construction dense edge --elements 10000 100000 --runs 5
+
+Wall time includes startup, checking, preparation and checked output.
+Phase eval time includes preparation and output; it is not kernel-only.
+Matched setup controls and trials at different --kernel-repeats help
+distinguish those costs. Large vectors and 128–1024 square products are
+opt-in. Use explicit per-arm FLUX_MAX_ELEMENTS, FLUX_MAX_WORK and
+FLUX_MAX_MEMORY overrides for 10M; inherited FLUX_* settings are removed.
 """
 import argparse
 import csv
@@ -26,7 +32,9 @@ from tempfile import TemporaryDirectory
 from time import perf_counter_ns
 
 
-GROUPS = ("shared", "dense", "mathesis", "matrix")
+DEFAULT_GROUPS = ("shared", "dense", "mathesis", "matrix")
+GROUPS = (*DEFAULT_GROUPS, "construction", "edge")
+PHASE_KEYS = ("parse_ns", "resolve_ns", "infer_ns", "elaborate_ns", "eval_ns")
 MATRIX_SIZES = (128, 256, 512, 1024)
 LARGE_SIZES = (100_000, 1_000_000, 10_000_000)
 INT_LIMIT = 10_000_000
@@ -36,6 +44,7 @@ WARMUPS = 1
 # crashes. In particular, a killed or panicking process is never a limit pass.
 LIMIT_DIAGNOSTIC = re.compile(
     r"resource limit|array dimension exceeds|array element count exceeds|"
+    r"runtime numeric iteration limit|prototype nesting or recursion limit|"
     r"collection limit|prototype range limit|(?:array |logical )?element (?:limit|budget)|"
     r"(?:tracked |working )?memory (?:limit|budget)|"
     r"(?:work|execution|runtime|evaluator|allocation|evaluation|fuel) "
@@ -235,8 +244,7 @@ def dense_workloads(args, n):
         [sequence([n]), *("1b" if 2 * i >= n else "0b" for i in expected)],
         repeat=args.kernel_repeats, **real_metadata,
     )
-    cols = next(c for c in range(min(n, args.width), 0, -1) if n % c == 0)
-    rows = n // cols
+    rows, cols = rectangular_shape(n, args.width)
     count = n
     definitions = f"a := form {dimensions(rows, cols)} (.. 1z {count}z);"
     points = list(zip(sampled(rows), sampled(cols)))
@@ -263,6 +271,112 @@ def dense_workloads(args, n):
          *((r + starts[1] - 2) * cols + c + starts[0] - 1 for c, r in points)],
         repeat=args.kernel_repeats, elements=count,
     )
+
+
+def rectangular_shape(n, width):
+    cols = next(c for c in range(min(n, width), 0, -1) if n % c == 0)
+    return n // cols, cols
+
+
+def construction_workloads(args, n):
+    """Control input paths without hiding escaping sequences or strided copies."""
+    points = sampled(n)
+    coords = [(i,) for i in points]
+    items = f".. 1z {n}z"
+    shape = dimensions(n)
+    yield emit(
+        f"construction-range-{n}", "construction", f"a := {items};", "",
+        ["# a", *(f"(?! (.: {i}n a))" for i in points)],
+        [n, *points], elements=n, path="ordinary range",
+    )
+    # The sequence remains independently observable after it is used by form.
+    yield emit(
+        f"construction-escaped-form-{n}", "construction",
+        f"items := {items};\na := form {shape} items;", "",
+        ["dim a", "# items", *numeric_sample("a", coords)],
+        [sequence([n]), n, *points], elements=n, path="escaped sequence",
+    )
+    for domain in ("z", "n", "r"):
+        init = (f":r (form {shape} ({items}))" if domain == "r"
+                else f"form {shape} (.. 1{domain} {n}{domain})")
+        yield emit(
+            f"construction-inline-{domain}-{n}", "construction", f"a := {init};", "",
+            ["dim a", *numeric_sample("a", coords)],
+            [sequence([n]), *points], elements=n, path=f"inline {domain}",
+        )
+    # This control matches the input preparation of the Mathesis workloads.
+    yield real_output(
+        f"construction-normalized-real-{n}", "construction",
+        '<< "math";\n' + real_vector(n), "value := a;",
+        coords, [i / n for i in points], n,
+    )
+
+    rows, cols = rectangular_shape(n, args.width)
+    base = f"a := :r (form {dimensions(rows, cols)} ({items}));"
+    for layout, source in (("contiguous", "a"), ("strided", "(|: a)")):
+        wanted = points if layout == "contiguous" else tuple(
+            ((i - 1) % rows) * cols + (i - 1) // rows + 1 for i in points
+        )
+        yield emit(
+            f"construction-reshape-{layout}-{n}", "construction", base,
+            f"value := form {shape} {source};",
+            ["dim value", *numeric_sample("value", coords)],
+            [sequence([n]), *wanted], repeat=args.kernel_repeats,
+            elements=n, path=f"{layout} reshape",
+        )
+
+    # Combine a strided input with a singleton-axis broadcast.
+    view_points = list(dict.fromkeys(((1, 1), (cols, rows), ((cols + 1) // 2, (rows + 1) // 2))))
+    values = [((j - 1) * cols + i) + j for i, j in view_points]
+    yield emit(
+        f"real-strided-broadcast-{n}", "construction",
+        base + f"\nb := |: a;\noffsets := :r (form {dimensions(rows)} (.. 1z {rows}z));",
+        "value := + b offsets;",
+        ["dim value", *numeric_sample("value", view_points)],
+        [sequence([cols, rows]), *values], repeat=args.kernel_repeats, elements=n,
+    )
+
+
+def edge_workloads(args, n):
+    # Every element grows past compact i64; never measure wrapping as success.
+    end = (1 << 63) - 1
+    points = sampled(n)
+    yield emit(
+        f"exact-widening-{n}", "edge",
+        f"a := form {dimensions(n)} (.. {end - n + 1}z {end}z);",
+        f"value := + a {n}z;",
+        ["dim value", *numeric_sample("value", [(i,) for i in points])],
+        [sequence([n]), *(end + i for i in points)], repeat=args.kernel_repeats,
+        elements=n,
+    )
+    # Keep arbitrary precision separate from large compact throughput.
+    count = min(n, 2048)
+    big = 1 << 128
+    points = sampled(count)
+    yield emit(
+        f"arbitrary-exact-{count}-at-{n}", "edge",
+        f"a := form {dimensions(count)} (.. {big + 1}z {big + count}z);",
+        "value := + a 3z;",
+        ["dim value", *numeric_sample("value", [(i,) for i in points])],
+        [sequence([count]), *(big + i + 3 for i in points)],
+        repeat=args.kernel_repeats, elements=count,
+    )
+    columns = max(n // 2, 1)
+    definitions = (
+        f"positive := :r (form {dimensions(columns)} (.. 1z {columns}z));\n"
+        "pattern := form [2n 1n] [-0.0r 0.0r];\na := * pattern positive;"
+    )
+    checks = [(1, 1), (2, columns)]
+    for parity, chain, values in (
+        ("even", "-: -: -: -: a", ("-0", "0")),
+        ("odd", "-: -: -: -: -: a", ("0", "-0")),
+    ):
+        yield emit(
+            f"signed-zero-{parity}-{n}", "edge", definitions, f"value := {chain};",
+            ["dim value", *numeric_sample("value", checks)],
+            [sequence([2, columns]), *values],
+            repeat=args.kernel_repeats, elements=2 * columns,
+        )
 
 
 def mathesis_workloads(args, n):
@@ -321,6 +435,10 @@ def workloads(args, directory):
             yield from dense_workloads(args, n)
         if "mathesis" in args.groups:
             yield from mathesis_workloads(args, n)
+        if "construction" in args.groups:
+            yield from construction_workloads(args, n)
+        if "edge" in args.groups:
+            yield from edge_workloads(args, n)
     if "matrix" in args.groups:
         sizes = list(MATRIX_SIZES) if args.standard_matrices else args.matrix_sizes
         for n in dict.fromkeys(sizes):
@@ -338,7 +456,39 @@ def env_pairs(items):
 
 
 def arm(name, path, flags, env):
-    return Arm(name, path.resolve(strict=True), tuple(flags), env_pairs(env))
+    overrides = env_pairs(env)
+    # Explicit options and legacy CLI prefixes may choose another policy.
+    if not flags:
+        overrides.setdefault("FLUX_OPTIMIZE", "1")
+    return Arm(name, path.resolve(strict=True), tuple(flags), overrides)
+
+
+def process_env(overrides):
+    return {
+        **{name: value for name, value in os.environ.items()
+           if not name.upper().startswith("FLUX_")},
+        **overrides,
+    }
+
+
+def phase_metrics(stderr):
+    """Accept only the timing protocol from a successful phase invocation."""
+    timings = {}
+    for line in stderr.splitlines():
+        key, sep, value = line.partition("\t")
+        if not sep or key not in PHASE_KEYS or key in timings or not value.isdecimal():
+            return None
+        timings[key] = int(value)
+    return timings if len(timings) == len(PHASE_KEYS) else None
+
+
+def resource_failure(stderr):
+    # Do not let code excerpts/comments relabel ordinary fatal errors.
+    lines = stderr.splitlines()
+    if not lines:
+        return False
+    primary = re.match(r"^(?:.*?: )?R0001: (.*)$", lines[0])
+    return bool(primary and LIMIT_DIAGNOSTIC.search(primary.group(1)))
 
 
 # Run one Flux child per wrapper, so Linux RUSAGE_CHILDREN is per run
@@ -372,8 +522,8 @@ def rss_tool(disabled):
     return "linux-rusage"
 
 
-def timed(arm, workload, directory, source, timer, args):
-    cmd = [str(arm.binary), *arm.flags, workload.mode, source.name]
+def timed(arm, workload, directory, source, timer, args, *, phase=False):
+    cmd = [str(arm.binary), *arm.flags, "phases" if phase else workload.mode, source.name]
     rss_path = directory / "peak-rss.txt"
     if timer:
         rss_path.unlink(missing_ok=True)
@@ -383,7 +533,7 @@ def timed(arm, workload, directory, source, timer, args):
         cmd = [timer, "-q", "-f", "%M", "-o", str(rss_path), "--", *cmd]
     begin = perf_counter_ns()
     with subprocess.Popen(
-        cmd, cwd=directory, env={**os.environ, **arm.env},
+        cmd, cwd=directory, env=process_env(arm.env),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", start_new_session=timer is not None,
     ) as process:
@@ -403,15 +553,16 @@ def timed(arm, workload, directory, source, timer, args):
                 return {"status": "timeout", "seconds": args.timeout}
             raise
     wall_ms = (perf_counter_ns() - begin) / 1e6
-    if process.returncode or stdout != workload.expected or stderr:
+    phases = phase_metrics(stderr) if phase else None
+    invalid_diagnostics = phases is None if phase else bool(stderr)
+    if process.returncode or stdout != workload.expected or invalid_diagnostics:
         if (
             args.allow_limits
             and process.returncode == 1
             and (not stdout or stdout.endswith("\n"))
             and workload.expected.startswith(stdout)
             and "panic" not in stderr.lower()
-            and LIMIT_DIAGNOSTIC.search(stderr)
-            and re.search(r"(?:error\[)?R\d{4}\b", stderr)
+            and resource_failure(stderr)
         ):
             return {"status": "limited", "stderr": stderr.strip(),
                     "verified_output_lines": len(stdout.splitlines())}
@@ -427,22 +578,30 @@ def timed(arm, workload, directory, source, timer, args):
             wall_ms = elapsed_ns / 1e6
         elif len(data) == 1 and data[0].isdigit():
             peak_rss = int(data[0])
-    return {"status": "ok", "wall_ms": wall_ms, "peak_rss_kib": peak_rss}
+    measured = {"status": "ok", "wall_ms": wall_ms, "peak_rss_kib": peak_rss}
+    if phases is not None:
+        measured["phase_ns"] = phases
+    return measured
 
 
 def summarize(samples):
     walls = [v["wall_ms"] for v in samples]
     rss = [v["peak_rss_kib"] for v in samples if v["peak_rss_kib"] is not None]
-    return {
+    result = {
         "status": "ok",
         "wall_median_ms": round(median(walls), 3),
         "wall_samples_ms": [round(x, 3) for x in walls],
         "rss_median_kib": median(rss) if rss else None,
         "rss_samples_kib": [v["peak_rss_kib"] for v in samples],
     }
+    if "phase_ns" in samples[0]:
+        phases = {key: [v["phase_ns"][key] for v in samples] for key in PHASE_KEYS}
+        result["phase_samples_ns"] = phases
+        result["phase_medians_ns"] = {key: round(median(values)) for key, values in phases.items()}
+    return result
 
 
-def run_workload(workload, arms, directory, source, timer, args):
+def run_workload(workload, arms, directory, source, timer, args, *, phase=False):
     source.write_text(workload.source, encoding="ascii")
     samples = {item.name: [] for item in arms}
     results = {}
@@ -451,7 +610,7 @@ def run_workload(workload, arms, directory, source, timer, args):
         if item.name == "reference-0.17" and workload.group == "mathesis":
             results[item.name] = {"status": "skipped", "reason": "not supported in Draft 0.17"}
             continue
-        check = timed(item, workload, directory, source, timer, args)
+        check = timed(item, workload, directory, source, timer, args, phase=phase)
         if check["status"] == "ok":
             active.append(item)
         else:
@@ -465,7 +624,7 @@ def run_workload(workload, arms, directory, source, timer, args):
         for item in order:
             if item.name in results:
                 continue
-            data = timed(item, workload, directory, source, timer, args)
+            data = timed(item, workload, directory, source, timer, args, phase=phase)
             if data["status"] != "ok":
                 results[item.name] = {**data, "successful_samples": len(samples[item.name])}
             else:
@@ -473,7 +632,20 @@ def run_workload(workload, arms, directory, source, timer, args):
     for name, observations in samples.items():
         if name not in results:
             results[name] = summarize(observations)
-    return {"group": workload.group, **workload.metadata, "arms": results}
+    result = {
+        "group": workload.group,
+        "source_sha256": hashlib.sha256(workload.source.encode("ascii")).hexdigest(),
+        **workload.metadata,
+        "arms": results,
+    }
+    if getattr(args, "phases", False) and not phase:
+        # The phases CLI does not propagate a natural script exit status.
+        # Verify ordinary execution before running it for timing.
+        checked = [item for item in arms if results[item.name]["status"] == "ok"]
+        if checked:
+            phase_arms = run_workload(workload, checked, directory, source, None, args, phase=True)
+            result["phase_arms"] = phase_arms["arms"]
+    return result
 
 
 def sha256(path):
@@ -492,17 +664,17 @@ def bound(value, lo, hi, label):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("before", type=Path, help="baseline release binary, normally Draft 0.18")
-    parser.add_argument("after", type=Path, help="Machina release binary")
+    parser.add_argument("before", type=Path, help="baseline release binary (e.g. locked Draft 0.20 build)")
+    parser.add_argument("after", type=Path, help="candidate release binary")
     parser.add_argument("--reference", type=Path, help="optional Draft 0.17 binary, shared subset")
     parser.add_argument("--generic", action="store_true",
-                        help="also test the candidate with explicitly disabled optimizations")
+                        help="also test the candidate with FLUX_OPTIMIZE=0 (or an explicit legacy flag)")
     for prefix in ("before", "after", "reference", "generic"):
         parser.add_argument(f"--{prefix}-arg", action="append", default=[],
                             help="repeatable CLI prefix argument; use = for flags")
         parser.add_argument(f"--{prefix}-env", action="append", default=[], metavar="KEY=VALUE",
                             help="repeatable subprocess environment override")
-    parser.add_argument("--groups", nargs="+", choices=GROUPS, default=list(GROUPS))
+    parser.add_argument("--groups", nargs="+", choices=GROUPS, default=list(DEFAULT_GROUPS))
     parser.add_argument("--match", action="append", default=[], metavar="REGEX",
                         help="only workload names matching at least one pattern")
     parser.add_argument("--elements", nargs="+", type=int, default=[10_000],
@@ -520,6 +692,8 @@ def main():
                         help="repeat each kernel on shared inputs within each timed script")
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--timeout", type=float, default=120.0, help="seconds per subprocess")
+    parser.add_argument("--phases", action="store_true",
+                        help="also collect paired CLI phase timings on verified arms")
     parser.add_argument("--no-rss", action="store_true", help="disable peak RSS sampling")
     parser.add_argument("--allow-limits", action="store_true",
                         help="report checked budget diagnostics as unmeasured limits, not successes")
@@ -541,11 +715,15 @@ def main():
         if args.reference:
             arms.insert(0, arm("reference-0.17", args.reference, args.reference_arg, args.reference_env))
         if args.generic:
-            if not args.generic_arg and not args.generic_env:
-                raise ValueError("--generic needs a disabling --generic-arg or --generic-env")
-            generic = arm("after-generic", args.after, args.after_arg + args.generic_arg, [])
-            arms.append(Arm(generic.name, generic.binary, generic.flags,
-                            {**arms[-1].env, **env_pairs(args.generic_env)}))
+            after = arms[-1]
+            overrides = {k: v for k, v in after.env.items() if k != "FLUX_OPTIMIZE"}
+            generic = env_pairs(args.generic_env)
+            if generic.get("FLUX_OPTIMIZE", "0") != "0":
+                raise ValueError("--generic requires FLUX_OPTIMIZE=0")
+            if not args.generic_arg:
+                generic.setdefault("FLUX_OPTIMIZE", "0")
+            arms.append(Arm("after-generic", after.binary, after.flags + tuple(args.generic_arg),
+                            {**overrides, **generic}))
         matches = tuple(map(re.compile, args.match))
     except (OSError, ValueError, re.error) as exc:
         parser.error(str(exc))
@@ -569,6 +747,9 @@ def main():
         "python": platform.python_version(),
         "rss": rss_label,
         "wall": "process startup, checking, setup, kernels and small checked output",
+        "phase_scope": ("separate CLI samples; eval includes setup and output"
+                        if args.phases else None),
+        "policy": "inherited FLUX_* removed; arm env lists overrides; otherwise binary defaults",
         "runs": args.runs,
         "warmups": WARMUPS,
         "argv": sys.argv[1:],

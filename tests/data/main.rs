@@ -8,6 +8,7 @@ mod mathematical_library;
 mod numerical_fusion;
 mod numerical_methods;
 mod numerics;
+mod optimization_baseline;
 mod relations;
 mod resource_limits;
 mod row_runtime;
