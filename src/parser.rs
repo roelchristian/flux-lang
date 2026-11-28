@@ -1,4 +1,4 @@
-use crate::lexer::{lex, Token};
+use crate::lexer::{decode_literal, is_ident, lex, Delimiter, Token};
 pub use crate::Error;
 use crate::{builtins, errors041};
 use std::{
@@ -6,6 +6,10 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
 };
+
+mod annotation;
+use annotation::{adjacent_type_variable, annotation_tokens, split_callable_annotation};
+pub use annotation::{parse_type_annotation, TypeAnnotation, TypeAnnotationKind, TypePrimitive};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -134,358 +138,6 @@ pub enum Expr {
     NamedRecord(String, Vec<(String, Expr)>),
 }
 
-/// Canonical, syntax-only annotation with a half-open source byte range.
-#[derive(Debug, Clone, PartialEq, Hash)]
-pub struct TypeAnnotation {
-    pub kind: TypeAnnotationKind,
-    pub span: Range<usize>,
-    source: String,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TypePrimitive {
-    N,
-    Z,
-    Q,
-    D,
-    R,
-    S,
-    B,
-    C,
-    Unit,
-}
-#[derive(Debug, Clone, PartialEq, Hash)]
-pub enum TypeAnnotationKind {
-    Primitive(TypePrimitive),
-    Named(String),
-    NamedApply(String, Vec<TypeAnnotation>),
-    Variable(String),
-    Hole,
-    Optional(Box<TypeAnnotation>),
-    Action(Box<TypeAnnotation>),
-    Table(Box<TypeAnnotation>),
-    PositionalTable(Vec<TypeAnnotation>),
-    Sequence(Box<TypeAnnotation>),
-    Tuple(Vec<TypeAnnotation>),
-    Dictionary(Box<TypeAnnotation>, Box<TypeAnnotation>),
-    Record(Vec<(String, TypeAnnotation)>),
-    OpenRecord(Vec<(String, TypeAnnotation)>, String),
-    Result(Box<TypeAnnotation>, Box<TypeAnnotation>),
-    Function(Vec<TypeAnnotation>, Box<TypeAnnotation>),
-}
-impl TypeAnnotation {
-    /// Normalized token spelling for the legacy oracle only.
-    pub fn source(&self) -> &str {
-        &self.source
-    }
-}
-impl std::ops::Deref for TypeAnnotation {
-    type Target = str;
-    fn deref(&self) -> &Self::Target {
-        self.source()
-    }
-}
-impl std::fmt::Display for TypeAnnotation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.source())
-    }
-}
-
-/// Standalone type syntax for static library metadata. Program annotations
-/// consume their original tokens directly and retain program-relative spans.
-pub fn parse_type_annotation(source: &str) -> PResult<TypeAnnotation> {
-    let tokens = lex(source)?;
-    annotation_tokens(&tokens, source.len())
-}
-
-/// Shared recognition for annotations, row tails, sum headers and
-/// qualifiers. The general lexer still emits the Boolean operator `~` as a
-/// separate token and does not invent a notation in value expressions.
-fn adjacent_type_variable(tokens: &[Token], i: usize, eof: usize) -> PResult<Token> {
-    let Some(sign) = tokens.get(i).filter(|t| t.text == "~") else {
-        return Err(Error::new(
-            tokens.get(i).map_or(eof, |t| t.start),
-            "expected a type variable such as `~a`",
-        ));
-    };
-    let Some(name) = tokens
-        .get(i + 1)
-        .filter(|t| sign.end == t.start && is_ident(&t.text))
-    else {
-        return Err(Error::new(
-            sign.start,
-            "write the type variable with adjacent tilde and name, such as `~a`",
-        ));
-    };
-    Ok(Token {
-        text: format!("~{}", name.text),
-        start: sign.start,
-        end: name.end,
-    })
-}
-
-fn annotation_tokens(input: &[Token], end: usize) -> PResult<TypeAnnotation> {
-    let mut ts: Vec<Token> = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while let Some(token) = input.get(i) {
-        if token.text == "~" {
-            ts.push(adjacent_type_variable(input, i, end)?);
-            i += 2;
-            continue;
-        }
-        i += 1;
-        // Punctuation which is compound in expressions is separate in types.
-        let words: &[&str] = match token.text.as_str() {
-            "^?" => &["^", "?"],
-            "^{" => &["^", "{"],
-            "!{" => &["!", "{"],
-            "?{" => &["?", "{"],
-            ":#" => &[":", "#"],
-            _ => &[],
-        };
-        if words.is_empty() {
-            if token.text == "["
-                && ts
-                    .last()
-                    .is_some_and(|t| t.text == "#" && t.end == token.start)
-            {
-                let t = ts.last_mut().unwrap();
-                t.text.push('[');
-                t.end = token.end;
-            } else {
-                ts.push(token.clone());
-            }
-        } else {
-            let mut start = token.start;
-            for &word in words {
-                ts.push(Token {
-                    text: word.to_owned(),
-                    start,
-                    end: start + word.len(),
-                });
-                start += word.len();
-            }
-        }
-    }
-    let mut p = AnnotationParser {
-        t: &ts,
-        i: 0,
-        eof: end,
-        depth: 0,
-    };
-    let ty = p.arrow(&[])?;
-    if p.i != ts.len() {
-        return p.err("trailing type annotation tokens");
-    }
-    Ok(ty)
-}
-
-struct AnnotationParser<'a> {
-    t: &'a [Token],
-    i: usize,
-    eof: usize,
-    depth: usize,
-}
-impl AnnotationParser<'_> {
-    fn peek(&self) -> &str {
-        self.t.get(self.i).map_or("", |t| t.text.as_str())
-    }
-    fn err<T>(&self, m: impl Into<String>) -> PResult<T> {
-        Err(Error::new(
-            self.t.get(self.i).map_or(self.eof, |t| t.start),
-            m,
-        ))
-    }
-    fn eat(&mut self, s: &str) -> bool {
-        if self.peek() == s {
-            self.i += 1;
-            true
-        } else {
-            false
-        }
-    }
-    fn expect(&mut self, s: &str) -> PResult<()> {
-        if self.eat(s) {
-            Ok(())
-        } else {
-            self.err(format!("expected `{s}` in type annotation"))
-        }
-    }
-    fn node(&self, start: usize, kind: TypeAnnotationKind) -> TypeAnnotation {
-        let ts = &self.t[start..self.i];
-        TypeAnnotation {
-            kind,
-            span: ts[0].start..ts[ts.len() - 1].end,
-            source: ts
-                .iter()
-                .map(|t| t.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" "),
-        }
-    }
-    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
-        if self.depth >= 128 {
-            return self.err("type annotation depth limit exceeded");
-        }
-        self.depth += 1;
-        let r = f(self);
-        self.depth -= 1;
-        r
-    }
-    fn arrow(&mut self, ends: &[&str]) -> PResult<TypeAnnotation> {
-        self.nested(|p| {
-            let start = p.i;
-            let mut args = vec![p.result()?];
-            while !p.peek().is_empty() && !ends.contains(&p.peek()) {
-                if p.eat("->") {
-                    let rhs = p.arrow(ends)?;
-                    return Ok(p.node(start, TypeAnnotationKind::Function(args, Box::new(rhs))));
-                }
-                args.push(p.result()?);
-            }
-            if args.len() == 1 {
-                Ok(args.remove(0))
-            } else {
-                p.err("multiple type components need an arrow")
-            }
-        })
-    }
-    fn result(&mut self) -> PResult<TypeAnnotation> {
-        let start = self.i;
-        let lhs = self.atom()?;
-        if !self.eat("^") {
-            return Ok(lhs);
-        }
-        let rhs = self.atom()?;
-        if self.peek() == "^" {
-            return self.err("result caret chains need explicit parentheses");
-        }
-        Ok(self.node(
-            start,
-            TypeAnnotationKind::Result(Box::new(lhs), Box::new(rhs)),
-        ))
-    }
-    fn atom(&mut self) -> PResult<TypeAnnotation> {
-        self.nested(Self::atom_impl)
-    }
-    fn atom_impl(&mut self) -> PResult<TypeAnnotation> {
-        use TypeAnnotationKind::*;
-        let start = self.i;
-        let token = self.peek().to_owned();
-        if token.is_empty() {
-            return self.err("expected a type");
-        }
-        self.i += 1;
-        let kind = match token.as_str() {
-            "n" => Primitive(TypePrimitive::N),
-            "z" => Primitive(TypePrimitive::Z),
-            "q" => Primitive(TypePrimitive::Q),
-            "d" => Primitive(TypePrimitive::D),
-            "r" => Primitive(TypePrimitive::R),
-            "s" => Primitive(TypePrimitive::S),
-            "b" => Primitive(TypePrimitive::B),
-            "c" => Primitive(TypePrimitive::C),
-            "_" => Hole,
-            "?" => Optional(Box::new(self.atom()?)),
-            "!" => Action(Box::new(self.atom()?)),
-            "#" => Table(Box::new(self.atom()?)),
-            "[" => {
-                let v = self.arrow(&["]"])?;
-                self.expect("]")?;
-                Sequence(Box::new(v))
-            }
-            "#[" => {
-                let mut fields = Vec::new();
-                while !self.eat("]") {
-                    fields.push(self.result()?);
-                    self.eat(",");
-                }
-                PositionalTable(fields)
-            }
-            "(" => {
-                if self.eat(")") {
-                    Primitive(TypePrimitive::Unit)
-                } else {
-                    let first = self.arrow(&[",", ")"])?;
-                    if self.eat(")") {
-                        return Ok(self.node(start, first.kind));
-                    }
-                    self.expect(",")?;
-                    let mut fields = vec![first];
-                    loop {
-                        fields.push(self.arrow(&[",", ")"])?);
-                        if !self.eat(",") {
-                            break;
-                        }
-                    }
-                    self.expect(")")?;
-                    Tuple(fields)
-                }
-            }
-            "{" => {
-                let k = self.arrow(&[":"])?;
-                self.expect(":")?;
-                let v = self.arrow(&["}"])?;
-                self.expect("}")?;
-                Dictionary(Box::new(k), Box::new(v))
-            }
-            ".{" => {
-                let mut fields = Vec::new();
-                let mut seen = HashSet::new();
-                loop {
-                    if self.eat("}") {
-                        break Record(fields);
-                    }
-                    if self.eat("|") {
-                        let row = self.peek().to_owned();
-                        if !row.strip_prefix('~').is_some_and(is_ident) {
-                            return self.err("expected a row type variable such as `~r` after `|`");
-                        }
-                        self.i += 1;
-                        self.expect("}")?;
-                        break OpenRecord(fields, row);
-                    }
-                    let name = self.peek().to_owned();
-                    if !is_ident(&name) {
-                        return self.err("expected field name in structural record type");
-                    }
-                    if !seen.insert(name.clone()) {
-                        return self.err(format!("duplicate field {name}"));
-                    }
-                    self.i += 1;
-                    self.expect(":")?;
-                    let value = self.arrow(&[";", "}", "|"])?;
-                    fields.push((name, value));
-                    if !self.eat(";") && self.peek() != "}" {
-                        return self.err("expected `;` or `}` after a structural record field");
-                    }
-                }
-            }
-            name if name.strip_prefix('~').is_some_and(is_ident) => Variable(name.to_owned()),
-            name if is_ident(name) || is_qualified_ident(name) => {
-                if self.peek() == "[" && self.t[start].end == self.t[self.i].start {
-                    self.i += 1;
-                    let mut args = vec![self.arrow(&[",", "]"])?];
-                    while self.eat(",") {
-                        args.push(self.arrow(&[",", "]"])?);
-                    }
-                    self.expect("]")?;
-                    NamedApply(name.to_owned(), args)
-                } else {
-                    Named(name.to_owned())
-                }
-            }
-            _ => {
-                self.i = start;
-                return self.err(format!("unexpected token `{token}` in type annotation"));
-            }
-        };
-        Ok(self.node(start, kind))
-    }
-}
-
-// Post-order traversal mirrors the parser's expression completion order.
-// These entries are owned by Program, so cloning/moving it does not move or
-// invalidate any pointer keys. A later resolver associates current AST nodes.
 #[derive(Debug, Clone, PartialEq)]
 struct Origin {
     signature: u64,
@@ -567,72 +219,99 @@ fn expression_signature(expr: &Expr) -> u64 {
     }
     hash.finish()
 }
+impl Stmt {
+    pub(crate) fn start(&self) -> usize {
+        match self {
+            Self::Def { start, .. }
+            | Self::Effect { start, .. }
+            | Self::Schema { start, .. }
+            | Self::Sum { start, .. } => *start,
+        }
+    }
+
+    pub(crate) fn body_and_arity(&self) -> Option<(&Expr, usize)> {
+        match self {
+            Self::Def { params, body, .. } => Some((body, params.len())),
+            Self::Effect { body, .. } => Some((body, 0)),
+            Self::Schema { .. } | Self::Sum { .. } => None,
+        }
+    }
+}
+
+impl Expr {
+    // Structural children in parser origin order. Not an evaluation walk:
+    // all branches and latent bodies are included, even when never executed.
+    pub(crate) fn try_for_each_child<'a, E>(
+        &'a self,
+        mut visit: impl FnMut(&'a Expr) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match self {
+            Self::Call(_, es) | Self::Tuple(es) | Self::Array(es) | Self::Pipeline(es) => {
+                es.iter().try_for_each(visit)
+            }
+            Self::Cases(pairs, fallback) => {
+                for (cond, branch) in pairs {
+                    visit(cond)?;
+                    visit(branch)?;
+                }
+                visit(fallback)
+            }
+            Self::Lambda(_, body)
+            | Self::TypedLambda(_, _, body)
+            | Self::Raise(body)
+            | Self::Propagate(body) => visit(body),
+            Self::Record(fields) | Self::NamedRecord(_, fields) => {
+                fields.iter().try_for_each(|(_, e)| visit(e))
+            }
+            Self::Recover(body, arms) => {
+                visit(body)?;
+                arms.iter().try_for_each(|a| visit(&a.body))
+            }
+            Self::Match(body, arms) => {
+                visit(body)?;
+                arms.iter().try_for_each(|a| visit(&a.body))
+            }
+            Self::Block(stmts, tail) | Self::Action(stmts, tail) | Self::Fallible(stmts, tail) => {
+                for (body, _) in stmts.iter().filter_map(Stmt::body_and_arity) {
+                    visit(body)?;
+                }
+                tail.iter().try_for_each(|e| visit(e))
+            }
+            Self::Int(_)
+            | Self::Str(_)
+            | Self::Bool(_)
+            | Self::Char(_)
+            | Self::Unit
+            | Self::Num(_)
+            | Self::Name(_)
+            | Self::Ref(_) => Ok(()),
+        }
+    }
+
+    pub(crate) fn for_each_child<'a>(&'a self, mut visit: impl FnMut(&'a Expr)) {
+        self.try_for_each_child(|e| {
+            visit(e);
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .unwrap();
+    }
+}
+
 impl Program {
     fn expressions_postorder(&self) -> Vec<&Expr> {
-        fn stmt<'p>(s: &'p Stmt, nodes: &mut Vec<&'p Expr>) {
-            match s {
-                Stmt::Def { body, .. } | Stmt::Effect { body, .. } => expr(body, nodes),
-                Stmt::Schema { .. } | Stmt::Sum { .. } => {}
-            }
-        }
-        fn expr<'p>(e: &'p Expr, nodes: &mut Vec<&'p Expr>) {
-            match e {
-                Expr::Call(_, es) | Expr::Tuple(es) | Expr::Array(es) | Expr::Pipeline(es) => {
-                    for x in es {
-                        expr(x, nodes);
-                    }
-                }
-                Expr::Cases(pairs, otherwise) => {
-                    for (a, b) in pairs {
-                        expr(a, nodes);
-                        expr(b, nodes);
-                    }
-                    expr(otherwise, nodes);
-                }
-                Expr::Lambda(_, body) | Expr::TypedLambda(_, _, body) => expr(body, nodes),
-                Expr::Record(fs) | Expr::NamedRecord(_, fs) => {
-                    for (_, x) in fs {
-                        expr(x, nodes);
-                    }
-                }
-                Expr::Raise(body) | Expr::Propagate(body) => expr(body, nodes),
-                Expr::Recover(body, arms) => {
-                    expr(body, nodes);
-                    for a in arms {
-                        expr(&a.body, nodes);
-                    }
-                }
-                Expr::Match(body, arms) => {
-                    expr(body, nodes);
-                    for a in arms {
-                        expr(&a.body, nodes);
-                    }
-                }
-                Expr::Action(ss, last) | Expr::Block(ss, last) | Expr::Fallible(ss, last) => {
-                    for s in ss {
-                        stmt(s, nodes);
-                    }
-                    if let Some(x) = last {
-                        expr(x, nodes);
-                    }
-                }
-                Expr::Int(_)
-                | Expr::Str(_)
-                | Expr::Bool(_)
-                | Expr::Char(_)
-                | Expr::Unit
-                | Expr::Num(_)
-                | Expr::Name(_)
-                | Expr::Ref(_) => {}
-            }
+        fn collect<'p>(e: &'p Expr, nodes: &mut Vec<&'p Expr>) {
+            e.for_each_child(|child| collect(child, nodes));
             nodes.push(e);
         }
+
+        let roots = self
+            .defs
+            .iter()
+            .filter_map(|stmt| stmt.body_and_arity().map(|(body, _)| body))
+            .chain(self.entry.iter());
         let mut nodes = Vec::with_capacity(self.origins.len());
-        for s in &self.defs {
-            stmt(s, &mut nodes);
-        }
-        if let Some(e) = &self.entry {
-            expr(e, &mut nodes);
+        for e in roots {
+            collect(e, &mut nodes);
         }
         nodes
     }
@@ -860,22 +539,9 @@ struct Parser {
     origins: Vec<Origin>,
     formatting_applications: Option<Vec<FormattingApplication>>,
 }
-fn is_ident(s: &str) -> bool {
-    let mut bytes = s.bytes();
-    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
-        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-}
 fn is_qualified_ident(s: &str) -> bool {
     s.split_once('.')
         .is_some_and(|(a, b)| is_ident(a) && is_ident(b))
-}
-fn close(s: &str) -> Option<&'static str> {
-    match s {
-        "(" => Some(")"),
-        "[" | "#[" => Some("]"),
-        "{" | "!{" | "#{" | "{." | "?{" | ".{" | "|{" | "^{" | "&{" => Some("}"),
-        _ => None,
-    }
 }
 /// A REPL submission needs more input if it ends inside matched delimiter
 /// prefixes. Bad tokens and mismatched closing signs go to normal diagnostics.
@@ -885,12 +551,12 @@ pub fn needs_continuation(source: &str) -> bool {
     };
     let mut stack = Vec::new();
     for token in tokens {
-        if let Some(expected) = close(&token.text) {
+        if let Some(expected) = Delimiter::opening(&token.text) {
             stack.push(expected);
-        } else if matches!(token.text.as_str(), ")" | "]" | "}")
-            && stack.pop() != Some(token.text.as_str())
-        {
-            return false;
+        } else if let Some(end) = Delimiter::closing(&token.text) {
+            if stack.pop() != Some(end) {
+                return false;
+            }
         }
     }
     !stack.is_empty()
@@ -899,57 +565,6 @@ pub fn needs_continuation(source: &str) -> bool {
 // Lowered binders cannot collide with a bare identifier, module link or
 // pipeline binding. Every synthetic lambda owns its own resolver scope.
 const DIRECT_ARITY_LIMIT: usize = 64;
-
-fn split_callable_annotation(
-    signature: TypeAnnotation,
-    arity: usize,
-) -> PResult<(Vec<Option<TypeAnnotation>>, TypeAnnotation)> {
-    fn complete(ty: &TypeAnnotation) -> bool {
-        use TypeAnnotationKind::*;
-        match &ty.kind {
-            Hole => false,
-            Optional(t) | Action(t) | Table(t) | Sequence(t) => complete(t),
-            NamedApply(_, ts) | Tuple(ts) | PositionalTable(ts) => ts.iter().all(complete),
-            Dictionary(a, b) | Result(a, b) => complete(a) && complete(b),
-            Record(fields) | OpenRecord(fields, _) => fields.iter().all(|(_, t)| complete(t)),
-            Function(args, ret) => args.iter().all(complete) && complete(ret),
-            Named(_) | Variable(_) | Primitive(_) => true,
-        }
-    }
-    if !complete(&signature) {
-        return Err(Error::new(
-            signature.span.start,
-            "callable arity declaration requires a complete type; `_` is not allowed",
-        ));
-    }
-    let start = signature.span.start;
-    let mut params = Vec::with_capacity(arity);
-    let mut tail = signature;
-    while params.len() < arity {
-        let TypeAnnotationKind::Function(mut args, out) = tail.kind else {
-            return Err(Error::new(start, format!("callable arity /{arity} requires a type with at least {arity} argument domains")));
-        };
-        let take = (arity - params.len()).min(args.len());
-        params.extend(args.drain(..take).map(Some));
-        tail = if args.is_empty() {
-            *out
-        } else {
-            let mut source = args
-                .iter()
-                .map(TypeAnnotation::source)
-                .collect::<Vec<_>>()
-                .join(" ");
-            source.push_str(" -> ");
-            source.push_str(out.source());
-            TypeAnnotation {
-                span: args[0].span.start..tail.span.end,
-                kind: TypeAnnotationKind::Function(args, out),
-                source,
-            }
-        };
-    }
-    Ok((params, tail))
-}
 
 const TACIT_INPUT: &str = "\0tacit-input";
 const TACIT_DEPTH_LIMIT: usize = 64;
@@ -1179,17 +794,44 @@ impl Parser {
         rewrite(self, &mut node)?;
         Ok(node)
     }
+    fn scoped_expression(
+        &mut self,
+        names: impl IntoIterator<Item = String>,
+        effect: bool,
+    ) -> PResult<Expr> {
+        self.scopes.push(
+            names
+                .into_iter()
+                .map(|name| (name, Binding::Value))
+                .collect(),
+        );
+        let result = self.expr(effect);
+        self.scopes.pop();
+        result
+    }
+
+    fn case_body(
+        &mut self,
+        names: impl IntoIterator<Item = String>,
+        effect: bool,
+    ) -> PResult<Expr> {
+        self.expect(":")?;
+        let body = self.scoped_expression(names, effect)?;
+        self.expect(";")?;
+        Ok(body)
+    }
+
     fn scope(&mut self) -> &mut HashMap<String, Binding> {
         self.scopes.last_mut().expect("parser scope")
     }
     fn end_of_group(&self, from: usize) -> Option<usize> {
-        let mut ends = vec![close(self.at(from))?];
+        let mut ends = vec![Delimiter::opening(self.at(from))?];
         for i in from + 1..self.toks.len() {
             let s = self.at(i);
-            if let Some(c) = close(s) {
+            if let Some(c) = Delimiter::opening(s) {
                 ends.push(c);
-            } else if matches!(s, ")" | "]" | "}") {
-                if ends.pop() != Some(s) {
+            } else if let Some(end) = Delimiter::closing(s) {
+                if ends.pop() != Some(end) {
                     return None;
                 }
                 if ends.is_empty() {
@@ -1206,10 +848,10 @@ impl Parser {
             if wanted.contains(&s) {
                 return Some(i);
             }
-            if stops.contains(&s) || matches!(s, ")" | "]" | "}") {
+            if stops.contains(&s) || Delimiter::closing(s).is_some() {
                 return None;
             }
-            if close(s).is_some() {
+            if Delimiter::opening(s).is_some() {
                 i = self.end_of_group(i)? + 1;
             } else {
                 i += 1;
@@ -1321,7 +963,7 @@ impl Parser {
                             if self.at(j) == "," {
                                 count += 1;
                             }
-                            if close(self.at(j)).is_some() {
+                            if Delimiter::opening(self.at(j)).is_some() {
                                 j = self.end_of_group(j).unwrap_or(j);
                             }
                             j += 1;
@@ -1545,7 +1187,7 @@ impl Parser {
     fn import_decl(&mut self) -> PResult<(String, String, usize)> {
         let t = self.next()?;
         let raw = if t.text.starts_with('"') {
-            decode(&t)?
+            decode_literal(&t)?
         } else if is_ident(&t.text) {
             t.text
         } else {
@@ -1585,25 +1227,21 @@ impl Parser {
         Ok(self.toks[start..self.pos].to_vec())
     }
     fn annotation(&mut self, ends: &[&str]) -> PResult<Option<TypeAnnotation>> {
-        if self.eat(":") {
-            let tokens = self.type_tokens_until(ends)?;
-            return self
-                .annotation_links(annotation_tokens(&tokens, self.offset())?)
-                .map(Some);
-        }
-        if self.eat(":#") {
+        let mut tokens = if self.eat(":") {
+            Vec::new()
+        } else if self.eat(":#") {
             let end = self.toks[self.pos - 1].end;
-            let mut tokens = vec![Token {
+            vec![Token {
                 text: "#".into(),
                 start: end - 1,
                 end,
-            }];
-            tokens.extend(self.type_tokens_until(ends)?);
-            return self
-                .annotation_links(annotation_tokens(&tokens, self.offset())?)
-                .map(Some);
-        }
-        Ok(None)
+            }]
+        } else {
+            return Ok(None);
+        };
+        tokens.extend(self.type_tokens_until(ends)?);
+        self.annotation_links(annotation_tokens(&tokens, self.offset())?)
+            .map(Some)
     }
     fn parameters(&mut self) -> PResult<(Vec<String>, Vec<Option<TypeAnnotation>>)> {
         self.expect("(")?;
@@ -1645,7 +1283,7 @@ impl Parser {
             while matches!(self.at(j), "?" | "!" | "#") {
                 j += 1;
             }
-            if close(self.at(j)).is_some() {
+            if Delimiter::opening(self.at(j)).is_some() {
                 j = self
                     .end_of_group(j)
                     .map(|k| k + 1)
@@ -1840,11 +1478,7 @@ impl Parser {
         } else if params.is_empty() {
             self.expr(effect)?
         } else {
-            self.scopes
-                .push(params.iter().map(|p| (p.clone(), Binding::Value)).collect());
-            let r = self.expr(false);
-            self.scopes.pop();
-            r?
+            self.scoped_expression(params.iter().cloned(), false)?
         };
         self.expect(";")?;
         if params.is_empty() {
@@ -2033,11 +1667,7 @@ impl Parser {
                     (vec![self.ident()?], vec![None])
                 };
                 self.expect("->")?;
-                self.scopes
-                    .push(params.iter().map(|p| (p.clone(), Binding::Value)).collect());
-                let out = self.expr(false);
-                self.scopes.pop();
-                let body = Box::new(out?);
+                let body = Box::new(self.scoped_expression(params.iter().cloned(), false)?);
                 if types.iter().any(Option::is_some) {
                     Ok(Expr::TypedLambda(params, types, body))
                 } else {
@@ -2125,9 +1755,9 @@ impl Parser {
             }
             "0b" => Ok(Expr::Bool(false)),
             "1b" => Ok(Expr::Bool(true)),
-            s if s.starts_with('"') => Ok(Expr::Str(decode(&t)?)),
+            s if s.starts_with('"') => Ok(Expr::Str(decode_literal(&t)?)),
             s if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 3 => {
-                let d = decode(&t)?;
+                let d = decode_literal(&t)?;
                 let mut c = d.chars();
                 let ch = c
                     .next()
@@ -2159,10 +1789,7 @@ impl Parser {
                 Some(Binding::Value | Binding::Constructor(0)) => {
                     Ok(Expr::Name(self.canonical(&t.text)))
                 }
-                Some(Binding::Constructor(n)) => {
-                    self.call(self.canonical(&t.text), n, effect, t.start..t.end)
-                }
-                Some(Binding::Callable(n)) => {
+                Some(Binding::Constructor(n) | Binding::Callable(n)) => {
                     self.call(self.canonical(&t.text), n, effect, t.start..t.end)
                 }
                 Some(Binding::Record) => self.record(self.canonical(&t.text), effect),
@@ -2244,32 +1871,36 @@ impl Parser {
         }
         Ok(Expr::Call(n, args))
     }
-    fn block(&mut self, effect: bool) -> PResult<Expr> {
-        let (h, types) = self.prepass(self.pos, false)?;
-        self.scopes.push(h);
+    fn scoped_block(
+        &mut self,
+        effect: bool,
+        sequence: bool,
+        implicit_unit: bool,
+    ) -> PResult<(Vec<Stmt>, Option<Box<Expr>>)> {
+        let (bindings, types) = self.prepass(self.pos, false)?;
+        self.scopes.push(bindings);
         self.type_scopes
             .push(types.into_iter().map(|n| (n.clone(), n)).collect());
-        let r = self.block_contents(effect);
+        let result = self.block_sequence(effect, sequence, implicit_unit);
         self.scopes.pop();
         self.type_scopes.pop();
-        let (stmts, last) = r?;
+        result
+    }
+
+    fn block(&mut self, effect: bool) -> PResult<Expr> {
+        let (stmts, last) = self.scoped_block(effect, effect, effect)?;
         Ok(if effect {
             Expr::Action(stmts, last)
         } else {
             Expr::Block(stmts, last)
         })
     }
+
     fn fallible(&mut self, effect: bool) -> PResult<Expr> {
-        let (h, types) = self.prepass(self.pos, false)?;
-        self.scopes.push(h);
-        self.type_scopes
-            .push(types.into_iter().map(|n| (n.clone(), n)).collect());
-        let r = self.block_sequence(effect, true, false);
-        self.scopes.pop();
-        self.type_scopes.pop();
-        let (ss, last) = r?;
-        Ok(Expr::Fallible(ss, last))
+        let (stmts, last) = self.scoped_block(effect, true, false)?;
+        Ok(Expr::Fallible(stmts, last))
     }
+
     fn match_expression(&mut self, effect: bool) -> PResult<Expr> {
         let subject = Box::new(self.expr(effect)?);
         self.expect("{")?;
@@ -2278,17 +1909,7 @@ impl Parser {
             let start = self.offset();
             let mut binders = HashSet::new();
             let pattern = self.match_pattern(0, &mut binders)?;
-            self.expect(":")?;
-            self.scopes.push(
-                binders
-                    .into_iter()
-                    .map(|name| (name, Binding::Value))
-                    .collect(),
-            );
-            let body = self.expr(effect);
-            self.scopes.pop();
-            let body = body?;
-            self.expect(";")?;
+            let body = self.case_body(binders, effect)?;
             cases.push(MatchCase {
                 pattern,
                 body,
@@ -2429,13 +2050,7 @@ impl Parser {
                     _ => (RecoveryPattern::Bind(name.clone()), vec![name]),
                 }
             };
-            self.expect(":")?;
-            self.scopes
-                .push(names.into_iter().map(|n| (n, Binding::Value)).collect());
-            let body = self.expr(effect);
-            self.scopes.pop();
-            let body = body?;
-            self.expect(";")?;
+            let body = self.case_body(names, effect)?;
             cases.push(RecoveryCase {
                 pattern,
                 body,
@@ -2446,9 +2061,6 @@ impl Parser {
             return self.err("recovery requires at least one case");
         }
         Ok(Expr::Recover(subject, cases))
-    }
-    fn block_contents(&mut self, effect: bool) -> PResult<(Vec<Stmt>, Option<Box<Expr>>)> {
-        self.block_sequence(effect, effect, effect)
     }
     fn block_sequence(
         &mut self,
@@ -2496,49 +2108,6 @@ pub(crate) fn standard_owners(module: &str) -> &'static [&'static str] {
         "json" => &["jsonerr"],
         _ => &[],
     }
-}
-
-fn decode(t: &Token) -> PResult<String> {
-    if t.text.len() < 2 {
-        return Err(Error::new(t.start, "invalid literal"));
-    }
-    let mut ch = t.text[1..t.text.len() - 1].chars();
-    let mut out = String::new();
-    while let Some(c) = ch.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        let err = || Error::new(t.start, "invalid literal escape");
-        out.push(match ch.next().ok_or_else(err)? {
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            '0' => '\0',
-            '\\' => '\\',
-            '"' => '"',
-            '\'' => '\'',
-            'u' => {
-                if ch.next() != Some('{') {
-                    return Err(err());
-                }
-                let mut hex = String::new();
-                loop {
-                    let d = ch.next().ok_or_else(err)?;
-                    if d == '}' {
-                        break;
-                    }
-                    hex.push(d);
-                }
-                u32::from_str_radix(&hex, 16)
-                    .ok()
-                    .and_then(char::from_u32)
-                    .ok_or_else(err)?
-            }
-            _ => return Err(err()),
-        })
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

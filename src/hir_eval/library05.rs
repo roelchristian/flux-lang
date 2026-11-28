@@ -175,7 +175,7 @@ fn regex_find(pattern: &str, input: &str, program: &HirProgram, span: Span) -> R
         Ok(re) => re,
         Err(failure) => return bad_pattern(failure.to_string()),
     };
-    Ok(operations041::success(optional(
+    Ok(succeeded(optional(
         regex.find(input).map(|m| string(m.as_str())),
     )))
 }
@@ -272,10 +272,7 @@ pub(super) fn apply_core(op: CoreOp, args: &[V], span: Span, program: &HirProgra
             regex_find(pattern, input, program, span)
         }
         (DtDays, [V::String(iso)]) => match iso_days(iso) {
-            Some(days) => Ok(operations041::success(exact_i128(
-                days.into(),
-                Domain::Integer,
-            ))),
+            Some(days) => Ok(succeeded(exact_i128(days.into(), Domain::Integer))),
             None => typed_failure(
                 program,
                 "dterr",
@@ -286,7 +283,7 @@ pub(super) fn apply_core(op: CoreOp, args: &[V], span: Span, program: &HirProgra
             ),
         },
         (DtDate, [value]) => match day_index(value).and_then(iso_date) {
-            Some(iso) => Ok(operations041::success(string(iso))),
+            Some(iso) => Ok(succeeded(string(iso))),
             None => typed_failure(
                 program,
                 "dterr",

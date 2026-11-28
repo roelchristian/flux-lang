@@ -110,29 +110,6 @@ fn at(arg: &V, arr: &Dense, span: Span) -> R<V> {
     Ok(V::Optional(arr.cells.get(off).cloned().map(Rc::new)))
 }
 
-fn unary(eval: &mut Eval<'_>, f: &V, arg: V, ty: &Type, out: &Type, span: Span) -> R<V> {
-    eval.apply_checked(
-        f.clone(),
-        vec![arg],
-        Some(vec![ty.clone()]),
-        Some(out.clone()),
-        span,
-    )
-}
-
-fn dyadic(
-    eval: &mut Eval<'_>,
-    f: &V,
-    a: (V, &Type),
-    b: (V, &Type),
-    out: &Type,
-    span: Span,
-) -> R<V> {
-    let residual = Type::Fun(Box::new(b.1.clone()), Box::new(out.clone()));
-    let part = unary(eval, f, a.0, a.1, &residual, span)?;
-    unary(eval, &part, b.0, b.1, out, span)
-}
-
 fn broadcast(a: &[usize], b: &[usize], span: Span) -> R<Rc<[usize]>> {
     let rank = a.len().max(b.len());
     let axis = |xs: &[usize], i: usize| i.checked_sub(rank - xs.len()).map_or(1, |j| xs[j]);
@@ -184,8 +161,7 @@ fn pairwise(
         if len != 0 {
             for x in a.0.cells.iter() {
                 for y in b.0.cells.iter() {
-                    cells.push(dyadic(
-                        eval,
+                    cells.push(eval.apply_dyadic(
                         f,
                         (x.clone(), a.1),
                         (y.clone(), b.1),
@@ -206,8 +182,7 @@ fn pairwise(
                 x += ax[i] * coord;
                 y += bx[i] * coord;
             }
-            cells.push(dyadic(
-                eval,
+            cells.push(eval.apply_dyadic(
                 f,
                 (a.0.cells[x].clone(), a.1),
                 (b.0.cells[y].clone(), b.1),
@@ -245,7 +220,13 @@ fn rankmap(
                 Rc::from(&input.cells[i * cell_len..(i + 1) * cell_len]),
                 span,
             )?;
-            out.push(unary(eval, f, dense, in_type, out_type, span)?);
+            out.push(eval.apply_unary(
+                f.clone(),
+                dense,
+                in_type.clone(),
+                out_type.clone(),
+                span,
+            )?);
         }
     }
     Dense::pack(frame, out.into(), span)
@@ -274,7 +255,7 @@ fn scan(
         let mut current = seed.clone();
         out.push(current.clone());
         for value in &input.cells[i * width..(i + 1) * width] {
-            current = dyadic(eval, f, (current, acc), (value.clone(), item), acc, span)?;
+            current = eval.apply_dyadic(f, (current, acc), (value.clone(), item), acc, span)?;
             out.push(current.clone());
         }
     }
@@ -304,17 +285,6 @@ pub(super) fn apply(
     output: &Type,
     eval: &mut Eval<'_>,
     span: Span,
-) -> Option<R<V>> {
-    handles(op).then(|| apply_dense(op, args, types, output, eval, span))
-}
-
-fn apply_dense(
-    op: CoreOp,
-    args: &[V],
-    types: &[Type],
-    output: &Type,
-    eval: &mut Eval<'_>,
-    span: Span,
 ) -> R<V> {
     use CoreOp::*;
     eval.tick(span)?;
@@ -336,7 +306,7 @@ fn apply_dense(
             let cells = xs
                 .cells
                 .iter()
-                .map(|v| unary(eval, f, v.clone(), input, out, span))
+                .map(|v| eval.apply_unary(f.clone(), v.clone(), input.clone(), out.clone(), span))
                 .collect::<Result<Rc<[V]>, _>>()?;
             Dense::pack(xs.shape.clone(), cells, span)
         }

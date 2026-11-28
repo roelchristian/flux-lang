@@ -1,5 +1,5 @@
 //! Typed JSON without a dynamic Flux value or a binary64 conversion path.
-use super::operations041::{failure, success, variant};
+use super::operations041::{failure, variant};
 use super::*;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
@@ -371,7 +371,7 @@ impl Encoder {
 
 fn outcome(value: J<V>, span: Span, program: &HirProgram) -> R<V> {
     match value {
-        Ok(v) => Ok(success(v)),
+        Ok(v) => Ok(succeeded(v)),
         Err(e) => {
             let (name, message) = match e {
                 JsonError::Invalid(s) => ("invalidjson", s),

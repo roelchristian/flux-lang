@@ -41,14 +41,6 @@ pub(super) fn apply(
         V::Outcome(v) => Ok(v),
         _ => Err(wrong()),
     };
-    let failure = |payload| {
-        V::Outcome(Err(Rc::new(Failure {
-            payload,
-            origin: span,
-            propagations: Vec::new(),
-            diagnostic: None,
-        })))
-    };
     let invoke = |eval: &mut Eval<'_>, f, arg: &Rc<V>| {
         // The lowered callback signature and the independently checked
         // container type normally agree. Prefer the container type when the
@@ -102,7 +94,7 @@ pub(super) fn apply(
         }
         OptResult => match optional(operands.next().ok_or_else(wrong)?)? {
             Some(value) => V::Outcome(Ok(value)),
-            None => failure(Rc::new(first)),
+            None => V::Outcome(Err(Failure::new(Rc::new(first), span, None))),
         },
         ResMap => match outcome(operands.next().ok_or_else(wrong)?)? {
             Ok(value) => succeeded(invoke(eval, first, &value)?),

@@ -202,22 +202,12 @@ impl std::error::Error for Error {}
 
 pub fn check_source(source: &str) -> Result<parser::Program, Error> {
     let program = parser::parse(source)?;
-    semantic::prepare(
-        &program,
-        semantic::Mode::Script,
-        semantic::Policy::TypedOnly,
-    )?;
+    check::check(&program)?;
     Ok(program)
 }
 
 pub fn run_source(source: &str) -> Result<eval::Output, Error> {
-    let program = parser::parse(source)?;
-    semantic::prepare(
-        &program,
-        semantic::Mode::Script,
-        semantic::Policy::TypedOnly,
-    )?
-    .run()
+    eval::run(&parser::parse(source)?)
 }
 
 /// Failure from a path-based frontend or runtime operation.
@@ -262,16 +252,20 @@ impl std::error::Error for PathError {
     }
 }
 
-/// Load and type-check a file and its local dependency graph without evaluating.
-pub fn check_path(path: impl AsRef<std::path::Path>) -> Result<modules::LoadedProgram, PathError> {
-    let loaded = modules::load(path)?;
+fn prepare_path(loaded: &modules::LoadedProgram) -> Result<semantic::Prepared<'_>, PathError> {
     semantic::prepare_modules(
         &loaded.program,
         semantic::Mode::Script,
         semantic::Policy::TypedOnly,
         &loaded.module_inputs,
     )
-    .map_err(|error| PathError::semantic(&loaded, error))?;
+    .map_err(|error| PathError::semantic(loaded, error))
+}
+
+/// Load and type-check a file and its local dependency graph without evaluating.
+pub fn check_path(path: impl AsRef<std::path::Path>) -> Result<modules::LoadedProgram, PathError> {
+    let loaded = modules::load(path)?;
+    prepare_path(&loaded)?;
     Ok(loaded)
 }
 
@@ -291,14 +285,9 @@ pub fn interface_path(
 /// Load, check and execute one file using typed HIR.
 pub fn run_path(path: impl AsRef<std::path::Path>) -> Result<eval::Output, PathError> {
     let loaded = modules::load(path)?;
-    semantic::prepare_modules(
-        &loaded.program,
-        semantic::Mode::Script,
-        semantic::Policy::TypedOnly,
-        &loaded.module_inputs,
-    )
-    .and_then(|prepared| prepared.run())
-    .map_err(|error| PathError::semantic(&loaded, error))
+    prepare_path(&loaded)?
+        .run()
+        .map_err(|error| PathError::semantic(&loaded, error))
 }
 
 /// Parse a file and its local imports, then format only the original root text.

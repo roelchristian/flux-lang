@@ -351,6 +351,25 @@ pub struct HirProgram {
     pub groups: Vec<Vec<Definition>>,
     pub entry: Option<ExprId>,
 }
+/// Derive a closed table layout without examining runtime values.
+fn table_schema(
+    ty: &Type,
+    nominal: impl FnOnce(&NominalId) -> Option<Rc<TableSchema>>,
+) -> Option<Rc<TableSchema>> {
+    match ty {
+        Type::Action(out) | Type::Result(out, _) | Type::Fun(_, out) => table_schema(out, nominal),
+        Type::Table(row) => match row.as_ref() {
+            Type::Record(row) if row.tail.is_none() => {
+                Some(Rc::new(TableSchema::Named(row.fields.clone())))
+            }
+            Type::Tuple(fields) => Some(Rc::new(TableSchema::Positional(fields.clone()))),
+            Type::Nominal(id) => nominal(id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 impl HirProgram {
     pub fn standard_constructor(&self, owner: &str, name: &str) -> Option<SymbolId> {
         self.standard_constructors
@@ -359,20 +378,7 @@ impl HirProgram {
     }
     /// Layout witness for a checked callable instance, independent of row values.
     pub(crate) fn instance_schema(&self, ty: &Type) -> Option<Rc<TableSchema>> {
-        match ty {
-            Type::Action(out) | Type::Result(out, _) | Type::Fun(_, out) => {
-                self.instance_schema(out)
-            }
-            Type::Table(row) => match row.as_ref() {
-                Type::Record(row) if row.tail.is_none() => {
-                    Some(Rc::new(TableSchema::Named(row.fields.clone())))
-                }
-                Type::Tuple(fields) => Some(Rc::new(TableSchema::Positional(fields.clone()))),
-                Type::Nominal(id) => self.nominal_schemas.get(id).cloned(),
-                _ => None,
-            },
-            _ => None,
-        }
+        table_schema(ty, |id| self.nominal_schemas.get(id).cloned())
     }
     pub fn node(&self, id: ExprId) -> &ExprNode {
         &self.arena[id.0]
@@ -570,18 +576,10 @@ impl Lower<'_> {
         Ok(steps)
     }
     fn table_schema(&self, ty: &Type) -> Option<Rc<TableSchema>> {
-        match ty {
-            Type::Action(out) | Type::Fun(_, out) | Type::Result(out, _) => self.table_schema(out),
-            Type::Table(row) => Some(Rc::new(match row.as_ref() {
-                Type::Record(row) if row.tail.is_none() => TableSchema::Named(row.fields.clone()),
-                Type::Tuple(fields) => TableSchema::Positional(fields.clone()),
-                Type::Nominal(name) => {
-                    TableSchema::Named(self.inference.nominal_schema(name)?.fields.clone())
-                }
-                _ => return None,
-            })),
-            _ => None,
-        }
+        table_schema(ty, |id| {
+            let row = self.inference.nominal_schema(id)?;
+            Some(Rc::new(TableSchema::Named(row.fields.clone())))
+        })
     }
     fn definition(&mut self, d: &Stmt) -> Result<Definition, Boundary> {
         let Stmt::Def { body, start, .. } = d else {

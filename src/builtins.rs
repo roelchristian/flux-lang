@@ -141,969 +141,196 @@ use Effect::{ConstructAction, ExecuteAction, Pure};
 use Equality::{NotRequired, Tolerance};
 use Shape::{Collection, Dependent, Elementwise, Reduction, Scalar};
 
-macro_rules! pure {
-    ($op:expr, $name:literal, $arity:literal, $rule:ident, $shape:expr) => {
-        pure!($op, $name, $arity, $rule, $shape, NotRequired, Runtime, &[])
-    };
-    ($op:expr, $name:literal, $arity:literal, $rule:ident, $shape:expr, $eq:expr, $avail:expr, $aliases:expr) => {
+// Registry defaults keep the entries focused on what distinguishes each operation.
+// Overrides are named so equalities, aliases, and unavailable forms stay visible.
+macro_rules! builtin {
+    ($prelude:literal, $op:expr, $name:literal, $arity:literal, $rule:ident, $shape:expr
+        $(, $field:ident: $value:expr)* $(,)?) => {
         Builtin {
-            canonical: $name,
-            op: $op,
-            aliases: $aliases,
-            arity: $arity,
-            effect: Pure,
-            rule: Rule::$rule,
-            shape: $shape,
-            equality: $eq,
-            availability: $avail,
-            prelude: true,
+            $($field: $value,)*
+            ..Builtin {
+                canonical: $name,
+                op: $op,
+                aliases: &[],
+                arity: $arity,
+                effect: Pure,
+                rule: Rule::$rule,
+                shape: $shape,
+                equality: NotRequired,
+                availability: Runtime,
+                prelude: $prelude,
+            }
         }
     };
 }
-
+macro_rules! prelude {
+    ($op:ident, $($spec:tt)*) => {
+        builtin!(true, Some(CoreOp::$op), $($spec)*)
+    };
+}
 macro_rules! internal {
-    ($op:expr, $name:literal, $arity:literal, $rule:ident, $shape:expr, $effect:expr, $avail:expr, $aliases:expr) => {
-        Builtin {
-            canonical: $name,
-            op: $op,
-            aliases: $aliases,
-            arity: $arity,
-            effect: $effect,
-            rule: Rule::$rule,
-            shape: $shape,
-            equality: NotRequired,
-            availability: $avail,
-            prelude: false,
-        }
+    ($op:ident, $($spec:tt)*) => {
+        builtin!(false, Some(CoreOp::$op), $($spec)*)
+    };
+}
+macro_rules! action {
+    ($op:ident, $name:literal, $arity:literal, $shape:expr $(, $field:ident: $value:expr)*) => {
+        internal!($op, $name, $arity, Effect, $shape, effect: ConstructAction $(, $field: $value)*)
     };
 }
 
 /// Registry of exact names; selectors such as .field are generated forms, not entries.
 pub static REGISTRY: &[Builtin] = &[
-    internal!(
-        Some(CoreOp::ArrayReshape),
-        "arr.reshape",
-        2,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayShape),
-        "arr.shape",
-        1,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayRavel),
-        "arr.ravel",
-        1,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayAt),
-        "arr.at",
-        2,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayMap),
-        "arr.map",
-        2,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayZip),
-        "arr.zip",
-        3,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayOuter),
-        "arr.outer",
-        3,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayRankMap),
-        "arr.rankmap",
-        3,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayScan),
-        "arr.scan",
-        3,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayWindows),
-        "arr.windows",
-        2,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArraySelect),
-        "arr.select",
-        2,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayGrade),
-        "arr.grade",
-        2,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ArrayPermute),
-        "arr.permute",
-        2,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    pure!(Some(CoreOp::Add), "+", 2, Arithmetic, Elementwise),
-    pure!(Some(CoreOp::Sub), "-", 2, Arithmetic, Elementwise),
-    pure!(Some(CoreOp::Mul), "*", 2, Arithmetic, Elementwise),
-    pure!(Some(CoreOp::Div), "/", 2, Division, Elementwise),
-    internal!(
-        Some(CoreOp::CheckedDiv),
-        "math.div",
-        2,
-        Division,
-        Scalar,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::Quantize),
-        "math.quantize",
-        2,
-        Conversion,
-        Scalar,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    pure!(
-        Some(CoreOp::Quotient),
-        "//",
-        2,
-        IntegralArithmetic,
-        Elementwise
-    ),
-    pure!(
-        Some(CoreOp::Remainder),
-        "%",
-        2,
-        IntegralArithmetic,
-        Elementwise
-    ),
-    pure!(Some(CoreOp::Pow), "^", 2, Power, Elementwise),
-    pure!(Some(CoreOp::Negate), "-:", 1, Negation, Elementwise),
-    pure!(Some(CoreOp::Sqrt), "^/", 1, SquareRoot, Elementwise),
-    pure!(Some(CoreOp::Abs), "|", 1, Arithmetic, Elementwise),
-    pure!(Some(CoreOp::Lt), "<", 2, Order, Elementwise),
-    pure!(Some(CoreOp::Le), "<=", 2, Order, Elementwise),
-    pure!(Some(CoreOp::Gt), ">", 2, Order, Elementwise),
-    pure!(Some(CoreOp::Ge), ">=", 2, Order, Elementwise),
-    pure!(
-        Some(CoreOp::Equal),
-        "=",
-        2,
-        Equality,
-        Elementwise,
-        Equality::Elementwise,
-        Runtime,
-        &[]
-    ),
-    pure!(
-        Some(CoreOp::NotEqual),
-        "/=",
-        2,
-        Equality,
-        Elementwise,
-        Equality::Elementwise,
-        Runtime,
-        &[]
-    ),
-    pure!(
-        Some(CoreOp::EqualWhole),
-        "==",
-        2,
-        StructuralEquality,
-        Scalar,
-        Equality::Structural,
-        Runtime,
-        &[]
-    ),
-    pure!(
-        None,
-        "~=",
-        3,
-        ApproxEquality,
-        Dependent,
-        Tolerance,
-        Recognized,
-        &[]
-    ),
-    pure!(Some(CoreOp::Not), "~", 1, Boolean, Elementwise),
-    pure!(Some(CoreOp::And), "&&", 2, Boolean, Elementwise),
-    pure!(Some(CoreOp::Or), "||", 2, Boolean, Elementwise),
-    pure!(Some(CoreOp::Count), "#", 1, Cardinality, Reduction),
-    pure!(Some(CoreOp::Range), "..", 2, Range, Collection),
-    pure!(Some(CoreOp::Apply), "@", 2, Apply, Dependent),
-    pure!(Some(CoreOp::ApplyTuple), "@@", 2, Apply, Dependent),
-    pure!(Some(CoreOp::Map), "@:", 2, Map, Collection),
-    pure!(Some(CoreOp::Filter), "?:", 2, Filter, Collection),
-    pure!(
-        Some(CoreOp::Group),
-        "=:",
-        2,
-        Group,
-        Collection,
-        Equality::Structural,
-        Runtime,
-        &[]
-    ),
-    pure!(Some(CoreOp::SortAsc), ">:", 2, Sort, Collection),
-    pure!(Some(CoreOp::SortDesc), "<:", 2, Sort, Collection),
-    pure!(Some(CoreOp::Concat), "+:", 2, Concat, Collection),
-    pure!(Some(CoreOp::Zip), "&:", 2, Household, Collection),
-    pure!(Some(CoreOp::Cartesian), "*:", 2, Household, Collection),
-    pure!(
-        Some(CoreOp::Distinct),
-        "=.",
-        1,
-        Household,
-        Collection,
-        Equality::Structural,
-        Runtime,
-        &[]
-    ),
-    pure!(
-        Some(CoreOp::Lookup),
-        ".:",
-        2,
-        Lookup,
-        Dependent,
-        Equality::Structural,
-        Runtime,
-        &[]
-    ),
-    pure!(
-        Some(CoreOp::Take),
-        "[:",
-        2,
-        Household,
-        Collection,
-        NotRequired,
-        Runtime,
-        &["take"]
-    ),
-    pure!(Some(CoreOp::Fold), "/:", 3, Fold, Reduction),
-    pure!(Some(CoreOp::Reduce), "@/", 2, Fold, Reduction),
-    pure!(Some(CoreOp::Scan), "\\:", 3, Fold, Collection),
-    pure!(Some(CoreOp::Sum), "+/", 1, Reduction, Reduction),
-    pure!(Some(CoreOp::Product), "*/", 1, Reduction, Reduction),
-    pure!(Some(CoreOp::All), "&&/", 1, Reduction, Reduction),
-    pure!(Some(CoreOp::Any), "||/", 1, Reduction, Reduction),
-    pure!(Some(CoreOp::Max), ">/", 1, Reduction, Reduction),
-    pure!(Some(CoreOp::Min), "</", 1, Reduction, Reduction),
-    pure!(
-        Some(CoreOp::Mean),
-        "avg",
-        1,
-        Statistics,
-        Reduction,
-        NotRequired,
-        Runtime,
-        &[
-            "statistics.avg",
-            "stats.avg",
-            "stat.avg",
-            "statistics.mean",
-            "stats.mean",
-            "stat.mean"
-        ]
-    ),
-    pure!(
-        Some(CoreOp::Percentile),
-        "pct",
-        2,
-        Statistics,
-        Reduction,
-        NotRequired,
-        Runtime,
-        &["statistics.pct", "stats.pct", "stat.pct"]
-    ),
-    pure!(
-        Some(CoreOp::StdDev),
-        "sd",
-        1,
-        Statistics,
-        Reduction,
-        NotRequired,
-        Runtime,
-        &["statistics.sd", "stats.sd", "stat.sd"]
-    ),
-    pure!(
-        None,
-        "cor",
-        2,
-        Statistics,
-        Reduction,
-        NotRequired,
-        Recognized,
-        &["statistics.cor", "stats.cor", "stat.cor"]
-    ),
-    pure!(
-        Some(CoreOp::Drop),
-        ":]",
-        2,
-        Household,
-        Collection,
-        NotRequired,
-        Runtime,
-        &["drop"]
-    ),
-    pure!(
-        Some(CoreOp::Slice),
-        "sect",
-        3,
-        Household,
-        Collection,
-        NotRequired,
-        Runtime,
-        &["slice"]
-    ),
-    pure!(Some(CoreOp::Reverse), "rev", 1, Household, Collection),
-    pure!(
-        Some(CoreOp::Flatten),
-        ",.",
-        1,
-        Household,
-        Collection,
-        NotRequired,
-        Runtime,
-        &["flat"]
-    ),
-    pure!(
-        Some(CoreOp::Transpose),
-        "|:",
-        1,
-        Household,
-        Collection,
-        NotRequired,
-        Runtime,
-        &["tr"]
-    ),
-    pure!(
-        Some(CoreOp::Median),
-        "med",
-        1,
-        Statistics,
-        Reduction,
-        NotRequired,
-        Runtime,
-        &["statistics.med", "stats.med"]
-    ),
-    pure!(
-        Some(CoreOp::Variance),
-        "var",
-        1,
-        Statistics,
-        Reduction,
-        NotRequired,
-        Runtime,
-        &["statistics.var", "stats.var"]
-    ),
-    pure!(Some(CoreOp::Absent), "?0", 0, Optional, Scalar),
-    pure!(Some(CoreOp::Present), "?1", 1, Optional, Dependent),
-    pure!(Some(CoreOp::Has), "?+", 1, Optional, Scalar),
-    pure!(Some(CoreOp::Default), "??", 2, Optional, Dependent),
-    pure!(Some(CoreOp::Unwrap), "?!", 1, Optional, Dependent),
-    pure!(Some(CoreOp::TableFrom), "#:", 1, Table, Collection),
-    pure!(Some(CoreOp::Rows), ":#", 1, Table, Collection),
-    pure!(
-        Some(CoreOp::InnerJoin),
-        "*=",
-        4,
-        Table,
-        Collection,
-        Equality::Structural,
-        Runtime,
-        &[]
-    ),
-    pure!(
-        Some(CoreOp::LeftJoin),
-        "*?",
-        4,
-        Table,
-        Collection,
-        Equality::Structural,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::Execute),
-        "!",
-        1,
-        Effect,
-        Dependent,
-        ExecuteAction,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::TableRows),
-        "#[",
-        1,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ToNatural),
-        ":n",
-        1,
-        Conversion,
-        Elementwise,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ToInteger),
-        ":z",
-        1,
-        Conversion,
-        Elementwise,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ToRational),
-        ":q",
-        1,
-        Conversion,
-        Elementwise,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ToDecimal),
-        ":d",
-        1,
-        Conversion,
-        Elementwise,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ToReal),
-        ":r",
-        1,
-        Conversion,
-        Elementwise,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::IoPrint),
-        "io.print",
-        1,
-        Effect,
-        Dependent,
-        ConstructAction,
-        Runtime,
-        &["io.println", "print"]
-    ),
-    internal!(
-        Some(CoreOp::IoRead),
-        "io.read",
-        1,
-        Effect,
-        Dependent,
-        ConstructAction,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::IoWrite),
-        "io.write",
-        2,
-        Effect,
-        Dependent,
-        ConstructAction,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::IoExists),
-        "io.exists",
-        1,
-        Effect,
-        Dependent,
-        ConstructAction,
-        Runtime,
-        &["fs.exists"]
-    ),
-    internal!(
-        Some(CoreOp::CsvRead),
-        "csv.read",
-        1,
-        Effect,
-        Dependent,
-        ConstructAction,
-        Runtime,
-        &["io.read_csv"]
-    ),
-    internal!(
-        Some(CoreOp::CsvWrite),
-        "csv.write",
-        2,
-        Effect,
-        Dependent,
-        ConstructAction,
-        Runtime,
-        &["io.write_csv"]
-    ),
-    internal!(
-        Some(CoreOp::Aggregate),
-        "df.agg",
-        3,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.agg"]
-    ),
-    internal!(
-        Some(CoreOp::Extend),
-        "df.extend",
-        2,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.extend"]
-    ),
-    internal!(
-        Some(CoreOp::OptMap),
-        "opt.map",
-        2,
-        Optional,
-        Dependent,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::OptBind),
-        "opt.bind",
-        2,
-        Optional,
-        Dependent,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::OptResult),
-        "opt.result",
-        2,
-        Result,
-        Dependent,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ResMap),
-        "res.map",
-        2,
-        Result,
-        Dependent,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ResMapErr),
-        "res.maperr",
-        2,
-        Result,
-        Dependent,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ResCollect),
-        "res.collect",
-        1,
-        Result,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ResPartition),
-        "res.partition",
-        1,
-        Result,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ResOk),
-        "res.ok",
-        1,
-        Result,
-        Dependent,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ResOptional),
-        "res.optional",
-        1,
-        Result,
-        Dependent,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::ReadLine),
-        "io.readln",
-        0,
-        Effect,
-        Scalar,
-        ConstructAction,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::FsList),
-        "fs.ls",
-        1,
-        Effect,
-        Scalar,
-        ConstructAction,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::FsMkdir),
-        "fs.mkdir",
-        1,
-        Effect,
-        Scalar,
-        ConstructAction,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::FsBase),
-        "fs.base",
-        1,
-        Household,
-        Scalar,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::FsJoin),
-        "fs.join",
-        2,
-        Household,
-        Scalar,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::SysArgs),
-        "sys.args",
-        0,
-        Effect,
-        Scalar,
-        ConstructAction,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::SysEnv),
-        "sys.env",
-        1,
-        Effect,
-        Scalar,
-        ConstructAction,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::SysPid),
-        "sys.pid",
-        0,
-        Effect,
-        Scalar,
-        ConstructAction,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::StrUpper),
-        "str.upper",
-        1,
-        Household,
-        Scalar,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::StrLower),
-        "str.lower",
-        1,
-        Household,
-        Scalar,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::StrTrim),
-        "str.trim",
-        1,
-        Household,
-        Scalar,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::StrSplit),
-        "str.split",
-        2,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::StrJoin),
-        "str.join",
-        2,
-        Household,
-        Collection,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::RxFind),
-        "rx.find",
-        2,
-        Result,
-        Scalar,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::DtDays),
-        "dt.days",
-        1,
-        Result,
-        Scalar,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::DtDate),
-        "dt.date",
-        1,
-        Result,
-        Scalar,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::JsonEncode),
-        "json.encode",
-        1,
-        Result,
-        Dependent,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::JsonDecode),
-        "json.decode",
-        1,
-        Result,
-        Dependent,
-        Pure,
-        Runtime,
-        &[]
-    ),
-    internal!(
-        Some(CoreOp::SemiJoin),
-        "df.semi",
-        4,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.semi"]
-    ),
-    internal!(
-        Some(CoreOp::AntiJoin),
-        "df.anti",
-        4,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.anti"]
-    ),
-    internal!(
-        Some(CoreOp::TableUnion),
-        "df.union",
-        2,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.union"]
-    ),
-    internal!(
-        Some(CoreOp::TableDistinct),
-        "df.distinct",
-        1,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.distinct"]
-    ),
-    internal!(
-        Some(CoreOp::StructuralRows),
-        "df.structural",
-        1,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.structural"]
-    ),
-    internal!(
-        Some(CoreOp::TableSelect),
-        "df.select",
-        2,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.select"]
-    ),
-    internal!(
-        Some(CoreOp::DropNa),
-        "df.dropna",
-        2,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.dropna"]
-    ),
-    internal!(
-        Some(CoreOp::Fill),
-        "df.fill",
-        2,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.fill"]
-    ),
-    internal!(
-        Some(CoreOp::PresentOnly),
-        "df.present",
-        1,
-        Table,
-        Collection,
-        Pure,
-        Runtime,
-        &["table.present"]
-    ),
+    internal!(ArrayReshape, "arr.reshape", 2, Household, Collection),
+    internal!(ArrayShape, "arr.shape", 1, Household, Collection),
+    internal!(ArrayRavel, "arr.ravel", 1, Household, Collection),
+    internal!(ArrayAt, "arr.at", 2, Household, Collection),
+    internal!(ArrayMap, "arr.map", 2, Household, Collection),
+    internal!(ArrayZip, "arr.zip", 3, Household, Collection),
+    internal!(ArrayOuter, "arr.outer", 3, Household, Collection),
+    internal!(ArrayRankMap, "arr.rankmap", 3, Household, Collection),
+    internal!(ArrayScan, "arr.scan", 3, Household, Collection),
+    internal!(ArrayWindows, "arr.windows", 2, Household, Collection),
+    internal!(ArraySelect, "arr.select", 2, Household, Collection),
+    internal!(ArrayGrade, "arr.grade", 2, Household, Collection),
+    internal!(ArrayPermute, "arr.permute", 2, Household, Collection),
+    prelude!(Add, "+", 2, Arithmetic, Elementwise),
+    prelude!(Sub, "-", 2, Arithmetic, Elementwise),
+    prelude!(Mul, "*", 2, Arithmetic, Elementwise),
+    prelude!(Div, "/", 2, Division, Elementwise),
+    internal!(CheckedDiv, "math.div", 2, Division, Scalar),
+    internal!(Quantize, "math.quantize", 2, Conversion, Scalar),
+    prelude!(Quotient, "//", 2, IntegralArithmetic, Elementwise),
+    prelude!(Remainder, "%", 2, IntegralArithmetic, Elementwise),
+    prelude!(Pow, "^", 2, Power, Elementwise),
+    prelude!(Negate, "-:", 1, Negation, Elementwise),
+    prelude!(Sqrt, "^/", 1, SquareRoot, Elementwise),
+    prelude!(Abs, "|", 1, Arithmetic, Elementwise),
+    prelude!(Lt, "<", 2, Order, Elementwise),
+    prelude!(Le, "<=", 2, Order, Elementwise),
+    prelude!(Gt, ">", 2, Order, Elementwise),
+    prelude!(Ge, ">=", 2, Order, Elementwise),
+    prelude!(Equal, "=", 2, Equality, Elementwise, equality: Equality::Elementwise),
+    prelude!(NotEqual, "/=", 2, Equality, Elementwise, equality: Equality::Elementwise),
+    prelude!(EqualWhole, "==", 2, StructuralEquality, Scalar, equality: Equality::Structural),
+    builtin!(
+        true, None, "~=", 3, ApproxEquality, Dependent,
+        equality: Tolerance, availability: Recognized
+    ),
+    prelude!(Not, "~", 1, Boolean, Elementwise),
+    prelude!(And, "&&", 2, Boolean, Elementwise),
+    prelude!(Or, "||", 2, Boolean, Elementwise),
+    prelude!(Count, "#", 1, Cardinality, Reduction),
+    prelude!(Range, "..", 2, Range, Collection),
+    prelude!(Apply, "@", 2, Apply, Dependent),
+    prelude!(ApplyTuple, "@@", 2, Apply, Dependent),
+    prelude!(Map, "@:", 2, Map, Collection),
+    prelude!(Filter, "?:", 2, Filter, Collection),
+    prelude!(Group, "=:", 2, Group, Collection, equality: Equality::Structural),
+    prelude!(SortAsc, ">:", 2, Sort, Collection),
+    prelude!(SortDesc, "<:", 2, Sort, Collection),
+    prelude!(Concat, "+:", 2, Concat, Collection),
+    prelude!(Zip, "&:", 2, Household, Collection),
+    prelude!(Cartesian, "*:", 2, Household, Collection),
+    prelude!(Distinct, "=.", 1, Household, Collection, equality: Equality::Structural),
+    prelude!(Lookup, ".:", 2, Lookup, Dependent, equality: Equality::Structural),
+    prelude!(Take, "[:", 2, Household, Collection, aliases: &["take"]),
+    prelude!(Fold, "/:", 3, Fold, Reduction),
+    prelude!(Reduce, "@/", 2, Fold, Reduction),
+    prelude!(Scan, "\\:", 3, Fold, Collection),
+    prelude!(Sum, "+/", 1, Reduction, Reduction),
+    prelude!(Product, "*/", 1, Reduction, Reduction),
+    prelude!(All, "&&/", 1, Reduction, Reduction),
+    prelude!(Any, "||/", 1, Reduction, Reduction),
+    prelude!(Max, ">/", 1, Reduction, Reduction),
+    prelude!(Min, "</", 1, Reduction, Reduction),
+    prelude!(
+        Mean, "avg", 1, Statistics, Reduction,
+        aliases: &["statistics.avg", "stats.avg", "stat.avg",
+                   "statistics.mean", "stats.mean", "stat.mean"]
+    ),
+    prelude!(
+        Percentile, "pct", 2, Statistics, Reduction,
+        aliases: &["statistics.pct", "stats.pct", "stat.pct"]
+    ),
+    prelude!(
+        StdDev, "sd", 1, Statistics, Reduction,
+        aliases: &["statistics.sd", "stats.sd", "stat.sd"]
+    ),
+    builtin!(
+        true, None, "cor", 2, Statistics, Reduction,
+        aliases: &["statistics.cor", "stats.cor", "stat.cor"],
+        availability: Recognized
+    ),
+    prelude!(Drop, ":]", 2, Household, Collection, aliases: &["drop"]),
+    prelude!(Slice, "sect", 3, Household, Collection, aliases: &["slice"]),
+    prelude!(Reverse, "rev", 1, Household, Collection),
+    prelude!(Flatten, ",.", 1, Household, Collection, aliases: &["flat"]),
+    prelude!(Transpose, "|:", 1, Household, Collection, aliases: &["tr"]),
+    prelude!(Median, "med", 1, Statistics, Reduction, aliases: &["statistics.med", "stats.med"]),
+    prelude!(Variance, "var", 1, Statistics, Reduction, aliases: &["statistics.var", "stats.var"]),
+    prelude!(Absent, "?0", 0, Optional, Scalar),
+    prelude!(Present, "?1", 1, Optional, Dependent),
+    prelude!(Has, "?+", 1, Optional, Scalar),
+    prelude!(Default, "??", 2, Optional, Dependent),
+    prelude!(Unwrap, "?!", 1, Optional, Dependent),
+    prelude!(TableFrom, "#:", 1, Table, Collection),
+    prelude!(Rows, ":#", 1, Table, Collection),
+    prelude!(InnerJoin, "*=", 4, Table, Collection, equality: Equality::Structural),
+    prelude!(LeftJoin, "*?", 4, Table, Collection, equality: Equality::Structural),
+    internal!(Execute, "!", 1, Effect, Dependent, effect: ExecuteAction),
+    internal!(TableRows, "#[", 1, Table, Collection),
+    internal!(ToNatural, ":n", 1, Conversion, Elementwise),
+    internal!(ToInteger, ":z", 1, Conversion, Elementwise),
+    internal!(ToRational, ":q", 1, Conversion, Elementwise),
+    internal!(ToDecimal, ":d", 1, Conversion, Elementwise),
+    internal!(ToReal, ":r", 1, Conversion, Elementwise),
+    action!(IoPrint, "io.print", 1, Dependent, aliases: &["io.println", "print"]),
+    action!(IoRead, "io.read", 1, Dependent),
+    action!(IoWrite, "io.write", 2, Dependent),
+    action!(IoExists, "io.exists", 1, Dependent, aliases: &["fs.exists"]),
+    action!(CsvRead, "csv.read", 1, Dependent, aliases: &["io.read_csv"]),
+    action!(CsvWrite, "csv.write", 2, Dependent, aliases: &["io.write_csv"]),
+    internal!(Aggregate, "df.agg", 3, Table, Collection, aliases: &["table.agg"]),
+    internal!(Extend, "df.extend", 2, Table, Collection, aliases: &["table.extend"]),
+    internal!(OptMap, "opt.map", 2, Optional, Dependent),
+    internal!(OptBind, "opt.bind", 2, Optional, Dependent),
+    internal!(OptResult, "opt.result", 2, Result, Dependent),
+    internal!(ResMap, "res.map", 2, Result, Dependent),
+    internal!(ResMapErr, "res.maperr", 2, Result, Dependent),
+    internal!(ResCollect, "res.collect", 1, Result, Collection),
+    internal!(ResPartition, "res.partition", 1, Result, Collection),
+    internal!(ResOk, "res.ok", 1, Result, Dependent),
+    internal!(ResOptional, "res.optional", 1, Result, Dependent),
+    action!(ReadLine, "io.readln", 0, Scalar),
+    action!(FsList, "fs.ls", 1, Scalar),
+    action!(FsMkdir, "fs.mkdir", 1, Scalar),
+    internal!(FsBase, "fs.base", 1, Household, Scalar),
+    internal!(FsJoin, "fs.join", 2, Household, Scalar),
+    action!(SysArgs, "sys.args", 0, Scalar),
+    action!(SysEnv, "sys.env", 1, Scalar),
+    action!(SysPid, "sys.pid", 0, Scalar),
+    internal!(StrUpper, "str.upper", 1, Household, Scalar),
+    internal!(StrLower, "str.lower", 1, Household, Scalar),
+    internal!(StrTrim, "str.trim", 1, Household, Scalar),
+    internal!(StrSplit, "str.split", 2, Household, Collection),
+    internal!(StrJoin, "str.join", 2, Household, Collection),
+    internal!(RxFind, "rx.find", 2, Result, Scalar),
+    internal!(DtDays, "dt.days", 1, Result, Scalar),
+    internal!(DtDate, "dt.date", 1, Result, Scalar),
+    internal!(JsonEncode, "json.encode", 1, Result, Dependent),
+    internal!(JsonDecode, "json.decode", 1, Result, Dependent),
+    internal!(SemiJoin, "df.semi", 4, Table, Collection, aliases: &["table.semi"]),
+    internal!(AntiJoin, "df.anti", 4, Table, Collection, aliases: &["table.anti"]),
+    internal!(TableUnion, "df.union", 2, Table, Collection, aliases: &["table.union"]),
+    internal!(TableDistinct, "df.distinct", 1, Table, Collection, aliases: &["table.distinct"]),
+    internal!(
+        StructuralRows, "df.structural", 1, Table, Collection, aliases: &["table.structural"]
+    ),
+    internal!(TableSelect, "df.select", 2, Table, Collection, aliases: &["table.select"]),
+    internal!(DropNa, "df.dropna", 2, Table, Collection, aliases: &["table.dropna"]),
+    internal!(Fill, "df.fill", 2, Table, Collection, aliases: &["table.fill"]),
+    internal!(PresentOnly, "df.present", 1, Table, Collection, aliases: &["table.present"]),
 ];
 
 // Indexed by the operation discriminant; aliases share the same execution contract.
@@ -1146,88 +373,39 @@ pub fn prelude_arity(name: &str) -> Option<usize> {
         .map(|b| b.arity)
 }
 
-// Export visibility is separate from compatibility aliases, some of which may
-// exist only for internal evaluator dispatch. Resolve arity from REGISTRY.
+// Native exports are explicit; some qualified aliases are only for dispatch.
+// Form the registry key from the namespace and the member, and read its arity there.
 type Member = (&'static str, &'static str);
-const IO: &[Member] = &[
-    ("print", "io.print"),
-    ("println", "io.println"),
-    ("readln", "io.readln"),
-    ("read", "io.read"),
-    ("write", "io.write"),
-    ("exists", "io.exists"),
-    ("read_csv", "io.read_csv"),
-    ("write_csv", "io.write_csv"),
-];
-const MATH: &[Member] = &[("div", "math.div"), ("quantize", "math.quantize")];
-const CSV: &[Member] = &[("read", "csv.read"), ("write", "csv.write")];
-const TABLE: &[Member] = &[
-    ("agg", "df.agg"),
-    ("extend", "df.extend"),
-    ("semi", "df.semi"),
-    ("anti", "df.anti"),
-    ("union", "df.union"),
-    ("distinct", "df.distinct"),
-    ("select", "df.select"),
-    ("structural", "df.structural"),
-    ("dropna", "df.dropna"),
-    ("fill", "df.fill"),
-    ("present", "df.present"),
-];
-const STATISTICS: &[Member] = &[
-    ("avg", "avg"),
-    ("mean", "avg"),
-    ("pct", "pct"),
-    ("sd", "sd"),
-    ("cor", "cor"),
-];
+macro_rules! exports {
+    ($module:literal: $($member:literal),* $(,)?) => {
+        &[$(($member, concat!($module, ".", $member))),*]
+    };
+}
 
-const OPT: &[Member] = &[
-    ("map", "opt.map"),
-    ("bind", "opt.bind"),
-    ("result", "opt.result"),
-];
-const RES: &[Member] = &[
-    ("map", "res.map"),
-    ("maperr", "res.maperr"),
-    ("collect", "res.collect"),
-    ("partition", "res.partition"),
-    ("ok", "res.ok"),
-    ("optional", "res.optional"),
-];
-const FS: &[Member] = &[
-    ("ls", "fs.ls"),
-    ("mkdir", "fs.mkdir"),
-    ("base", "fs.base"),
-    ("join", "fs.join"),
-    ("exists", "fs.exists"),
-];
-const SYS: &[Member] = &[("args", "sys.args"), ("env", "sys.env"), ("pid", "sys.pid")];
-const STR: &[Member] = &[
-    ("upper", "str.upper"),
-    ("lower", "str.lower"),
-    ("trim", "str.trim"),
-    ("split", "str.split"),
-    ("join", "str.join"),
-];
-const RX: &[Member] = &[("find", "rx.find")];
-const DT: &[Member] = &[("days", "dt.days"), ("date", "dt.date")];
-const JSON: &[Member] = &[("encode", "json.encode"), ("decode", "json.decode")];
-const ARR: &[Member] = &[
-    ("reshape", "arr.reshape"),
-    ("shape", "arr.shape"),
-    ("ravel", "arr.ravel"),
-    ("at", "arr.at"),
-    ("map", "arr.map"),
-    ("zip", "arr.zip"),
-    ("outer", "arr.outer"),
-    ("rankmap", "arr.rankmap"),
-    ("scan", "arr.scan"),
-    ("windows", "arr.windows"),
-    ("select", "arr.select"),
-    ("grade", "arr.grade"),
-    ("permute", "arr.permute"),
-];
+const IO: &[Member] = exports!(
+    "io": "print", "println", "readln", "read",
+    "write", "exists", "read_csv", "write_csv"
+);
+const MATH: &[Member] = exports!("math": "div", "quantize");
+const CSV: &[Member] = exports!("csv": "read", "write");
+const TABLE: &[Member] = exports!(
+    "df": "agg", "extend", "semi", "anti", "union",
+    "distinct", "select", "structural", "dropna", "fill", "present"
+);
+const STATISTICS: &[Member] = exports!("stat": "avg", "mean", "pct", "sd", "cor");
+
+const OPT: &[Member] = exports!("opt": "map", "bind", "result");
+const RES: &[Member] = exports!("res": "map", "maperr", "collect", "partition", "ok", "optional");
+const FS: &[Member] = exports!("fs": "ls", "mkdir", "base", "join", "exists");
+const SYS: &[Member] = exports!("sys": "args", "env", "pid");
+const STR: &[Member] = exports!("str": "upper", "lower", "trim", "split", "join");
+const RX: &[Member] = exports!("rx": "find");
+const DT: &[Member] = exports!("dt": "days", "date");
+const JSON: &[Member] = exports!("json": "encode", "decode");
+const ARR: &[Member] = exports!(
+    "arr": "reshape", "shape", "ravel", "at", "map", "zip",
+    "outer", "rankmap", "scan", "windows", "select", "grade", "permute"
+);
 
 pub fn module_items(path: &str) -> Option<impl Iterator<Item = (&'static str, usize)>> {
     let members = match path {

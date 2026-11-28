@@ -1,34 +1,21 @@
 # Flux implementation guide
 
-The [language reference](specification.md) defines current behavior. This
-guide describes the Rust reference implementation. See the [changelog](../CHANGELOG.md)
-for notable changes and use Git for earlier revisions.
+The [language reference](specification.md) defines current behavior; this
+guide explains the Rust pipeline and verification.
 
 ## Compiler and runtime
 
-1. `src/lexer.rs` validates ASCII source and records byte spans. Parsing
-   discovers declaration and imported callable arity before it consumes
-   prefix operands. Arity is lexical, not inferred from a value's type.
-   Explicit `name/arity` headers lower to ordinary named definitions using
-   scoped synthetic inputs, stable expression IDs and checked applications.
-2. `src/modules.rs` loads local source modules and checks interfaces.
-   `src/resolve.rs` assigns lexical symbol identities and dependency groups.
-3. `src/infer.rs` and `src/types.rs` check rank-one schemes, shape and member
-   constraints, and exact numeric joins. Syntax IDs align expression types
-   and operations with their source occurrences throughout the compiler.
-4. `src/hir.rs` elaborates typed calls, lift modes, table schemas, closures
-   and error scopes. Admission checks HIR before it reaches the evaluator.
-   The compiler keeps one borrowed tree; separately exposed passes also
-   verify that externally reused metadata describes the same syntax.
-   Reuse requires the same declaration and pattern offsets; edits that
-   move them require fresh resolution even when expression IDs agree.
-5. `src/hir_eval.rs` executes checked HIR. It uses bounded-resource
-   arbitrary-precision exact arithmetic, exact scaled decimals and
-   explicit approximate operations. Runtime I/O is attached to suspended
-   actions. Neither script execution nor the REPL falls back to the old
-   evaluator; the `legacy-oracle` Cargo feature is for regression work.
-6. `src/formatter.rs` uses the original token stream and opt-in parser
-   ranges to format the requested source without altering its semantics.
+| Stage | Contract |
+| --- | --- |
+| Lexer, parser and modules | Record byte spans. Discover local and imported callable arities before parsing prefix operands. Lower `name/arity` to ordinary named functions with hygienic synthetic inputs. |
+| Resolution and inference | Assign lexical symbols and dependency groups. Check rank-one schemes, constraints, shapes and exact numeric joins. Stable syntax IDs associate expression types and selected operations with source occurrences. |
+| Elaboration and admission | Lower checked calls, lifts, schemas, closures and error scopes to typed HIR. The compiler shares one borrowed syntax tree. Independently reused metadata must describe the same syntax, including declaration and pattern offsets; matching expression IDs alone is not sufficient. |
+| Evaluation | Execute only admitted HIR in scripts and the REPL. The `legacy-oracle` Cargo feature enables a separate differential-testing interpreter, not fallback. Runtime I/O is attached to suspended actions. |
+| Formatting | Use original tokens and opt-in parser ranges to change layout without changing the token stream. |
+
+Evaluation is eager and resource-bounded. Numeric, JSON and array
+limits are specified in the [reference](specification.md); the relational
+runtime preserves ordered results rather than optimizing columnar queries.
 
 ## Verification
 
@@ -41,19 +28,25 @@ cargo clippy --locked --all-features --all-targets -- -D warnings
 cargo build --locked --release
 ```
 
-The example corpus checks every registered program's stdout, exit status and
-declared files through both normal and strict HIR execution. Use
-`cargo test --locked --test example_corpus` to run it alone. For current
-release binaries, `benchmarks/differential.py --typed-oracle BEFORE AFTER`
-compares a supported subset independently of the legacy interpreter.
-`benchmarks/exact_numeric_oracle.py` uses independently calculated integer,
-rational and decimal values. Report measurements with workload, compiler and
-mode; see the [performance guide](performance.md) for benchmark commands.
+Integration tests are grouped into `compiler`, `language`, `data`,
+`tooling` and `examples` targets (`cargo test --locked --test NAME`).
+The [example harness](../examples/README.md#inputs-and-verification)
+runs ordinary and strict HIR paths. Compare two release binaries with
+`python3 benchmarks/differential.py BEFORE AFTER --typed-oracle`;
+[the exact numeric oracle](../benchmarks/exact_numeric_oracle.py) supplies
+independent integer, rational and decimal expectations.
 
-## Limits
+## Performance
 
-Programs are checked and evaluated eagerly; selected representations and
-numeric operations have resource limits. JSON decoding is schema-directed,
-with limits on depth, size and exact-number expansion. Source modules are
-local and explicitly checked, not packages. Relational execution preserves
-specified ordering; it is not a columnar query optimizer. Proposals are not normative until implemented and tested.
+Use locked release builds and record workload size, compiler, platform
+and mode. Retain the old binary for paired comparisons.
+
+| Harness | Workload |
+| --- | --- |
+| [compare.py](../benchmarks/compare.py) | Alternate binaries on script, checking and grouped CSV workloads |
+| [phases.py](../benchmarks/phases.py) | Parse, resolve, infer, elaborate and evaluate separately |
+| [tacit.py](../benchmarks/tacit.py), [relational.py](../benchmarks/relational.py) | Composition and relational workloads |
+
+Measurements are environment-specific; see the
+[Draft 0.9 comparison](https://github.com/roelchristian/flux-lang/pull/13)
+for an example. Earlier reports are in Git history.
