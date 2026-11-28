@@ -5,6 +5,7 @@ use super::{
     Rc, Span, ToPrimitive, Type, Wide, Zero, COLLECTION_LIMIT, R, V,
 };
 mod elementary;
+pub(super) mod linear;
 mod number_theory;
 mod numerical;
 mod polynomial;

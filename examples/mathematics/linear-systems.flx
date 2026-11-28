@@ -1,0 +1,27 @@
+<< "lin";
+<< "arr";
+
+--- Solve A x = b exactly, even when A and b contain only naturals.
+a: array[n] := form [2 2] [2 1 1 2];
+b: array[n] := form [2] [1 0];
+
+system := ^{
+    determinant := ^? lin.det a;
+    solution := ^? lin.solve a b;
+    inverse := ^? lin.inv a;
+    product := arr.mul a (form [2 1] solution);
+    (determinant, solution, inverse, == form [2] product b)
+};
+
+--- Four quarter-turns give the identity on the plane.
+quarter := form [2 2] [0z -1z 1z 0z];
+point := form [2 1] [3z 4z];
+rotation := ^{
+    full := ^? lin.pow quarter 4;
+    (,. arr.mul quarter point, == full (lin.eye 2))
+};
+
+!^{
+    ! print system;
+    ! print rotation;
+};

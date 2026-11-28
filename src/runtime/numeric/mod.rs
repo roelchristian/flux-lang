@@ -1,5 +1,6 @@
 //! Exact numeric representations and checked numerical execution plans.
 pub(super) mod arithmetic;
+pub(in crate::hir_eval) mod complex;
 pub(super) mod decimal;
 pub(super) mod plan;
 pub(super) mod wide;

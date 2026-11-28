@@ -25,6 +25,7 @@ fn render(value: &V, style: Style) -> String {
         V::Exact(n) => format!("{}/{}", n.n, n.d),
         V::Wide(n) => format!("{n}"),
         V::Real(n) => n.to_string(),
+        V::Complex([re, im]) => format!("cx({re}, {im})"),
         V::Bool(b) => if *b { "1b" } else { "0b" }.into(),
         V::String(s) if inspect => format!("{s:?}"),
         V::Char(c) if inspect => format!("{c:?}"),

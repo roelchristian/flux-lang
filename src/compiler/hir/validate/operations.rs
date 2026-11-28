@@ -75,6 +75,119 @@ pub(super) fn mathesis_signature(
     Ok(())
 }
 
+pub(super) fn algebra_signature(
+    spec: &builtins::Builtin,
+    inputs: &[&Type],
+    output: &Type,
+    span: Span,
+) -> Result<(), Error> {
+    use builtins::AlgebraInput;
+    if *output == Type::Never && inputs.contains(&&Type::Never) {
+        return Ok(());
+    }
+    let signature = spec
+        .algebra_signature()
+        .expect("checked Algebra registry entry");
+    let bad = || {
+        invalid(
+            span,
+            format!(
+                "HIR {} signature disagrees with checked types",
+                spec.canonical
+            ),
+        )
+    };
+    let numeric = signature
+        .inputs
+        .iter()
+        .zip(inputs)
+        .find(|(param, _)| **param == AlgebraInput::DenseNumber)
+        .map(|(_, ty)| ty.array_element().ok_or_else(bad))
+        .transpose()?
+        .unwrap_or(&Type::Prim(Prim::Unit));
+    if signature.inputs.contains(&AlgebraInput::DenseNumber)
+        && !matches!(
+            numeric,
+            Type::Var(_) | Type::Prim(Prim::N | Prim::Z | Prim::Q | Prim::D | Prim::R)
+        )
+    {
+        return Err(bad());
+    }
+    if signature
+        .inputs
+        .iter()
+        .zip(inputs)
+        .any(|(&param, &actual)| param.instantiate(numeric) != *actual)
+    {
+        return Err(bad());
+    }
+    let expected = signature.output(numeric).ok_or_else(bad)?;
+    match (&expected, output) {
+        // The runtime returns factors in a fixed field order, but may be
+        // referenced through a closed structural annotation with reordered fields.
+        (Type::Result(value, e), Type::Result(actual, a)) if e == a => {
+            if let (Type::Record(expected), Type::Record(actual)) = (&**value, &**actual) {
+                if expected.tail == actual.tail
+                    && expected.fields.len() == actual.fields.len()
+                    && expected
+                        .fields
+                        .iter()
+                        .all(|field| actual.fields.contains(field))
+                {
+                    return Ok(());
+                }
+            }
+        }
+        _ => {}
+    }
+    if expected != *output {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+pub(super) fn is_complex_arithmetic(op: CoreOp) -> bool {
+    matches!(op, CoreOp::Add | CoreOp::Sub | CoreOp::Mul | CoreOp::Div)
+}
+
+pub(super) fn complex_arithmetic_signature(
+    input: [&Type; 2],
+    output: &Type,
+    span: Span,
+) -> Result<(), Error> {
+    use crate::builtins::MathShape;
+    use crate::hir::LiftMode;
+
+    let parts = input.map(|ty| MathShape::of(ty).inner(ty).expect("one-layer shape"));
+    let cx = Type::Prim(Prim::Cx);
+    if !parts.contains(&&cx) && MathShape::of(output).inner(output) != Some(&cx) {
+        return Ok(());
+    }
+    if *output == Type::Never && parts.contains(&&Type::Never) {
+        return Ok(());
+    }
+    let bad = || {
+        invalid(
+            span,
+            "HIR complex arithmetic requires homogeneous complex operands",
+        )
+    };
+    if parts != [&cx, &cx] {
+        return Err(bad());
+    }
+    let shape = match LiftMode::for_operands(input[0], Some(input[1])).map_err(|_| bad())? {
+        LiftMode::Scalar => MathShape::Scalar,
+        LiftMode::LeftSequence | LiftMode::RightSequence | LiftMode::Pairwise => {
+            MathShape::Sequence
+        }
+        LiftMode::LeftArray | LiftMode::RightArray | LiftMode::ArrayPair => MathShape::Dense,
+    };
+    if *output != shape.wrap(cx) {
+        return Err(bad());
+    }
+    Ok(())
+}
+
 pub(super) fn layout_matches(p: &HirProgram, mut ty: &Type, witness: Option<&TableSchema>) -> bool {
     while let Type::Action(out) | Type::Result(out, _) | Type::Fun(_, out) = ty {
         ty = out;

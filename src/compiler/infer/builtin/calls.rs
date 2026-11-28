@@ -6,6 +6,7 @@ use crate::types::{Class, Prim, Row, Type};
 fn fallible_builtin(spec: &crate::builtins::Builtin) -> bool {
     spec.math_signature()
         .is_some_and(|sig| sig.output == crate::builtins::MathType::SolverResult)
+        || spec.algebra_signature().is_some_and(|sig| sig.fallible())
         || matches!(
             spec.canonical,
             "io.print"
@@ -185,6 +186,9 @@ impl Engine<'_> {
             self.saw_result = true;
         }
         let result = match n {
+            _ if spec.is_some_and(|b| b.algebra_signature().is_some()) => {
+                self.algebra_call(env, spec.unwrap(), args, want, effect)?
+            }
             _ if spec.is_some_and(|b| b.math_signature().is_some()) => {
                 self.mathesis_call(env, spec.unwrap(), args, want, effect)?
             }

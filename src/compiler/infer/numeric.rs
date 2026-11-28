@@ -153,6 +153,14 @@ impl Engine<'_> {
             };
             return Ok(s(self.numeric_binary(n, &ta, b, se)?));
         }
+        if matches!(n, "+" | "-" | "*" | "/") {
+            let complex = p(Cx);
+            if ta == complex || tb == complex || out.as_ref() == Some(&complex) {
+                self.unify(&ta, &complex)?;
+                self.unify(&tb, &complex)?;
+                return Ok(complex);
+            }
+        }
         if rule == BinaryDomain::Power {
             self.unify(&tb, &p(N))?;
             self.req(Class::Num, &ta)?;

@@ -33,3 +33,6 @@ jobs:
       - name: Numerical execution equivalence smoke
         if: matrix.os == 'ubuntu-latest'
         run: python3 benchmarks/numerical_equivalence.py target/release/flux target/release/flux --cases 2
+      - name: Exact systems and decomposition residuals
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 benchmarks/algebra_oracle.py target/release/flux

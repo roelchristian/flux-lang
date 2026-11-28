@@ -19,6 +19,9 @@ pub(in crate::hir_eval) fn finite(v: f64) -> NumericResult<V> {
 pub(in crate::hir_eval) fn scalar_binary(op: CoreOp, a: V, b: V, ty: &Type) -> NumericResult<V> {
     use CoreOp::*;
     Ok(match op {
+        Add | Sub | Mul | Div if *ty == Type::Prim(Prim::Cx) => {
+            return crate::hir_eval::numeric::complex::binary(op, a, b);
+        }
         Add | Sub | Mul | Div | Quotient | Remainder | Pow => {
             if matches!(ty, Type::Prim(Prim::R)) {
                 let r = |v| {

@@ -50,6 +50,7 @@ pub(in crate::hir_eval) fn equal(a: &V, b: &V) -> bool {
             order(a, b).is_ok_and(|v| v.is_eq())
         }
         (V::Real(a), V::Real(b)) => a == b,
+        (V::Complex(a), V::Complex(b)) => a == b,
         (V::Bool(a), V::Bool(b)) => a == b,
         (V::String(a), V::String(b)) => a == b,
         (V::Char(a), V::Char(b)) => a == b,

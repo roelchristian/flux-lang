@@ -23,6 +23,7 @@ pub enum TypePrimitive {
     B,
     C,
     Unit,
+    Cx,
 }
 #[derive(Debug, Clone, PartialEq, Hash)]
 pub enum TypeAnnotationKind {
@@ -255,6 +256,7 @@ impl AnnotationParser<'_> {
             "s" => Primitive(TypePrimitive::S),
             "b" => Primitive(TypePrimitive::B),
             "c" => Primitive(TypePrimitive::C),
+            "cx" => Primitive(TypePrimitive::Cx),
             "_" => Hole,
             "?" => Optional(Box::new(self.atom()?)),
             "!" => Action(Box::new(self.atom()?)),

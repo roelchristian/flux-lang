@@ -192,8 +192,11 @@ impl Parser {
                     for &owner in standard_owners(native) {
                         self.native_type_names.insert(owner.to_owned());
                         for v in standard_errors::variants(owner) {
-                            self.standard
-                                .insert(v.name.to_owned(), Binding::Constructor(v.payload.len()));
+                            let binding = Binding::Constructor(v.payload.len());
+                            self.standard.entry(v.name.to_owned()).or_insert(binding);
+                            if standard_errors::variant_namespace(owner) == Some(native) {
+                                self.standard.insert(format!("{alias}.{}", v.name), binding);
+                            }
                         }
                     }
                     p.imports.push(native.to_owned());
@@ -334,6 +337,7 @@ pub(crate) fn standard_owners(module: &str) -> &'static [&'static str] {
         "csv" => &["ioerr", "csverr"],
         "math" => &["numerr"],
         "num" => &["solvererr"],
+        "lin" => &["linerr"],
         "fs" | "sys" => &["ioerr"],
         "rx" => &["rxerr"],
         "dt" => &["dterr"],

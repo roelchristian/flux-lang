@@ -1,0 +1,15 @@
+<< "cx";
+
+--- Multiplication by i rotates each point through a quarter-turn.
+i := cx.make 0r 1r;
+point := cx.make 3r 4r;
+rotate(z: cx): cx := * i z;
+turns := @: &rotate (form [2] [point i]);
+conjugate/1: cx -> cx := &cx.conj;
+
+!^{
+    !
+        print (cx.re point, cx.im point, cx.abs point, conjugate point);
+    ! print turns;
+    ! print (= (/ (rotate point) i) point);
+};

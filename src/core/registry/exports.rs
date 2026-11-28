@@ -36,16 +36,18 @@ const ARR: &[Member] = exports!(
 );
 
 pub fn module_items(path: &str) -> Option<impl Iterator<Item = (&'static str, usize)>> {
-    let math_prefix = match path {
+    let registry_prefix = match path {
         "math" => Some("math."),
         "poly" => Some("poly."),
         "num" => Some("num."),
+        "lin" => Some("lin."),
+        "cx" => Some("cx."),
         _ => None,
     };
     let members: &[Member] = match path {
         "io" => IO,
         "csv" => CSV,
-        "math" | "poly" | "num" => &[],
+        "math" | "poly" | "num" | "lin" | "cx" => &[],
         "df" | "table" => TABLE,
         "stat" | "stats" | "statistics" => STATISTICS,
         "opt" => OPT,
@@ -70,7 +72,7 @@ pub fn module_items(path: &str) -> Option<impl Iterator<Item = (&'static str, us
                 )
             })
             .chain(REGISTRY.iter().filter_map(move |spec| {
-                let local = spec.canonical.strip_prefix(math_prefix?)?;
+                let local = spec.canonical.strip_prefix(registry_prefix?)?;
                 Some((local, spec.arity))
             })),
     )

@@ -4,6 +4,7 @@ mod support;
 mod array_calculus;
 mod array_views;
 mod arrays;
+mod linear_algebra;
 mod mathematical_library;
 mod numerical_fusion;
 mod numerical_methods;

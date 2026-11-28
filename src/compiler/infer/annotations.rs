@@ -41,6 +41,7 @@ impl Engine<'_> {
                 TypePrimitive::B => Prim::B,
                 TypePrimitive::C => Prim::C,
                 TypePrimitive::Unit => Prim::Unit,
+                TypePrimitive::Cx => Prim::Cx,
             }),
             K::Named(name) if name == "array" => {
                 return Err(self.err("type array expects 1 type argument"))

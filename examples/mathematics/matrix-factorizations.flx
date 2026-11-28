@@ -1,0 +1,34 @@
+<< "lin";
+<< "arr";
+
+near_zero(x: r): b := < | x 1e-12r;
+close(a, b: array[r]): b := &&/ @: &near_zero (,. (- a b));
+
+--- LU swaps the two rows here; its permutation is one-based.
+a := form [2 2] [0r 1r 3r 4r];
+pa := form [2 2] [3r 4r 0r 1r];
+tall := form [3 2] [1r 1r 1r 2r 1r 3r];
+positive := form [2 2] [4r 2r 2r 2r];
+indefinite := form [2 2] [1r 2r 2r 1r];
+
+factors := ^{
+    lu := ^? lin.lu a;
+    qr := ^? lin.qr tall;
+    low := ^? lin.cholesky positive;
+    reconstructed := close (arr.mul .q qr .r qr) tall;
+    orthogonal := close (arr.mul (|: .q qr) .q qr) (: r (lin.eye 2));
+    (
+        .p lu,
+        close (arr.mul .l lu .u lu) pa,
+        dim .q qr,
+        dim .r qr,
+        reconstructed,
+        orthogonal,
+        close (arr.mul low (|: low)) positive
+    )
+};
+
+!^{
+    ! print factors;
+    ! print (lin.cholesky indefinite);
+};
