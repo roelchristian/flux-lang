@@ -7,6 +7,7 @@ const PRELUDE: &str = r#"
 << "io";
 << "math";
 << "df";
+<< "arr";
 key(x:z):z := % x 2;
 rs :: { k:z; value:z; };
 rows:#rs := #[rs { k := 1; value := 2; } rs { k := 1; value := 3; }];
@@ -193,14 +194,37 @@ const ARRAYS_012: &[&str] = &[
     "arr.permute",
 ];
 
-fn expression_source(expression: &str) -> String {
-    format!("{PRELUDE}\n!{{ ^= ! io.print {expression} {{ _ : (); }}; }};")
+const DENSE_ARRAYS: &[Case] = &[
+    ("form", "dim (form [2n] [1z 2z])", "[2]"),
+    ("arr.axes", ",. (arr.axes [2n 1n] m)", "[1 3 2 4]"),
+    ("arr.sect", ",. (arr.sect [2n 1n] [1n 2n] m)", "[3 4]"),
+    ("arr.red", ",. (arr.red 2n &- m)", "[?1 -1 ?1 -1]"),
+    ("arr.fold", ",. (arr.fold 1n &- 10z m)", "[6 4]"),
+    ("arr.scana", ",. (arr.scana 1n &+ 0z m)", "[0 0 1 2 4 6]"),
+    (
+        "arr.dot",
+        "arr.dot (form [2n] [1z 2z]) (form [2n] [3z 4z])",
+        "11",
+    ),
+    ("arr.mul", ",. (arr.mul m m)", "[7 10 15 22]"),
+    ("arr.diag", ",. (arr.diag m)", "[1 4]"),
+];
+
+fn expression_source(definitions: &str, expression: &str) -> String {
+    format!("{PRELUDE}\n{definitions}\n!{{ ^= ! io.print {expression} {{ _ : (); }}; }};")
 }
 
 fn assert_cases(cases: &[Case]) {
+    assert_cases_with("", cases);
+}
+
+fn assert_cases_with(definitions: &str, cases: &[Case]) {
     let mut failures = Vec::new();
     for &(op, expression, expected) in cases {
-        let f = script("builtin-coverage", &expression_source(expression));
+        let f = script(
+            "builtin-coverage",
+            &expression_source(definitions, expression),
+        );
         let output = run_script(&f, &["run-hir"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -215,18 +239,25 @@ fn assert_cases(cases: &[Case]) {
 
 #[test]
 fn every_runtime_registry_entry_has_a_strict_fixture() {
-    let covered: BTreeSet<_> = [ARITHMETIC, LOGIC, COLLECTIONS, REDUCTIONS, TABLES]
-        .into_iter()
-        .flat_map(|cases| cases.iter().map(|case| case.0))
-        .chain(
-            EFFECTS
-                .iter()
-                .chain(STDLIB_05)
-                .chain(RELATIONAL_06)
-                .chain(ARRAYS_012)
-                .copied(),
-        )
-        .collect();
+    let covered: BTreeSet<_> = [
+        ARITHMETIC,
+        LOGIC,
+        COLLECTIONS,
+        REDUCTIONS,
+        TABLES,
+        DENSE_ARRAYS,
+    ]
+    .into_iter()
+    .flat_map(|cases| cases.iter().map(|case| case.0))
+    .chain(
+        EFFECTS
+            .iter()
+            .chain(STDLIB_05)
+            .chain(RELATIONAL_06)
+            .chain(ARRAYS_012)
+            .copied(),
+    )
+    .collect();
     let registered: BTreeSet<_> = REGISTRY
         .iter()
         .filter(|entry| entry.availability == Availability::Runtime)
@@ -248,6 +279,11 @@ fn all_logic_and_optional_builtins_execute_in_hir() {
 #[test]
 fn all_collection_builtins_execute_in_hir() {
     assert_cases(COLLECTIONS);
+}
+
+#[test]
+fn all_dense_array_builtins_execute_in_hir() {
+    assert_cases_with("m := form [2n 2n] [1z 2z 3z 4z];", DENSE_ARRAYS);
 }
 
 #[test]
@@ -346,7 +382,7 @@ fn invalid_collection_shapes_have_typed_runtime_diagnostics() {
         ("slice 0n 1n [2z]", "one-based"),
         ("pct 101z [1z 2z]", "percentile"),
     ] {
-        let f = script("builtin-coverage", &expression_source(source));
+        let f = script("builtin-coverage", &expression_source("", source));
         let check = run_script(&f, &["check"]);
         assert!(
             check.status.success(),
@@ -422,7 +458,7 @@ fn recognized_unsupported_operations_do_not_execute_or_fall_back() {
 fn rust_api_and_repl_execute_former_legacy_operations() {
     use std::{io::Write, process::Stdio};
 
-    let source = expression_source("/: &+ 0z [1z 2z 3z]");
+    let source = expression_source("", "/: &+ 0z [1z 2z 3z]");
     let checked = flux_lang::check_source(&source);
     assert!(checked.is_ok(), "public check: {checked:?}");
     let result = flux_lang::run_source(&source).expect("public typed run");

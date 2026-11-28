@@ -2,7 +2,7 @@
 
 Flux is a statically typed, array-oriented language for exact arithmetic,
 data transformation and scripting. It uses strict prefix notation: `+ 2 3`
-adds 2 and 3. This is the experimental **Draft 0.14** reference interpreter.
+adds 2 and 3. This is the experimental **Draft 0.15** reference interpreter.
 
 ## Quickstart
 

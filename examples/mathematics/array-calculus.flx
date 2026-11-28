@@ -1,0 +1,23 @@
+<< "arr";
+
+--- Broadcast calibration offsets across the rows of a matrix.
+a := form [2n 3n] [1z 2z 3z 4z 5z 6z];
+offsets := form [3n] [10z 20z 30z];
+shifted := + a offsets;
+sums := +/ shifted;
+
+--- Rectangular section starts are one-based; counts clamp.
+section := arr.sect [1n 2n] [2n 9n] shifted;
+transposed := |: a;
+row := form [6n] shifted;
+valid := > shifted 20z;
+
+!{
+    ^{
+        ^? ! print (dim shifted, # shifted, ,. shifted);
+        ^? ! print (dim sums, ,. sums, ,. section);
+        ^? ! print (dim transposed, ,. transposed, .: [2n 1n] a);
+        ^? ! print (dim row, ,. valid);
+        ()
+    }
+};

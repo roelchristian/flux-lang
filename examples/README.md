@@ -28,7 +28,11 @@ Unless noted in the [manifest](manifest.json), run `flux PATH` from the root.
 [Euclid](mathematics/euclid.flx), [Fibonacci](mathematics/fibonacci.flx),
 [primes](mathematics/primes.flx), [Horner evaluation](mathematics/polynomial.flx),
 [rationals](mathematics/rational.flx), [rounding](mathematics/rounding.flx),
-[approximation](mathematics/approximation.flx), [dense arrays](mathematics/arrays.flx).
+[approximation](mathematics/approximation.flx).
+
+[Array calculus](mathematics/array-calculus.flx), [matrix products](mathematics/matrix-products.flx),
+[axis reductions](mathematics/axis-reduction.flx),
+[dense arrays and indexed sequences](mathematics/arrays.flx).
 
 ## 5. Statistics and tables
 

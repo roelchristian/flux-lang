@@ -182,7 +182,7 @@ macro_rules! action {
 /// Registry of exact names; selectors such as .field are generated forms, not entries.
 pub static REGISTRY: &[Builtin] = &[
     internal!(ArrayReshape, "arr.reshape", 2, Household, Collection),
-    internal!(ArrayShape, "arr.shape", 1, Household, Collection),
+    internal!(ArrayShape, "arr.shape", 1, Household, Collection, aliases: &["dim"]),
     internal!(ArrayRavel, "arr.ravel", 1, Household, Collection),
     internal!(ArrayAt, "arr.at", 2, Household, Collection),
     internal!(ArrayMap, "arr.map", 2, Household, Collection),
@@ -194,6 +194,15 @@ pub static REGISTRY: &[Builtin] = &[
     internal!(ArraySelect, "arr.select", 2, Household, Collection),
     internal!(ArrayGrade, "arr.grade", 2, Household, Collection),
     internal!(ArrayPermute, "arr.permute", 2, Household, Collection),
+    prelude!(ArrayForm, "form", 2, Household, Collection),
+    internal!(ArrayAxes, "arr.axes", 2, Household, Collection),
+    internal!(ArraySection, "arr.sect", 3, Household, Collection),
+    internal!(ArrayReduce, "arr.red", 3, Fold, Reduction),
+    internal!(ArrayFold, "arr.fold", 4, Fold, Reduction),
+    internal!(ArrayScanAxis, "arr.scana", 4, Fold, Collection),
+    internal!(ArrayDot, "arr.dot", 2, Arithmetic, Reduction),
+    internal!(ArrayMatMul, "arr.mul", 2, Arithmetic, Collection),
+    internal!(ArrayDiag, "arr.diag", 1, Household, Collection),
     prelude!(Add, "+", 2, Arithmetic, Elementwise),
     prelude!(Sub, "-", 2, Arithmetic, Elementwise),
     prelude!(Mul, "*", 2, Arithmetic, Elementwise),
@@ -363,9 +372,8 @@ pub fn canonical(name: &str) -> &str {
     lookup(name).map_or(name, |b| b.canonical)
 }
 
-// The transition spellings are source-visible. All other aliases are only
-// exposed through explicit native imports or internal dispatch.
-const PRELUDE_ALIASES: &[&str] = &["print", "take", "drop", "slice", "flat", "tr"];
+// Exposed unqualified aliases. Other aliases require a native import or are for dispatch.
+const PRELUDE_ALIASES: &[&str] = &["print", "dim", "take", "drop", "slice", "flat", "tr"];
 
 pub fn prelude_arity(name: &str) -> Option<usize> {
     lookup(name)
@@ -404,7 +412,8 @@ const DT: &[Member] = exports!("dt": "days", "date");
 const JSON: &[Member] = exports!("json": "encode", "decode");
 const ARR: &[Member] = exports!(
     "arr": "reshape", "shape", "ravel", "at", "map", "zip",
-    "outer", "rankmap", "scan", "windows", "select", "grade", "permute"
+    "outer", "rankmap", "scan", "windows", "select", "grade", "permute",
+    "axes", "sect", "red", "fold", "scana", "dot", "mul", "diag"
 );
 
 pub fn module_items(path: &str) -> Option<impl Iterator<Item = (&'static str, usize)>> {
@@ -532,6 +541,35 @@ mod tests {
         assert_eq!(prelude_arity("@/"), Some(2));
         assert_eq!(for_operation(CoreOp::Reduce), lookup("@/"));
         assert_eq!(prelude_arity("statistics.mean"), None);
+    }
+
+    #[test]
+    fn dense_operators_keep_named_aliases_and_native_visibility() {
+        assert_eq!(lookup("dim"), lookup("arr.shape"));
+        assert_eq!(prelude_arity("dim"), Some(1));
+        assert_eq!(
+            lookup("form").and_then(|entry| entry.op),
+            Some(CoreOp::ArrayForm)
+        );
+        assert_eq!(prelude_arity("form"), Some(2));
+        assert_ne!(lookup("form"), lookup("arr.reshape"));
+        for (member, arity) in [
+            ("axes", 2),
+            ("sect", 3),
+            ("red", 3),
+            ("fold", 4),
+            ("scana", 4),
+            ("dot", 2),
+            ("mul", 2),
+            ("diag", 1),
+        ] {
+            let qualified = format!("arr.{member}");
+            assert_eq!(prelude_arity(&qualified), None);
+            assert_eq!(runtime_arity(&qualified), Some(arity));
+            assert!(module_items("arr")
+                .unwrap()
+                .any(|item| item == (member, arity)));
+        }
     }
 
     #[test]

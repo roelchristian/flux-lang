@@ -1,6 +1,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod array_calculus;
 mod arrays;
 mod numerics;
 mod relations;

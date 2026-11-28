@@ -370,6 +370,9 @@ impl Engine<'_> {
                     }
                 }
             }
+            ref t if t.array_element().is_some() => {
+                self.nominal_evidence(c, t.array_element().unwrap(), seen)?
+            }
             Type::Seq(x) | Type::Table(x) | Type::Optional(x) => {
                 self.nominal_evidence(c, &x, seen)?
             }
@@ -1595,6 +1598,12 @@ impl Engine<'_> {
         self.unify(t, &s(out.clone()))?;
         Ok(out)
     }
+    fn sequence_or_dense_element(&mut self, ty: &Type) -> R<(Type, bool)> {
+        if let Some(element) = self.cx.resolve(ty).array_element() {
+            return Ok((element.clone(), true));
+        }
+        Ok((self.seq_element(ty)?, false))
+    }
     fn row(&self, t: &Type) -> R<Row> {
         match self.cx.resolve(t) {
             Type::Record(r) => Ok(r),
@@ -2077,7 +2086,7 @@ impl Engine<'_> {
             self.saw_result = true;
         }
         let result = match n {
-            op if op.starts_with("arr.") && spec.is_some() => {
+            op if op == "form" || (op.starts_with("arr.") && spec.is_some()) => {
                 self.array_call(env, op, args, want, effect)?
             }
             "*=" | "*?" | "df.semi" | "df.anti" | "df.union" | "df.distinct" | "df.select"
@@ -2122,45 +2131,57 @@ impl Engine<'_> {
             "@:" | "?:" | "=:" | ">:" | "<:" => {
                 let src = self.expr(env, &args[1], None, effect)?;
                 let res = self.cx.resolve(&src);
-                let elt = match &res {
-                    Type::Dict(_, t) if n == "@:" => t.as_ref().clone(),
-                    _ => self.collection(&src)?,
-                };
-                match (&res, n) {
-                    (Type::Dict(k, _), "@:") => {
-                        let result = self.unary_fn(env, &args[0], &elt, None, effect)?;
-                        Type::Dict(k.clone(), b(result))
-                    }
-                    (_, "@:") => {
-                        let result = self.unary_fn(env, &args[0], &elt, None, effect)?;
-                        s(result)
-                    }
-                    (_, "?:") => {
-                        let predicate = &args[0];
-                        if matches!(
-                            predicate,
-                            Expr::Lambda(..) | Expr::TypedLambda(..) | Expr::Ref(_)
-                        ) {
-                            self.unary_fn(env, predicate, &elt, Some(&p(B)), effect)?;
-                        } else {
-                            let pred = self.expr(env, predicate, None, effect)?;
-                            match self.cx.resolve(&pred) {
-                                Type::Never => return Ok(Type::Never),
-                                Type::Seq(_) => self.unify(&pred, &s(p(B)))?,
-                                _ => self.unify(&pred, &f(elt.clone(), p(B)))?,
-                            }
+                if let Some(elt) = res.array_element().filter(|_| n == "@:") {
+                    let want = want.map(|t| self.cx.resolve(t));
+                    let result = self.unary_fn(
+                        env,
+                        &args[0],
+                        elt,
+                        want.as_ref().and_then(Type::array_element),
+                        effect,
+                    )?;
+                    Type::dense_array(result)
+                } else {
+                    let elt = match &res {
+                        Type::Dict(_, t) if n == "@:" => t.as_ref().clone(),
+                        _ => self.collection(&src)?,
+                    };
+                    match (&res, n) {
+                        (Type::Dict(k, _), "@:") => {
+                            let result = self.unary_fn(env, &args[0], &elt, None, effect)?;
+                            Type::Dict(k.clone(), b(result))
                         }
-                        src
-                    }
-                    (_, "=:") => {
-                        let k = self.unary_fn(env, &args[0], &elt, None, effect)?;
-                        self.req(Class::Hash, &k)?;
-                        Type::Dict(b(k), b(src))
-                    }
-                    _ => {
-                        let k = self.unary_fn(env, &args[0], &elt, None, effect)?;
-                        self.req(Class::Ord, &k)?;
-                        src
+                        (_, "@:") => {
+                            let result = self.unary_fn(env, &args[0], &elt, None, effect)?;
+                            s(result)
+                        }
+                        (_, "?:") => {
+                            let predicate = &args[0];
+                            if matches!(
+                                predicate,
+                                Expr::Lambda(..) | Expr::TypedLambda(..) | Expr::Ref(_)
+                            ) {
+                                self.unary_fn(env, predicate, &elt, Some(&p(B)), effect)?;
+                            } else {
+                                let pred = self.expr(env, predicate, None, effect)?;
+                                match self.cx.resolve(&pred) {
+                                    Type::Never => return Ok(Type::Never),
+                                    Type::Seq(_) => self.unify(&pred, &s(p(B)))?,
+                                    _ => self.unify(&pred, &f(elt.clone(), p(B)))?,
+                                }
+                            }
+                            src
+                        }
+                        (_, "=:") => {
+                            let k = self.unary_fn(env, &args[0], &elt, None, effect)?;
+                            self.req(Class::Hash, &k)?;
+                            Type::Dict(b(k), b(src))
+                        }
+                        _ => {
+                            let k = self.unary_fn(env, &args[0], &elt, None, effect)?;
+                            self.req(Class::Ord, &k)?;
+                            src
+                        }
                     }
                 }
             }
@@ -2303,37 +2324,82 @@ impl Engine<'_> {
                         self.expr(env, &args[0], Some(&p(N)), effect)?;
                         o(*t)
                     }
+                    t if t.array_element().is_some() => {
+                        self.expr(env, &args[0], Some(&s(p(N))), effect)?;
+                        o(t.array_element().unwrap().clone())
+                    }
                     x => return Err(self.err(format!("cannot index {x}"))),
                 }
             }
             "@/" => {
-                let item = match want.map(|w| self.cx.resolve(w)) {
-                    Some(Type::Optional(t)) => *t,
+                let wanted = want.map(|w| self.cx.resolve(w));
+                let optional = wanted.as_ref().and_then(|t| t.array_element().or(Some(t)));
+                let item = match optional {
+                    Some(Type::Optional(t)) => t.as_ref().clone(),
                     _ => self.cx.fresh(),
                 };
                 let expected = f(item.clone(), f(item.clone(), item.clone()));
-                if self.check_application_pair(env, args, &expected, &s(item.clone()), effect)? {
+                let source_want = if wanted.as_ref().and_then(Type::array_element).is_some() {
+                    Some(Type::dense_array(item.clone()))
+                } else if matches!(wanted, Some(Type::Optional(_)))
+                    || matches!(&args[1], Expr::Array(_))
+                {
+                    Some(s(item.clone()))
+                } else {
+                    None
+                };
+                let known = self.known_callee(env, &args[0]);
+                let mut bottom = false;
+                if known {
+                    bottom |= self.expr(env, &args[0], Some(&expected), effect)? == Type::Never;
+                }
+                let source = self.expr(env, &args[1], source_want.as_ref(), effect)?;
+                let dense = self.cx.resolve(&source).array_element().is_some();
+                if source == Type::Never {
+                    bottom = true;
+                } else {
+                    let shape = if dense {
+                        Type::dense_array(item.clone())
+                    } else {
+                        s(item.clone())
+                    };
+                    self.unify(&source, &shape)?;
+                }
+                if !known {
+                    bottom |= self.expr(env, &args[0], Some(&expected), effect)? == Type::Never;
+                }
+                if bottom {
                     Type::Never
+                } else if dense {
+                    Type::dense_array(o(item))
                 } else {
                     o(item)
                 }
             }
             "/:" | "\\:" => {
-                let acc_expect = match (n, want.map(|w| self.cx.resolve(w))) {
-                    ("/:", t) => t,
-                    (_, Some(Type::Seq(t))) => Some(*t),
-                    _ => None,
+                let source = self.expr(env, &args[2], None, effect)?;
+                let wanted = want.map(|w| self.cx.resolve(w));
+                let dense = self.cx.resolve(&source).array_element().is_some();
+                let acc_expect = if dense {
+                    wanted.as_ref().and_then(Type::array_element)
+                } else {
+                    match (n, wanted.as_ref()) {
+                        ("/:", w) => w,
+                        (_, Some(Type::Seq(t))) => Some(t.as_ref()),
+                        _ => None,
+                    }
                 };
-                let acc = self.expr(env, &args[1], acc_expect.as_ref(), effect)?;
-                let seq = self.expr(env, &args[2], None, effect)?;
-                let item = self.seq_element(&seq)?;
+                let acc = self.expr(env, &args[1], acc_expect, effect)?;
+                let (item, dense) = self.sequence_or_dense_element(&source)?;
                 self.expr(
                     env,
                     &args[0],
                     Some(&f(acc.clone(), f(item, acc.clone()))),
                     effect,
                 )?;
-                if n == "/:" {
+                if dense {
+                    Type::dense_array(acc)
+                } else if n == "/:" {
                     acc
                 } else {
                     s(acc)
@@ -2345,19 +2411,26 @@ impl Engine<'_> {
                     .enumerate()
                     .map(|(i, x)| {
                         let context = match (n, i) {
-                            ("^", 1) | ("[:" | ":]" | "math.quantize", 0) | ("sect", 0 | 1) => {
-                                Some(p(N))
+                            ("^", 1) if matches!(x, Expr::Int(_) | Expr::Num(_)) => Some(p(N)),
+                            ("[:" | ":]" | "math.quantize", 0) | ("sect", 0 | 1) => Some(p(N)),
+                            ("[:" | ":]", 1) | ("sect", 2) | ("rev" | "=.", 0) | ("+:", 0 | 1) => {
+                                want.map(|w| self.cx.resolve(w)).filter(|t| {
+                                    matches!(t, Type::Seq(_) | Type::Table(_) | Type::Prim(Prim::S))
+                                })
                             }
-                            ("[:" | ":]", 1)
-                            | ("sect", 2)
-                            | ("rev" | "=." | "|:", 0)
-                            | ("+:", 0 | 1) => want.map(|w| self.cx.resolve(w)).filter(|t| {
-                                matches!(t, Type::Seq(_) | Type::Table(_) | Type::Prim(Prim::S))
+                            ("|:", 0) => want.map(|w| self.cx.resolve(w)).filter(|t| {
+                                t.array_element().is_some()
+                                    || matches!(
+                                        t,
+                                        Type::Seq(_) | Type::Table(_) | Type::Prim(Prim::S)
+                                    )
                             }),
-                            (",.", 0) => match want.map(|w| self.cx.resolve(w)) {
-                                Some(t @ Type::Seq(_)) => Some(s(t)),
-                                _ => None,
-                            },
+                            (",.", 0) if matches!(x, Expr::Array(_)) => {
+                                match want.map(|w| self.cx.resolve(w)) {
+                                    Some(t @ Type::Seq(_)) => Some(s(t)),
+                                    _ => None,
+                                }
+                            }
                             ("&:" | "*:", i @ (0 | 1)) => match want.map(|w| self.cx.resolve(w)) {
                                 Some(Type::Seq(pair)) => match *pair {
                                     Type::Tuple(ts) if ts.len() == 2 => Some(s(ts[i].clone())),
@@ -2456,7 +2529,8 @@ impl Engine<'_> {
     }
     fn builtin_types(&mut self, n: &str, xs: &[Type], want: Option<&Type>) -> R<Type> {
         use Prim::*;
-        let arity = crate::builtins::lookup(n)
+        let spec = crate::builtins::lookup(n);
+        let arity = spec
             .map(|x| x.arity)
             .or_else(|| n.starts_with('.').then_some(1));
         if let Some(arity) = arity {
@@ -2464,8 +2538,15 @@ impl Engine<'_> {
                 return Err(self.err(format!("{n} expects {arity} operands")));
             }
         }
+        if spec.is_some_and(|spec| spec.shape == crate::builtins::Shape::Elementwise) {
+            if let Some(ty) = self.array_elementwise(n, xs, want)? {
+                return Ok(ty);
+            }
+        }
         Ok(match n {
-            op if op.starts_with("arr.") && arity.is_some() => self.array_types(op, xs)?,
+            op if op == "form" || (op.starts_with("arr.") && arity.is_some()) => {
+                self.array_types(op, xs, want)?
+            }
             "*=" | "*?" | "df.semi" | "df.anti" | "df.union" | "df.distinct" | "df.select"
             | "df.dropna" | "df.fill" | "df.present" => self.relational_types(n, xs, want)?,
             "df.structural" => {
@@ -2591,14 +2672,20 @@ impl Engine<'_> {
                 out
             }
             "@/" => {
-                let item = self.seq_element(&xs[1])?;
+                let (item, dense) = self.sequence_or_dense_element(&xs[1])?;
                 self.unify(&xs[0], &f(item.clone(), f(item.clone(), item.clone())))?;
-                o(item)
+                if dense {
+                    Type::dense_array(o(item))
+                } else {
+                    o(item)
+                }
             }
             "/:" | "\\:" => {
-                let item = self.seq_element(&xs[2])?;
+                let (item, dense) = self.sequence_or_dense_element(&xs[2])?;
                 self.unify(&xs[0], &f(xs[1].clone(), f(item, xs[1].clone())))?;
-                if n == "/:" {
+                if dense {
+                    Type::dense_array(xs[1].clone())
+                } else if n == "/:" {
                     xs[1].clone()
                 } else {
                     s(xs[1].clone())
@@ -2613,6 +2700,10 @@ impl Engine<'_> {
                     self.unify(&xs[0], &k)?;
                     o(*v)
                 }
+                t if t.array_element().is_some() => {
+                    self.unify(&xs[0], &s(p(N)))?;
+                    o(t.array_element().unwrap().clone())
+                }
                 other => {
                     return Err(self.err(format!(
                         "lookup needs a known sequence, table or dictionary, found {other}"
@@ -2621,6 +2712,11 @@ impl Engine<'_> {
             },
             "@:" | "?:" | "=:" | ">:" | "<:" => {
                 let src = self.cx.resolve(&xs[1]);
+                if let Some(item) = src.array_element().filter(|_| n == "@:") {
+                    let out = self.cx.fresh();
+                    self.unify(&xs[0], &f(item.clone(), out.clone()))?;
+                    return Ok(Type::dense_array(out));
+                }
                 let item = match &src {
                     Type::Seq(x) | Type::Table(x) => x.as_ref().clone(),
                     Type::Dict(_, v) if n == "@:" => v.as_ref().clone(),
@@ -2673,7 +2769,15 @@ impl Engine<'_> {
                 };
                 s(self.numeric_binary(n, &xs[0], &xs[1], w.as_ref())?)
             }
-            "<" | "<=" | ">" | ">=" | "=" | "/=" | "==" => self.binary_rel(n, &xs[0], &xs[1])?,
+            "==" => {
+                let a = self.cx.resolve(&xs[0]);
+                let b = self.cx.resolve(&xs[1]);
+                match (a.array_element(), b.array_element()) {
+                    (Some(a), Some(b)) => self.binary_rel(n, a, b)?,
+                    _ => self.binary_rel(n, &a, &b)?,
+                }
+            }
+            "<" | "<=" | ">" | ">=" | "=" | "/=" => self.binary_rel(n, &xs[0], &xs[1])?,
             "~" => {
                 self.unify(&xs[0], &p(B))?;
                 p(B)
@@ -2735,6 +2839,7 @@ impl Engine<'_> {
             }
             "#" => match self.cx.resolve(&xs[0]) {
                 Type::Seq(_) | Type::Table(_) | Type::Dict(..) | Type::Prim(S) => p(N),
+                t if t.array_element().is_some() => p(N),
                 Type::Var(_) => {
                     return Err(self.unsupported(
                         "cardinality on an unknown collection shape requires annotation",
@@ -2743,8 +2848,12 @@ impl Engine<'_> {
                 t => return Err(self.err(format!("cannot take cardinality of {t}"))),
             },
             "+/" | "*/" | "avg" | "med" | "var" | "sd" | ">/" | "</" | "&&/" | "||/" => {
-                let elt = self.seq_element(&xs[0])?;
-                if matches!(n, "&&/" | "||/") {
+                let (elt, dense) = if matches!(n, "avg" | "med" | "var" | "sd") {
+                    (self.seq_element(&xs[0])?, false)
+                } else {
+                    self.sequence_or_dense_element(&xs[0])?
+                };
+                let ty = if matches!(n, "&&/" | "||/") {
                     self.unify(&elt, &p(B))?;
                     p(B)
                 } else {
@@ -2758,6 +2867,11 @@ impl Engine<'_> {
                         ">/" | "</" => o(elt),
                         _ => elt,
                     }
+                };
+                if dense {
+                    Type::dense_array(ty)
+                } else {
+                    ty
                 }
             }
             "pct" => {
@@ -2851,6 +2965,10 @@ impl Engine<'_> {
                 }
             }
             ",." | "|:" => {
+                let input = self.cx.resolve(&xs[0]);
+                if let Some(elem) = input.array_element() {
+                    return Ok(if n == ",." { s(elem.clone()) } else { input });
+                }
                 let el = self.cx.fresh();
                 self.unify(&xs[0], &s(s(el.clone())))?;
                 if n == ",." {
