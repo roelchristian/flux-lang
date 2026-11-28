@@ -1,0 +1,5 @@
+>> (sq, add, increment);
+
+sq/1 : q -> q := &{ @* * . . };
+add/2 : q -> q -> q := &+;
+increment/1 : q -> q -> q := &+;

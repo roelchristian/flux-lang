@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for the implemented Draft 0.12 language.
+This is the normative reference for the implemented Draft 0.12.1 language.
 Unless marked **Limited** or **Proposed**, the rules describe the behavior
 of the Rust reference interpreter. Limited features have the scope stated
 here. Proposed features are not available and do not reserve a design.
@@ -21,6 +21,7 @@ The following grammar is schematic: `TYPE` is the type grammar below, and a dire
 file        = { import | export | declaration } [ action ";" ] ;
 declaration = name [ "(" parameters ")" ] [ ":" TYPE ] [ qualifiers ]
               ":=" expression ";"
+            | name "/" arity [ ":" TYPE ] [ qualifiers ] ":=" expression ";"
             | name "::" "{" { field ":" TYPE ";" } "}" ";"
             | name "::" "{" variant { variant } "}" ";" ;
 variant     = "|" name { payload-type } ";" ;
@@ -54,6 +55,34 @@ A named callable such as `add(x, y: z): z := + x y;` consumes two expressions wh
 - `@: F XS` maps explicitly over a supported collection. A user-defined function does not automatically lift over a sequence or table.
 
 See [functions and inference](../examples/basics/functions.flx) and [explicit mapping](../examples/basics/collections.flx).
+
+### Declared arity without named parameters
+
+`name/N := EXPR;` declares an ordinary named callable with exactly N
+syntactic operands. The name, slash and unsuffixed decimal integer must
+be adjacent. The count must be positive, and is currently limited to 64
+before the compiler generates applications. The slash here belongs to the header;
+elsewhere `/` remains ordinary prefix division.
+
+The right-hand side is a tacit block, explicit reference, or lambda,
+optionally grouped. The compiler checks that it accepts N successive
+applications. It is evaluated once in the callable body after the N
+operands have evaluated, left to right. It is never an eagerly
+initialized value. An action returned by the function remains suspended.
+
+An optional annotation is the complete curried type:
+`add/2 : q->q->q := &+;`. A signature with more than N leading arrows
+returns a function at the residual type. For example,
+`add/1 : q->q->q := &+;` consumes one operand, and its result
+can be used with `@`. Ordinary signature qualifiers and explicit
+interface requirements apply. Module interfaces publish N, not the
+total number of arrows. References to the callable use `&name`,
+without the slash suffix; its name can also be a tacit atom.
+
+An ordinary value binding such as `f := &{ . };` still requires explicit
+application. A callable `f/1 := &{ . };` instead accepts `f VALUE`.
+See [callable tacit algebra](../examples/tacit/callable.flx) and
+[an imported callable](../examples/modules/callables/demo.flx).
 
 ## Tacit function algebra
 

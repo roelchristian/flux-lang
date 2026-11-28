@@ -5,6 +5,11 @@ This log summarizes material changes. Earlier text and design revisions
 are available through [the repository's commit history](https://github.com/roelchristian/flux-lang/commits/main/);
 obsolete specifications are not kept as duplicate files.
 
+## Draft 0.12.1
+
+- Declare directly callable tacit functions, references and lambdas with
+  adjacent `name/arity` headers. Ordinary function values still use `@`.
+
 ## Draft 0.12
 
 - Add checked dense arrays, explicit broadcasting and rank mapping,

@@ -149,6 +149,10 @@
     "stdout": "(3.50, 2.400)\n(2.34, -2.36)\n0.3333\n"
   },
   {
+    "entry": "examples/modules/callables/demo.flx",
+    "stdout": "(25, 5, 12)\n[1 4 9]\n"
+  },
+  {
     "entry": "examples/modules/geometry/demo.flx",
     "stdout": "(12, 14, 60)\n"
   },
@@ -219,6 +223,10 @@
   {
     "entry": "examples/tacit/arithmetic.flx",
     "stdout": "(16, 64, 20)\n[2 6 12 20]\n"
+  },
+  {
+    "entry": "examples/tacit/callable.flx",
+    "stdout": "(9, 27, 81)\n2\n"
   },
   {
     "entry": "examples/tacit/composition.flx",

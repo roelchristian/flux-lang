@@ -101,6 +101,28 @@ fn line_break(gap: &str) -> bool {
     gap.contains(['\n', '\r'])
 }
 
+/// A slash in a callable header is lexical punctuation, not division.
+fn callable_header(tokens: &[Token]) -> bool {
+    let [name, slash, arity, next, ..] = tokens else {
+        return false;
+    };
+    slash.text == "/"
+        && name.text.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && arity.text.bytes().all(|b| b.is_ascii_digit())
+        && matches!(next.text.as_str(), ":" | ":#" | ":=")
+}
+
+fn header_edge(tokens: &[Token], i: usize) -> bool {
+    i.checked_sub(1)
+        .is_some_and(|head| callable_header(&tokens[head..]))
+        || i.checked_sub(2)
+            .is_some_and(|head| callable_header(&tokens[head..]))
+}
+
 fn spacing(source: &str, tokens: &[Token], i: usize) -> usize {
     let a = &tokens[i - 1].text;
     let b = &tokens[i].text;
@@ -110,7 +132,7 @@ fn spacing(source: &str, tokens: &[Token], i: usize) -> usize {
 
     // Never fuse or separate reference/type punctuation whose parse may
     // depend on raw source adjacency, or manufacture a composite lexeme.
-    if matches!(first, "&" | "#" | "!" | "?" | ":#") && adjacent {
+    if adjacent && (matches!(first, "&" | "#" | "!" | "?" | ":#") || header_edge(tokens, i)) {
         return 0;
     }
     if matches!(second, ";" | "," | ")" | "]") || matches!(first, "(" | "[" | "#[") {
@@ -500,16 +522,21 @@ pub(crate) fn format(
             .iter()
             .map(|t| &t.text)
             .eq(new.iter().map(|t| &t.text))
-            && tokens.windows(2).zip(new.windows(2)).all(|(old, new)| {
-                if (old[0].text == "&" && old[1].text == ".")
-                    || old[0].text == "#"
-                    || nominal_bracket(&old[0], &old[1])
-                {
-                    (old[0].end == old[1].start) == (new[0].end == new[1].start)
-                } else {
-                    true
-                }
-            })
+            && tokens
+                .windows(2)
+                .zip(new.windows(2))
+                .enumerate()
+                .all(|(j, (old, new))| {
+                    if (old[0].text == "&" && old[1].text == ".")
+                        || old[0].text == "#"
+                        || nominal_bracket(&old[0], &old[1])
+                        || header_edge(&tokens, j + 1)
+                    {
+                        (old[0].end == old[1].start) == (new[0].end == new[1].start)
+                    } else {
+                        true
+                    }
+                })
     }) {
         return Err(Error::new(
             base,
@@ -517,4 +544,28 @@ pub(crate) fn format(
         ));
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod callable_tests {
+    use super::*;
+
+    #[test]
+    fn header_gaps_survive_without_fusing_division_or_signed_literals() {
+        let source =
+            "f/2:z->z->z := &{ @* - . . }; -- same header\ng/1 := &f;\nvalue := f / -2q 2q 4z;";
+        let out = format(source, 0, &[]).unwrap();
+        assert!(out.contains("f/2:"), "{out}");
+        assert!(out.contains("g/1 :="), "{out}");
+        assert!(out.contains("f / -2q 2q 4z;"), "{out}");
+        assert!(out.contains("-- same header"), "{out}");
+        assert_eq!(format(&out, 0, &[]).unwrap(), out);
+    }
+
+    #[test]
+    fn separated_slash_never_becomes_header_punctuation() {
+        let source = "f / 2 := &g;";
+        let out = format(source, 0, &[]).unwrap();
+        assert!(out.starts_with("f / 2"), "{out}");
+    }
 }

@@ -1,0 +1,21 @@
+--- Direct calls do not require explicit parameter names.
+sq/1 := &{ @* * . . };
+cube/1 := &{ @? * sq };
+fourth/1 := &{ @. sq sq };
+
+tree['a] :: {
+    | leaf 'a;
+    | node tree['a] tree['a];
+};
+size/1 : tree['a] -> n := \ t -> ?= t {
+    leaf _   : 1n;
+    node l r : + size l size r;
+};
+
+!{
+    ^{
+        ^? ! print (sq 3, cube 3, fourth 3);
+        ^? ! print size (node (leaf "north") (leaf "south"));
+        ()
+    }
+};
