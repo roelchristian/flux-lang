@@ -1,5 +1,6 @@
 //! Strict expression, block, pattern and suspended-action execution.
 use super::{
+    array_builder,
     control::{succeeded, Control, Failure},
     evidence::{contains_open_row, dynamic_schema_operation, result_type},
     primitives::witnessed_op,
@@ -21,19 +22,7 @@ impl Eval<'_> {
     pub(in crate::hir_eval) fn eval(&mut self, id: ExprId, env: usize) -> R<V> {
         let p = self.p;
         let node = p.node(id);
-        self.tick(node.span)?;
-        if self.depth >= self.max_depth {
-            return Err(error(
-                node.span,
-                format!(
-                    "prototype nesting or recursion limit ({}) exceeded",
-                    self.max_depth
-                ),
-            ));
-        }
-        self.depth += 1;
-        let r = self.eval_kind(id, env);
-        self.depth -= 1;
+        let r = self.with_expression(node.span, |eval| eval.eval_kind(id, env));
         r.and_then(|v| {
             let checked = if matches!(node.kind, ExprKind::Call(Target::Builtin(_), _)) {
                 wide::guard_embedded(v)
@@ -133,8 +122,13 @@ impl Eval<'_> {
                 }
             }
             ExprKind::Call(target, ids) => {
-                if matches!(target, Target::Builtin(CoreOp::Negate | CoreOp::Not))
-                    && n.lift_mode == Some(LiftMode::LeftArray)
+                if matches!(target, Target::Builtin(CoreOp::ArrayForm)) {
+                    if let Some(result) = array_builder::try_form_range(self, id, env, ids) {
+                        return result;
+                    }
+                }
+                if n.lift_mode == Some(LiftMode::LeftArray)
+                    && matches!(target, Target::Builtin(op) if numerical_plan::can_start(*op))
                 {
                     if let Some(result) = numerical_plan::try_eval(self, id, env) {
                         return result;

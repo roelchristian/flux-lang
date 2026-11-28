@@ -12,7 +12,7 @@ mod scan;
 pub(in crate::hir_eval) use contraction::{dot, matmul};
 pub(in crate::hir_eval) use pointwise::{binary, dense_work, unary};
 pub(in crate::hir_eval) use reduction::intrinsic;
-pub(in crate::hir_eval) use scan::{seeded, ScanPlan};
+pub(in crate::hir_eval) use scan::{mapped, seeded, unseeded, ScanPlan};
 
 type View<'a, T> = (&'a [T], &'a [usize], usize);
 type Fast<T> = Option<R<T>>;
@@ -174,6 +174,94 @@ impl<'a, T: Packed> Reader<'a, T> {
             }
         }
     }
+}
+
+// Enumerate one checked broadcast layout in logical row-major order.
+struct Cells<'a, T> {
+    reader: Reader<'a, T>,
+    shape: &'a [usize],
+    coords: [usize; MAX_RANK],
+    offset: usize,
+    index: usize,
+    len: usize,
+}
+
+impl<'a, T: Packed> Cells<'a, T> {
+    fn new(reader: Reader<'a, T>, shape: &'a [usize], len: usize) -> Self {
+        let offset = match &reader {
+            Reader::Strided { offset, .. } => *offset,
+            _ => 0,
+        };
+        Self {
+            reader,
+            shape,
+            coords: [0; MAX_RANK],
+            offset,
+            index: 0,
+            len,
+        }
+    }
+}
+
+impl<T: Packed> Iterator for Cells<'_, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        if self.index == self.len {
+            return None;
+        }
+        let value = match &self.reader {
+            Reader::Constant(value) => *value,
+            Reader::Linear(buffer) => buffer[self.index],
+            Reader::Strided {
+                buffer, strides, ..
+            } => {
+                let value = buffer[self.offset];
+                if self.index + 1 < self.len {
+                    for i in (0..self.shape.len()).rev() {
+                        if self.coords[i] + 1 < self.shape[i] {
+                            self.coords[i] += 1;
+                            self.offset += strides[i];
+                            break;
+                        }
+                        self.offset -= self.coords[i] * strides[i];
+                        self.coords[i] = 0;
+                    }
+                }
+                value
+            }
+        };
+        self.index += 1;
+        Some(value)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.len - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T: Packed> ExactSizeIterator for Cells<'_, T> {}
+
+fn dense_cells<T: Packed>(dense: &Dense) -> Option<Cells<'_, T>> {
+    let shape = dense.shape();
+    Some(Cells::new(
+        Reader::new(Source::Array(dense), shape)?,
+        shape,
+        dense.len(),
+    ))
+}
+
+pub(in crate::hir_eval) fn real_cells(
+    dense: &Dense,
+) -> Option<impl ExactSizeIterator<Item = f64> + '_> {
+    dense_cells(dense)
+}
+
+pub(in crate::hir_eval) fn bool_cells(
+    dense: &Dense,
+) -> Option<impl ExactSizeIterator<Item = bool> + '_> {
+    dense_cells(dense)
 }
 
 fn finite_real(x: f64) -> NumericResult<f64> {

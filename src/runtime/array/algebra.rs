@@ -147,6 +147,12 @@ pub(super) fn along_axis(
             return result;
         }
     }
+    if let LaneOp::Reduce { callback, item } = op {
+        let plan = packed::ScanPlan::new(input, axis, shape.clone(), false, span);
+        if let Some(result) = packed::unseeded(plan, item, callback, eval) {
+            return result;
+        }
+    }
     let lease = resources::reserve_for::<V>(n).map_err(|message| error(span, message))?;
     let lanes = if scan { n / (width + 1) } else { n };
     let stride = input.shape[axis + 1..].iter().product::<usize>();

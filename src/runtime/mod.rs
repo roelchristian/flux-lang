@@ -1,7 +1,7 @@
 //! Executable core for owned typed HIR. This backend never dispatches on surface AST.
 
 use crate::{
-    hir::{CoreOp, ExprId, ExprKind, HirProgram, LiftMode, Span, TableSchema, Target},
+    hir::{CoreOp, HirProgram, LiftMode, Span, TableSchema},
     types::{Prim, Type},
 };
 use num_integer::Integer;

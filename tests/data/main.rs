@@ -9,6 +9,7 @@ mod numerical_fusion;
 mod numerical_methods;
 mod numerics;
 mod optimization_baseline;
+mod packed_builder;
 mod relations;
 mod resource_limits;
 mod row_runtime;

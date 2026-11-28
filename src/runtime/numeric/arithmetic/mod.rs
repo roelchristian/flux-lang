@@ -13,7 +13,7 @@ pub(in crate::hir_eval) use exact::{
 pub(in crate::hir_eval) use lift::{lift, lift_one};
 #[cfg(test)]
 pub(in crate::hir_eval) use range::range;
-pub(in crate::hir_eval) use range::{range_with_fuel, subtract_work};
+pub(in crate::hir_eval) use range::{inline_range_len, range_with_fuel, subtract_work};
 pub(in crate::hir_eval) use scalar::{finite, numeric_identity, numeric_reduce, scalar_binary};
 pub(in crate::hir_eval) use statistics::stats;
 #[cfg(test)]

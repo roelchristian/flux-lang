@@ -11,6 +11,7 @@ use std::{
     rc::Rc,
 };
 mod application;
+mod array_builder;
 mod control;
 mod evidence;
 mod execution;
@@ -54,6 +55,23 @@ pub(in crate::hir_eval) struct Eval<'a> {
 }
 
 impl Eval<'_> {
+    fn with_expression<T>(&mut self, span: Span, run: impl FnOnce(&mut Self) -> R<T>) -> R<T> {
+        self.tick(span)?;
+        if self.depth >= self.max_depth {
+            return Err(error(
+                span,
+                format!(
+                    "prototype nesting or recursion limit ({}) exceeded",
+                    self.max_depth
+                ),
+            ));
+        }
+        self.depth += 1;
+        let result = run(self);
+        self.depth -= 1;
+        result
+    }
+
     fn frame(&mut self, parent: usize) -> usize {
         let id = self.frames.len();
         self.frames.push(Frame {

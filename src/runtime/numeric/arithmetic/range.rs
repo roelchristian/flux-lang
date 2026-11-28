@@ -17,36 +17,42 @@ pub(in crate::hir_eval) fn subtract_work(fuel: &mut usize, units: usize) -> Nume
     Ok(())
 }
 
+const TOO_BIG: &str = "prototype range collection limit exceeded";
+
+fn range_count(delta: Option<usize>) -> NumericResult<usize> {
+    delta
+        .and_then(|d| d.checked_add(1))
+        .filter(|&n| n <= resources::limits().max_elements)
+        .ok_or(TOO_BIG)
+}
+
+/// Logical length for an inline exact range, independent of physical storage.
+pub(in crate::hir_eval) fn inline_range_len(lo: i128, hi: i128) -> NumericResult<usize> {
+    if lo > hi {
+        return Ok(0);
+    }
+    range_count(hi.checked_sub(lo).and_then(|n| usize::try_from(n).ok()))
+}
+
 pub(in crate::hir_eval) fn range_with_fuel(
     lo: &V,
     hi: &V,
     d: Domain,
     fuel: Option<&mut usize>,
 ) -> NumericResult<V> {
-    const TOO_BIG: &str = "prototype range collection limit exceeded";
-    let max_elements = resources::limits().max_elements;
-    let count = |delta: usize| {
-        delta
-            .checked_add(1)
-            .filter(|&n| n <= max_elements)
-            .ok_or(TOO_BIG)
-    };
     if let (V::Exact(lo), V::Exact(hi)) = (lo, hi) {
         let (lo, hi) = (lo.integral()?, hi.integral()?);
-        if lo > hi {
+        let len = inline_range_len(lo, hi)?;
+        if len == 0 {
             return Ok(V::Sequence(Rc::from([])));
         }
-        let delta = hi
-            .checked_sub(lo)
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or(TOO_BIG)?;
-        return collect_range(count(delta)?, fuel, (lo..=hi).map(|i| Ok(exact_i128(i, d))));
+        return collect_range(len, fuel, (lo..=hi).map(|i| Ok(exact_i128(i, d))));
     }
     let (mut lo, hi) = (wide::integral(lo)?, wide::integral(hi)?);
     if lo > hi {
         return Ok(V::Sequence(Rc::from([])));
     }
-    let len = count((&hi - &lo).to_usize().ok_or(TOO_BIG)?)?;
+    let len = range_count((&hi - &lo).to_usize())?;
     // Keep the inherited aggregate cap on BigInt endpoint copies.
     if lo.bits().max(hi.bits()).saturating_mul(len as u64) > 64 * 1024 * 1024 * 8 {
         return Err("wide range resource limit exceeded (64 MiB of integer data)");
