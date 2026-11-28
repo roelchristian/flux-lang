@@ -5,7 +5,7 @@ use flux_lang::{
     semantic::{self, Mode, Policy},
 };
 
-fn checked(source: &str) -> hir::HirProgram {
+pub(super) fn checked(source: &str) -> hir::HirProgram {
     let program = parser::parse(source).unwrap();
     semantic::prepare(&program, Mode::Script, Policy::TypedOnly)
         .unwrap()

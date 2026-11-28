@@ -1,91 +1,40 @@
+use super::script::Script;
 use std::{
     fs,
     io::Write,
-    path::PathBuf,
-    process::{Command, Output, Stdio},
-    sync::atomic::{AtomicUsize, Ordering},
+    process::{Output, Stdio},
 };
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Fixture(PathBuf);
-
-impl Fixture {
-    fn new(source: &str) -> Self {
-        loop {
-            let root = std::env::temp_dir().join(format!(
-                "flux-stdlib-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::create_dir(&root) {
-                Ok(()) => {
-                    fs::write(root.join("test.flx"), source).expect("write fixture");
-                    return Self(root);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("create fixture directory: {e}"),
-            }
-        }
-    }
-
-    fn cli(
-        &self,
-        mode: Option<&str>,
-        program_args: &[&str],
-        input: &[u8],
-        env: &[(&str, &str)],
-    ) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_flux"));
-        command
-            .current_dir(&self.0)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .envs(env.iter().copied());
-        if let Some(mode) = mode {
-            command.arg(mode);
-        }
-        command.arg("test.flx");
-        if !program_args.is_empty() {
-            command.arg("--").args(program_args);
-        }
-        let mut child = command.spawn().expect("invoke Flux");
-        if !input.is_empty() {
-            child
-                .stdin
-                .take()
-                .expect("Flux stdin")
-                .write_all(input)
-                .expect("write input");
-        }
-        child.wait_with_output().expect("wait for Flux output")
-    }
-
-    fn run(&self, mode: Option<&str>) -> Output {
-        self.cli(mode, &[], b"", &[])
-    }
+fn script(source: &str) -> Script {
+    Script::new("flux-stdlib", "test.flx", source)
 }
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+fn cli(
+    script: &Script,
+    mode: Option<&str>,
+    program_args: &[&str],
+    input: &[u8],
+    env: &[(&str, &str)],
+) -> Output {
+    let mut command = script.command(mode);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .envs(env.iter().copied());
+    if !program_args.is_empty() {
+        command.arg("--").args(program_args);
     }
-}
-
-fn checked(f: &Fixture) {
-    let out = f.run(Some("check"));
-    assert!(
-        out.status.success() && out.stdout.is_empty(),
-        "check: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let out = f.run(Some("hir"));
-    assert!(
-        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("HirProgram"),
-        "hir: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let mut child = command.spawn().expect("invoke Flux");
+    if !input.is_empty() {
+        child
+            .stdin
+            .take()
+            .expect("Flux stdin")
+            .write_all(input)
+            .expect("write input");
+    }
+    child.wait_with_output().expect("wait for Flux output")
 }
 
 fn expect_output(out: Output, expected: &str) {
@@ -99,18 +48,18 @@ fn expect_output(out: Output, expected: &str) {
 
 #[test]
 fn prelude_print_stays_suspended_until_explicit_execution() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 pending := print "do not print this";
 !{ ^{ ^? ! print "Salve, munde."; () } };
 "#,
     );
-    checked(&f);
+    f.check_hir();
     for mode in [Some("run-hir"), None] {
         expect_output(f.run(mode), "Salve, munde.\n");
     }
 
-    let f = Fixture::new(r#"!{ ! print "must handle the result"; () };"#);
+    let f = script(r#"!{ ! print "must handle the result"; () };"#);
     for mode in [Some("check"), Some("hir"), None] {
         let out = f.run(mode);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -123,7 +72,7 @@ pending := print "do not print this";
 
 #[test]
 fn optional_callbacks_run_only_for_present_values_and_can_bind_absence() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "opt";
 bad(x:q):q := / 1q 0q;
@@ -140,7 +89,7 @@ choose(x:q):?q := ?{ = x 0q : ?0; _ : ?1 x; };
 };
 "#,
     );
-    checked(&f);
+    f.check_hir();
     let out = f.run(Some("run-hir"));
     expect_output(out, "(?0, ?1 3)\n(?0, ?1 2, ?0)\n(ok 3, err missing)\n");
 }
@@ -173,8 +122,8 @@ fn result_callbacks_are_branch_selective_and_sequence_keeps_the_first_error() {
     }}
 }};"#
     );
-    let f = Fixture::new(&source);
-    checked(&f);
+    let f = script(&source);
+    f.check_hir();
     expect_output(
         f.run(Some("run-hir")),
         "(err bad first, ok 3)\n(ok 3, err wrapped bad converted)\n(err bad first, ([1 2], [bad first bad second]))\n(1b, 0b, ?0, ?1 5)\nok [1 2]\n",
@@ -183,7 +132,7 @@ fn result_callbacks_are_branch_selective_and_sequence_keeps_the_first_error() {
 
 #[test]
 fn result_error_mapping_keeps_the_original_raise_location() {
-    let f = Fixture::new(&format!(
+    let f = script(&format!(
         r#"{RESULT_PRELUDE}
 !{{
     ^{{
@@ -193,7 +142,7 @@ fn result_error_mapping_keeps_the_original_raise_location() {
     }}
 }};"#
     ));
-    checked(&f);
+    f.check_hir();
     let out = f.run(Some("run-hir"));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1));
@@ -211,7 +160,7 @@ fn result_error_mapping_keeps_the_original_raise_location() {
 
 #[test]
 fn process_args_env_pid_and_readln_have_explicit_effects() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "io";
 << "sys";
@@ -230,10 +179,11 @@ fn process_args_env_pid_and_readln_have_explicit_effects() {
 };
 "#,
     );
-    checked(&f);
+    f.check_hir();
     for mode in [None, Some("run-hir")] {
         expect_output(
-            f.cli(
+            cli(
+                &f,
                 mode,
                 &["--literal", "two words"],
                 b"hello\r\n\nlast\r",
@@ -246,7 +196,7 @@ fn process_args_env_pid_and_readln_have_explicit_effects() {
 
 #[test]
 fn readln_non_utf8_is_recoverable_not_eof() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "io";
 !{ ^{
@@ -256,16 +206,16 @@ fn readln_non_utf8_is_recoverable_not_eof() {
 } };
 "#,
     );
-    checked(&f);
+    f.check_hir();
     expect_output(
-        f.cli(Some("run-hir"), &[], &[255, b'\n'], &[]),
+        cli(&f, Some("run-hir"), &[], &[255, b'\n'], &[]),
         "?1 stdin\n",
     );
 }
 
 #[test]
 fn filesystem_paths_are_lexical_and_actions_do_not_clobber() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "fs";
 << "io";
@@ -285,19 +235,19 @@ pending := fs.mkdir "pending";
 } };
 "#,
     );
-    checked(&f);
-    assert!(!f.0.join("dir").exists());
+    f.check_hir();
+    assert!(!f.path().join("dir").exists());
     expect_output(
         f.run(Some("run-hir")),
         "([alpha zeta], ?1 child, ?0, 0b)\n0b\ndir\n",
     );
-    assert_eq!(fs::read_to_string(f.0.join("dir/alpha")).unwrap(), "a");
-    assert!(!f.0.join("pending").exists());
+    assert_eq!(fs::read_to_string(f.path().join("dir/alpha")).unwrap(), "a");
+    assert!(!f.path().join("pending").exists());
 }
 
 #[test]
 fn unicode_strings_and_regex_use_checked_pure_operations() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "str";
 << "rx";
@@ -309,7 +259,7 @@ fn unicode_strings_and_regex_use_checked_pure_operations() {
 } };
 "#,
     );
-    checked(&f);
+    f.check_hir();
     expect_output(
         f.run(Some("run-hir")),
         "(STRASSE, i\u{0307}, ok)\n([a  b ], a||b, [ a é ])\n(ok ?1 Écho, ok ?0, err badpattern [)\n",
@@ -318,7 +268,7 @@ fn unicode_strings_and_regex_use_checked_pure_operations() {
 
 #[test]
 fn gregorian_dates_use_unix_days_and_reject_invalid_leap_days() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "dt";
 !{ ^{
@@ -328,7 +278,7 @@ fn gregorian_dates_use_unix_days_and_reject_invalid_leap_days() {
 } };
 "#,
     );
-    checked(&f);
+    f.check_hir();
     expect_output(
         f.run(Some("run-hir")),
         "(ok 0, ok -1, ok -719162, ok 1969-12-31)\n(ok 11016, err baddate 1900-02-29, err baddate 0000-01-01, err baddate 2932897)\n",
@@ -337,16 +287,16 @@ fn gregorian_dates_use_unix_days_and_reject_invalid_leap_days() {
 
 #[test]
 fn stat_namespace_reuses_existing_exact_reductions() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "stat" : stats1;
 !{ ^{ ^? ! print (stats1.mean [1q 2q],stats1.pct 25q [6q 0q],stats1.sd [4q 4q]); () } };
 "#,
     );
-    checked(&f);
+    f.check_hir();
     expect_output(f.run(Some("run-hir")), "(?1 3/2, ?1 3/2, ?1 0)\n");
 
-    let f = Fixture::new(r#"<< "stat"; x := stat.cor [1q 2q] [1q 2q]; !{ () };"#);
+    let f = script(r#"<< "stat"; x := stat.cor [1q 2q] [1q 2q]; !{ () };"#);
     let check = f.run(Some("check"));
     let stderr = String::from_utf8_lossy(&check.stderr);
     assert!(
@@ -357,7 +307,7 @@ fn stat_namespace_reuses_existing_exact_reductions() {
 
 #[test]
 fn json_round_trips_typed_nominal_and_structural_values_without_losing_precision() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "json";
 err :: { | serial jsonerr; | output ioerr; };
@@ -373,7 +323,7 @@ row :: { price:d; amount:z; rate:q; tag:?s; parts:[z]; };
 } };
 "#,
     );
-    checked(&f);
+    f.check_hir();
     expect_output(
         f.run(Some("run-hir")),
         "{\"price\":123.4500,\"amount\":340282366920938463463374607431768211457,\"rate\":0.125,\"tag\":null,\"parts\":[2,1]}\n{\"count\":2,\"name\":\"office\"}\n",
@@ -382,7 +332,7 @@ row :: { price:d; amount:z; rate:q; tag:?s; parts:[z]; };
 
 #[test]
 fn json_errors_distinguish_syntax_and_shape_and_keep_types_static() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "json";
 << "res";
@@ -400,7 +350,7 @@ none:?s := ?0;
 } };
 "#,
     );
-    checked(&f);
+    f.check_hir();
     expect_output(
         f.run(Some("run-hir")),
         "(syntax, shape, shape)\n(shape, ok)\n(shape, shape)\n",
@@ -412,7 +362,7 @@ none:?s := ?0;
         r#"x:r^jsonerr := json.decode "1";"#,
     ] {
         let source = format!("<< \"json\"; {binding} !{{ () }};");
-        let f = Fixture::new(&source);
+        let f = script(&source);
         let checked = f.run(Some("check"));
         let stderr = String::from_utf8_lossy(&checked.stderr);
         assert!(
@@ -438,8 +388,8 @@ fn oversized_regex_and_json_inputs_fail_recoverably() {
 }} }};
 "#
     );
-    let f = Fixture::new(&source);
-    checked(&f);
+    let f = script(&source);
+    f.check_hir();
     expect_output(f.run(Some("run-hir")), "(0b, 0b)\n");
 }
 
@@ -464,8 +414,8 @@ decode(s:s):[d]^jsonerr := json.decode s;
     ^= ! print (status,res.ok (decode "{at_limit}")) {{ _ : (); }};
 }};"#
     );
-    let f = Fixture::new(&source);
-    checked(&f);
+    let f = script(&source);
+    f.check_hir();
     for mode in [None, Some("run-hir")] {
         expect_output(
             f.run(mode),

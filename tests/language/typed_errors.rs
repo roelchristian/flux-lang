@@ -1,45 +1,21 @@
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use crate::support::{flux, TempDir};
+use std::{fs, process::Output};
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Script(PathBuf);
+struct Script(TempDir);
 
 impl Script {
     fn new(source: &str) -> Self {
-        loop {
-            let root = std::env::temp_dir().join(format!(
-                "flux-draft041-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::create_dir(&root) {
-                Ok(()) => {
-                    fs::write(root.join("test.flx"), source).expect("write isolated script");
-                    return Self(root);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("create fixture directory: {e}"),
-            }
-        }
+        let dir = TempDir::new("flux-typed-errors");
+        fs::write(dir.join("test.flx"), source).expect("write isolated script");
+        Self(dir)
     }
 
     fn cli(&self, mode: &str) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_flux"))
-            .current_dir(&self.0)
+        flux()
+            .current_dir(self.0.path())
             .args([mode, "test.flx"])
             .output()
             .expect("invoke public CLI")
-    }
-}
-
-impl Drop for Script {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
 

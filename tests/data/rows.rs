@@ -1,78 +1,12 @@
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use super::script::Script;
+use std::fs;
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Fixture(PathBuf);
-
-impl Fixture {
-    fn new(source: &str) -> Self {
-        loop {
-            let dir = std::env::temp_dir().join(format!(
-                "flux-rows-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::create_dir(&dir) {
-                Ok(()) => {
-                    fs::write(dir.join("main.flx"), source).expect("main fixture");
-                    return Self(dir);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("fixture directory: {e}"),
-            }
-        }
-    }
-
-    fn write(&self, filename: &str, source: &str) {
-        fs::write(self.0.join(filename), source).expect("module fixture");
-    }
-
-    fn cli(&self, mode: &str) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_flux"));
-        command.current_dir(&self.0);
-        if !mode.is_empty() {
-            command.arg(mode);
-        }
-        command.arg("main.flx").output().expect("execute Flux")
-    }
-
-    fn accepts(&self, expected: &str) {
-        for mode in ["check", "hir", "run-hir", ""] {
-            let out = self.cli(mode);
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            assert!(
-                out.status.success() && stderr.is_empty(),
-                "{mode}: {stderr}"
-            );
-            match mode {
-                "check" => assert!(stdout.is_empty(), "{stdout}"),
-                "hir" => assert!(stdout.contains("HirProgram"), "{stdout}"),
-                _ => assert_eq!(stdout, expected, "{mode}"),
-            }
-        }
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
+fn script(source: &str) -> Script {
+    Script::new("flux-rows", "main.flx", source)
 }
 
 fn rejects(source: &str, words: &[&str]) {
-    let out = Fixture::new(source).cli("check");
-    let error = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success() && out.stdout.is_empty(), "{source}");
-    assert!(
-        words.iter().all(|word| error.contains(word)),
-        "expected {words:?}: {error}"
-    );
+    super::script::rejects(&script(source), source, words);
 }
 
 const KEEP: &str = r#"
@@ -81,7 +15,7 @@ keep(t:#.{ value:q; | ~r }):#.{ value:q; | ~r } := ?: (> .value t 0q) t;
 
 #[test]
 fn one_open_record_signature_projects_from_different_closed_rows() {
-    Fixture::new(
+    script(
         r#"
 score(x:.{ value:q; | ~r }):q := .value x;
 a := .{ label:="west"; value:=1.25q; };
@@ -94,7 +28,7 @@ b := .{ value:=2.5q; flag:=1b; code:=7n; };
 
 #[test]
 fn one_filter_preserves_distinct_closed_table_schemas_in_direct_and_first_class_calls() {
-    Fixture::new(&format!(
+    script(&format!(
         "{KEEP}{}",
         r#"
 a:#.{ id:s; value:q; } := #[.{ id:="ok";value:=2q; } .{ id:="negative";value:=-1q; }];
@@ -110,7 +44,7 @@ b:#.{ value:q; flag:b; } := #[.{ value:=3q;flag:=1b; } .{ value:=0q;flag:=0b; }]
 
 #[test]
 fn empty_filtered_table_keeps_all_column_names_in_checked_order() {
-    let fixture = Fixture::new(&format!(
+    let fixture = script(&format!(
         "<< \"csv\";\n{KEEP}{}",
         r#"
 problem :: { | file csverr; | display ioerr; };
@@ -123,9 +57,9 @@ empty:#.{ label:s; value:q; flag:b; } := #[];
 } };
 "#
     ));
-    let filename = fixture.0.join("empty.csv");
+    let filename = fixture.path().join("empty.csv");
     for mode in ["check", "hir", "run-hir", ""] {
-        let out = fixture.cli(mode);
+        let out = fixture.run((!mode.is_empty()).then_some(mode));
         assert!(
             out.status.success(),
             "{mode}: {}",
@@ -150,7 +84,7 @@ empty:#.{ label:s; value:q; flag:b; } := #[];
 
 #[test]
 fn explicit_structural_view_retains_named_table_order_values_and_empty_schema() {
-    let fixture = Fixture::new(&format!(
+    let fixture = script(&format!(
         "<< \"df\";\n<< \"csv\";\n{KEEP}{}",
         r#"
 reading :: { label:s; value:q; flag:b; };
@@ -165,9 +99,9 @@ empty:#reading := #[];
 } };
 "#
     ));
-    let filename = fixture.0.join("view.csv");
+    let filename = fixture.path().join("view.csv");
     for mode in ["check", "hir", "run-hir", ""] {
-        let out = fixture.cli(mode);
+        let out = fixture.run((!mode.is_empty()).then_some(mode));
         assert!(
             out.status.success(),
             "{mode}: {}",
@@ -188,7 +122,7 @@ empty:#reading := #[];
 
 #[test]
 fn qualified_open_row_interface_reinstantiates_for_each_caller() {
-    let fixture = Fixture::new(
+    let fixture = script(
         r#"
 << "filters.flx" : f;
 a:#.{ label:s; value:q; } := #[.{label:="x";value:=1q;}];
@@ -246,7 +180,7 @@ plain := keep data;
 
 #[test]
 fn open_key_fields_suffice_for_join_and_group_over_different_row_shapes() {
-    Fixture::new(
+    script(
         r#"
 << "df";
 overlap(l:#.{ key:s; | ~l },r:#.{ key:s; | ~r }):n :=
@@ -280,7 +214,7 @@ bad := cols .{ value := [1q 2q]; extra := "not a sequence"; };
 
 #[test]
 fn roundtrip_uses_the_selected_inputs_order_not_another_shared_row_witness() {
-    let fixture = Fixture::new(
+    let fixture = script(
         r#"
 << "csv";
 second(a:#.{ value:q; | ~r },b:#.{ value:q; | ~r }):#.{ value:q; | ~r } := #: :# b;
@@ -289,14 +223,14 @@ r:#.{ value:q; tag:s; } := #[];
 !{ ^{ ^? ! csv.write "ordered.csv" (second l r); () } };
 "#,
     );
-    let out = fixture.cli("run-hir");
+    let out = fixture.run(Some("run-hir"));
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(
-        fs::read_to_string(fixture.0.join("ordered.csv"))
+        fs::read_to_string(fixture.path().join("ordered.csv"))
             .unwrap()
             .replace("\r\n", "\n"),
         "value,tag\n"

@@ -28,6 +28,8 @@ cargo clippy --locked --all-features --all-targets -- -D warnings
 cargo build --locked --release
 ```
 
+Integration tests are grouped into `compiler`, `language`, `data`,
+`tooling` and `examples` targets (`cargo test --locked --test NAME`).
 The [example harness](../examples/README.md#inputs-and-verification)
 runs ordinary and strict HIR paths. Compare two release binaries with
 `python3 benchmarks/differential.py BEFORE AFTER --typed-oracle`;

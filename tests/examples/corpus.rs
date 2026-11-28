@@ -1,37 +1,12 @@
+use crate::support::{flux, TempDir};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
-    process::{Command, Output, Stdio},
-    sync::atomic::{AtomicUsize, Ordering},
+    process::{Output, Stdio},
 };
-
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Temp(PathBuf);
-impl Temp {
-    fn new() -> Self {
-        loop {
-            let path = std::env::temp_dir().join(format!(
-                "flux-corpus-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::create_dir(&path) {
-                Ok(()) => return Self(path),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("create example work directory: {e}"),
-            }
-        }
-    }
-}
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 
 fn relative(path: &str) -> &Path {
     let path = Path::new(path);
@@ -85,7 +60,7 @@ fn verify_files(dir: &Path, expected: &BTreeMap<PathBuf, Vec<u8>>, context: &str
 }
 
 fn run(dir: &Path, spec: &Value, mode: &str) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_flux"));
+    let mut cmd = flux();
     cmd.current_dir(dir.join(relative(spec["cwd"].as_str().unwrap_or("."))));
     if !mode.is_empty() {
         cmd.arg(mode);
@@ -140,7 +115,7 @@ fn verify(output: &Output, expected: &Value, context: &str) {
 fn every_public_example_checks_and_runs_with_its_manifest_contract() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest: Vec<Value> =
-        serde_json::from_str(include_str!("../examples/manifest.json")).unwrap();
+        serde_json::from_str(include_str!("../../examples/manifest.json")).unwrap();
     let mut all = BTreeSet::new();
     walk(&repo.join("examples"), &mut |path, _| {
         if path.extension().is_some_and(|e| e == "flx") {
@@ -150,11 +125,7 @@ fn every_public_example_checks_and_runs_with_its_manifest_contract() {
     // Include library-only modules as well as executable entry points.
     // All tracked Flux source uses LF, including Windows checkouts.
     for path in &all {
-        let out = Command::new(env!("CARGO_BIN_EXE_flux"))
-            .args(["fmt", "--check"])
-            .arg(path)
-            .output()
-            .unwrap();
+        let out = flux().args(["fmt", "--check"]).arg(path).output().unwrap();
         assert!(
             out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
             "noncanonical example {path:?}: {}",
@@ -186,21 +157,21 @@ fn every_public_example_checks_and_runs_with_its_manifest_contract() {
         );
 
         for mode in ["", "run-hir"] {
-            let dir = Temp::new();
+            let dir = TempDir::new("corpus");
             for (name, contents) in &example_files {
-                let file = dir.0.join("examples").join(name);
+                let file = dir.join("examples").join(name);
                 fs::create_dir_all(file.parent().unwrap()).unwrap();
                 fs::write(file, contents).unwrap();
             }
             let context = format!("{entry:?} [{mode}]");
-            let initial = snapshot(&dir.0);
+            let initial = snapshot(dir.path());
             verify(
-                &run(&dir.0, &spec, "check"),
+                &run(dir.path(), &spec, "check"),
                 &serde_json::json!({"stdout": ""}),
                 &context,
             );
-            verify_files(&dir.0, &initial, &context);
-            verify(&run(&dir.0, &spec, mode), &spec, &context);
+            verify_files(dir.path(), &initial, &context);
+            verify(&run(dir.path(), &spec, mode), &spec, &context);
             let mut expected_files = initial;
             if let Some(files) = spec["files"].as_object() {
                 let cwd = relative(spec["cwd"].as_str().unwrap_or("."));
@@ -208,7 +179,7 @@ fn every_public_example_checks_and_runs_with_its_manifest_contract() {
                     let expected =
                         fs::read(repo.join(relative(expected.as_str().unwrap()))).unwrap();
                     let generated = cwd.join(relative(name));
-                    let bytes = fs::read(dir.0.join(&generated)).unwrap();
+                    let bytes = fs::read(dir.join(&generated)).unwrap();
                     let canonical =
                         |bytes: &[u8]| std::str::from_utf8(bytes).unwrap().replace("\r\n", "\n");
                     assert_eq!(canonical(&bytes), canonical(&expected), "{context}: {name}");
@@ -226,10 +197,10 @@ fn every_public_example_checks_and_runs_with_its_manifest_contract() {
                         .is_none());
                 }
             }
-            verify_files(&dir.0, &expected_files, &context);
+            verify_files(dir.path(), &expected_files, &context);
             if let Some(rerun) = spec.get("rerun") {
-                verify(&run(&dir.0, &spec, mode), rerun, &context);
-                verify_files(&dir.0, &expected_files, &context);
+                verify(&run(dir.path(), &spec, mode), rerun, &context);
+                verify_files(dir.path(), &expected_files, &context);
             }
         }
     }

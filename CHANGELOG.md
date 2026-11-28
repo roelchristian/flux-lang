@@ -8,7 +8,7 @@ obsolete specifications are not kept as duplicate files.
 ## Unreleased
 
 - Consolidate shared Rust internals and streamline the reference and example
-  index without changing the language.
+  index without changing the language. Group integration tests by topic.
 
 ## Draft 0.14
 

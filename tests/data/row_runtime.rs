@@ -1,31 +1,11 @@
-use std::{
-    fs,
-    process::Command,
-    sync::atomic::{AtomicUsize, Ordering},
-};
-
-struct Fixture(std::path::PathBuf);
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use super::script::Script;
+use std::fs;
 
 #[test]
 fn rebuilding_empty_open_rows_replays_order_through_a_first_class_call() {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let fixture = loop {
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("flux-row-runtime-{}-{n}", std::process::id()));
-        match fs::create_dir(&path) {
-            Ok(()) => break Fixture(path),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => panic!("{e}"),
-        }
-    };
-    fs::write(
-        fixture.0.join("main.flx"),
+    let fixture = Script::new(
+        "flux-row-runtime",
+        "main.flx",
         r#"
 << "csv";
 << "df";
@@ -40,15 +20,9 @@ empty:#.{ id:s; value:q; flag:b; } := #[];
     ()
 } };
 "#,
-    )
-    .unwrap();
+    );
     for cli in [["check"].as_slice(), ["run-hir"].as_slice(), [].as_slice()] {
-        let output = Command::new(env!("CARGO_BIN_EXE_flux"))
-            .current_dir(&fixture.0)
-            .args(cli)
-            .arg("main.flx")
-            .output()
-            .unwrap();
+        let output = fixture.run(cli.first().copied());
         assert!(
             output.status.success(),
             "{cli:?}: {}",
@@ -58,7 +32,7 @@ empty:#.{ id:s; value:q; flag:b; } := #[];
             ("out.csv", "id,value,flag\n"),
             ("extended.csv", "id,value,flag,squared\n"),
         ] {
-            let result = fixture.0.join(filename);
+            let result = fixture.path().join(filename);
             if cli == ["check"] {
                 assert!(!result.exists());
             } else {

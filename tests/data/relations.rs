@@ -1,67 +1,13 @@
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use super::script::Script;
+use std::fs;
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Fixture(PathBuf);
-
-impl Fixture {
-    fn new(source: &str) -> Self {
-        loop {
-            let path = std::env::temp_dir().join(format!(
-                "flux-relational-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::create_dir(&path) {
-                Ok(()) => {
-                    fs::write(path.join("test.flx"), source).expect("write fixture");
-                    return Self(path);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("create fixture: {e}"),
-            }
-        }
-    }
-
-    fn run(&self, mode: Option<&str>) -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_flux"));
-        child.current_dir(&self.0);
-        if let Some(mode) = mode {
-            child.arg(mode);
-        }
-        child.arg("test.flx").output().expect("invoke Flux")
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn check(f: &Fixture) {
-    let out = f.run(Some("check"));
-    assert!(
-        out.status.success() && out.stdout.is_empty(),
-        "check: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let out = f.run(Some("hir"));
-    assert!(
-        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("HirProgram"),
-        "hir: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+fn script(source: &str) -> Script {
+    Script::new("flux-relational", "test.flx", source)
 }
 
 fn strict(source: &str, expected: &str) {
-    let f = Fixture::new(source);
-    check(&f);
+    let f = script(source);
+    f.check_hir();
     for mode in [Some("run-hir"), None] {
         let out = f.run(mode);
         assert!(
@@ -203,7 +149,7 @@ right:#row := #[
 
 #[test]
 fn projection_uses_checked_empty_schema_and_does_not_call_the_projector() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "df";
 << "csv";
@@ -218,15 +164,15 @@ bomb(x:row):out := out { label := .label x; amount := :d (/ 1q 0q); };
 } };
 "#,
     );
-    check(&f);
-    assert!(!f.0.join("out.csv").exists());
+    f.check_hir();
+    assert!(!f.path().join("out.csv").exists());
     let out = f.run(Some("run-hir"));
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let written = fs::read_to_string(f.0.join("out.csv")).unwrap();
+    let written = fs::read_to_string(f.path().join("out.csv")).unwrap();
     assert_eq!(written.replace("\r\n", "\n"), "label,amount\n");
 }
 
@@ -243,7 +189,7 @@ bomb(x:row):z := // 1z 0z;
         "(0, 0)\n",
     );
 
-    let f = Fixture::new(
+    let f = script(
         r#"
 row :: { k:z; };
 rows:#row := #[row { k := 1z; }];
@@ -253,7 +199,7 @@ right(x:row):z := // 1z 0z;
 !{ ^{ ^? ! print (*= &left &right rows rows); () } };
 "#,
     );
-    check(&f);
+    f.check_hir();
     let out = f.run(Some("run-hir"));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -282,7 +228,7 @@ number(x:reading):z := .id x;
         "df.union a b",
         "df.fill 1z [1z]",
     ] {
-        let f = Fixture::new(&format!("{common}\nx := {expr}; !{{ () }};"));
+        let f = script(&format!("{common}\nx := {expr}; !{{ () }};"));
         let out = f.run(Some("check"));
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -294,7 +240,7 @@ number(x:reading):z := .id x;
 
 #[test]
 fn join_output_limit_distinguishes_materialization_from_input_rows() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 row :: { value:n; };
 mk(x:n):row := row { value := x; };
@@ -303,7 +249,7 @@ a:#row := #: (@: &mk (.. 1n 317n));
 !{ ^{ ^? ! print (# (*= &one &one a a)); () } };
 "#,
     );
-    check(&f);
+    f.check_hir();
     let out = f.run(Some("run-hir"));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -338,11 +284,15 @@ key(x:row):(r,s) := (.value x,"bucket");
 fn calibration_audit_distinguishes_unmatched_missing_duplicate_and_zero() {
     macro_rules! calibration {
         ($name:literal) => {
-            include_str!(concat!("../examples/applications/calibration/", $name))
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/applications/calibration/",
+                $name
+            ))
         };
     }
     for mode in [Some("run-hir"), None] {
-        let f = Fixture::new(calibration!("audit.flx"));
+        let f = script(calibration!("audit.flx"));
         for (name, contents) in [
             ("schema.flx", calibration!("schema.flx")),
             ("matching.flx", calibration!("matching.flx")),
@@ -350,10 +300,10 @@ fn calibration_audit_distinguishes_unmatched_missing_duplicate_and_zero() {
             ("measured.csv", calibration!("measured.csv")),
             ("reference.csv", calibration!("reference.csv")),
         ] {
-            fs::write(f.0.join(name), contents).unwrap();
+            fs::write(f.path().join(name), contents).unwrap();
         }
-        check(&f);
-        let findings = f.0.join("findings.csv");
+        f.check_hir();
+        let findings = f.path().join("findings.csv");
         assert!(!findings.exists());
         let out = f.run(mode);
         assert!(
@@ -397,7 +347,7 @@ b:#.{ y:s; x:z; } := #[.{ y := "a"; x := 1z; } .{ y := "b"; x := 2z; }];
 
 #[test]
 fn generic_projection_instantiates_output_schema_even_when_empty() {
-    let f = Fixture::new(
+    let f = script(
         r#"
 << "df";
 << "csv";
@@ -412,7 +362,7 @@ moneys:#(d,s) := #[];
 } };
 "#,
     );
-    check(&f);
+    f.check_hir();
     let out = f.run(Some("run-hir"));
     assert!(
         out.status.success(),
@@ -420,7 +370,7 @@ moneys:#(d,s) := #[];
         String::from_utf8_lossy(&out.stderr)
     );
     for (name, expected) in [("nonempty.csv", "value\n1\n2\n"), ("empty.csv", "value\n")] {
-        let written = fs::read_to_string(f.0.join(name)).unwrap();
+        let written = fs::read_to_string(f.path().join(name)).unwrap();
         assert_eq!(written.replace("\r\n", "\n"), expected, "{name}");
     }
 }

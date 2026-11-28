@@ -1,49 +1,7 @@
+use super::{run_script, script};
+use crate::support::flux;
 use flux_lang::builtins::{Availability, REGISTRY};
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::PathBuf,
-    process::{Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
-};
-
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Script(PathBuf);
-
-impl Script {
-    fn new(source: &str) -> Self {
-        loop {
-            let root = std::env::temp_dir().join(format!(
-                "flux-draft042-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::create_dir(&root) {
-                Ok(()) => {
-                    fs::write(root.join("test.flx"), source).expect("write test script");
-                    return Self(root);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("create fixture directory: {e}"),
-            }
-        }
-    }
-
-    fn cli(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_flux"))
-            .current_dir(&self.0)
-            .args(args)
-            .output()
-            .expect("invoke public CLI")
-    }
-}
-
-impl Drop for Script {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use std::{collections::BTreeSet, fs};
 
 const PRELUDE: &str = r#"
 << "io";
@@ -242,8 +200,8 @@ fn expression_source(expression: &str) -> String {
 fn assert_cases(cases: &[Case]) {
     let mut failures = Vec::new();
     for &(op, expression, expected) in cases {
-        let f = Script::new(&expression_source(expression));
-        let output = f.cli(&["run-hir", "test.flx"]);
+        let f = script("builtin-coverage", &expression_source(expression));
+        let output = run_script(&f, &["run-hir"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !output.status.success() || stdout != format!("{expected}\n") {
@@ -322,15 +280,15 @@ t:#row := #[row { n := 2; text := "comma,here"; }];
     }
 };
 "#;
-    let f = Script::new(source);
-    let checked = f.cli(&["check", "test.flx"]);
+    let f = script("builtin-coverage", source);
+    let checked = run_script(&f, &["check"]);
     assert!(
         checked.status.success() && checked.stdout.is_empty(),
         "{}",
         String::from_utf8_lossy(&checked.stderr)
     );
-    assert!(!f.0.join("test.txt").exists());
-    let out = f.cli(&["run-hir", "test.flx"]);
+    assert!(!f.join("test.txt").exists());
+    let out = run_script(&f, &["run-hir"]);
     assert!(
         out.status.success(),
         "{}",
@@ -341,11 +299,11 @@ t:#row := #[row { n := 2; text := "comma,here"; }];
         "(1b, test payload, [comma,here])\n"
     );
     assert_eq!(
-        fs::read_to_string(f.0.join("test.txt")).unwrap(),
+        fs::read_to_string(f.join("test.txt")).unwrap(),
         "test payload"
     );
     assert_eq!(
-        fs::read_to_string(f.0.join("test.csv"))
+        fs::read_to_string(f.join("test.csv"))
             .unwrap()
             .replace("\r\n", "\n"),
         "n,text\n2,\"comma,here\"\n"
@@ -367,8 +325,8 @@ grid:[[z]] := [];
     ^= ! io.print (.: 2n [1z 2z 3z]) { _ : (); };
 };
 "#;
-    let f = Script::new(fixture);
-    let out = f.cli(&["run-hir", "test.flx"]);
+    let f = script("builtin-coverage", fixture);
+    let out = run_script(&f, &["run-hir"]);
     assert!(
         out.status.success(),
         "{}",
@@ -388,14 +346,14 @@ fn invalid_collection_shapes_have_typed_runtime_diagnostics() {
         ("slice 0n 1n [2z]", "one-based"),
         ("pct 101z [1z 2z]", "percentile"),
     ] {
-        let f = Script::new(&expression_source(source));
-        let check = f.cli(&["check", "test.flx"]);
+        let f = script("builtin-coverage", &expression_source(source));
+        let check = run_script(&f, &["check"]);
         assert!(
             check.status.success(),
             "{source}: {}",
             String::from_utf8_lossy(&check.stderr)
         );
-        let run = f.cli(&["run-hir", "test.flx"]);
+        let run = run_script(&f, &["run-hir"]);
         let stderr = String::from_utf8_lossy(&run.stderr);
         assert!(
             !run.status.success() && !stderr.contains("E0400") && stderr.contains(message),
@@ -415,8 +373,8 @@ t:#row := #[row { k := 2z; }];
 summ(k:z,g:#row) := .{ k := k; size := # g; };
 !{ ^= ! out.println (stat.mean [2q 4q],stat.pct 25q [0q 6q],.size tbl.agg &.k &summ t) { _ : (); }; };
 "#;
-    let f = Script::new(source);
-    let out = f.cli(&["run-hir", "test.flx"]);
+    let f = script("builtin-coverage", source);
+    let out = run_script(&f, &["run-hir"]);
     assert!(
         out.status.success(),
         "{}",
@@ -443,13 +401,9 @@ fn recognized_unsupported_operations_do_not_execute_or_fall_back() {
         let source = format!(
             "<< \"io\"; k(x:(z,z)):z := .1 x; x := {expression}; !{{ ^= ! io.print x {{ _ : (); }}; }};"
         );
-        let f = Script::new(&source);
-        for args in [
-            vec!["check", "test.flx"],
-            vec!["hir", "test.flx"],
-            vec!["test.flx"],
-        ] {
-            let out = f.cli(&args);
+        let f = script("builtin-coverage", &source);
+        for args in [&["check"][..], &["hir"][..], &[][..]] {
+            let out = run_script(&f, args);
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(
                 !out.status.success()
@@ -474,7 +428,7 @@ fn rust_api_and_repl_execute_former_legacy_operations() {
     let result = flux_lang::run_source(&source).expect("public typed run");
     assert_eq!(result.stdout, "6\n");
 
-    let mut repl = Command::new(env!("CARGO_BIN_EXE_flux"))
+    let mut repl = flux()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -496,7 +450,8 @@ fn rust_api_and_repl_execute_former_legacy_operations() {
 
 #[test]
 fn indirect_fold_preserves_exact_instantiations_and_does_not_redo_overload() {
-    let f = Script::new(
+    let f = script(
+        "builtin-coverage",
         r#"
 << "io";
 fold(f,seed,xs) := /: f seed xs;
@@ -507,13 +462,13 @@ sub := &-;
 };
 "#,
     );
-    let check = f.cli(&["check", "test.flx"]);
+    let check = run_script(&f, &["check"]);
     assert!(
         check.status.success(),
         "{}",
         String::from_utf8_lossy(&check.stderr)
     );
-    let out = f.cli(&["run-hir", "test.flx"]);
+    let out = run_script(&f, &["run-hir"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "3/4\n");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -522,7 +477,8 @@ sub := &-;
 
 #[test]
 fn empty_table_compositions_keep_collection_and_schema_shape() {
-    let f = Script::new(
+    let f = script(
+        "builtin-coverage",
         r#"
 << "io";
 row :: { x:q; };
@@ -533,7 +489,7 @@ cross := *: empty full;
 !{ ^= ! io.print (.x joined,# cross,:# cross) { _ : (); }; };
 "#,
     );
-    let out = f.cli(&["run-hir", "test.flx"]);
+    let out = run_script(&f, &["run-hir"]);
     assert!(
         out.status.success(),
         "{}",

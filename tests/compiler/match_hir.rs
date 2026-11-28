@@ -1,18 +1,9 @@
+use super::hir_validation::checked;
 use flux_lang::{
     diagnostic::Category,
     hir::{self, ExprKind, ValuePatternKind},
-    hir_eval, parser,
-    semantic::{self, Mode, Policy},
+    hir_eval,
 };
-
-fn checked(source: &str) -> hir::HirProgram {
-    let program = parser::parse(source).unwrap();
-    semantic::prepare(&program, Mode::Script, Policy::TypedOnly)
-        .unwrap()
-        .hir()
-        .unwrap()
-        .clone()
-}
 
 #[test]
 fn match_rejects_mutated_cross_arm_binder_before_execution() {

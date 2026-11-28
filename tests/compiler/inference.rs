@@ -1,57 +1,15 @@
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
-};
-
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Fixture(PathBuf);
-
-impl Fixture {
-    fn new(source: &str) -> Self {
-        loop {
-            let path = std::env::temp_dir().join(format!(
-                "flux-draft09-inference-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::create_dir(&path) {
-                Ok(()) => {
-                    fs::write(path.join("test.flx"), source).expect("write Flux fixture");
-                    return Self(path);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("create fixture directory: {e}"),
-            }
-        }
-    }
-
-    fn cli(&self, mode: &str) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_flux"))
-            .current_dir(&self.0)
-            .args([mode, "test.flx"])
-            .output()
-            .expect("run the Flux CLI")
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use super::{run_script, script};
+use std::fs;
 
 fn works(source: &str, expected: &str) {
-    let fixture = Fixture::new(source);
-    let checked = fixture.cli("check");
+    let fixture = script("inference", source);
+    let checked = run_script(&fixture, &["check"]);
     assert!(
         checked.status.success() && checked.stdout.is_empty(),
         "{}",
         String::from_utf8_lossy(&checked.stderr)
     );
-    let outcome = fixture.cli("run-hir");
+    let outcome = run_script(&fixture, &["run-hir"]);
     assert!(
         outcome.status.success() && outcome.stderr.is_empty(),
         "{}",
@@ -61,7 +19,7 @@ fn works(source: &str, expected: &str) {
 }
 
 fn rejected(source: &str, fragment: &str) -> String {
-    let result = Fixture::new(source).cli("check");
+    let result = run_script(&script("inference", source), &["check"]);
     let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
     assert!(
         !result.status.success() && result.stdout.is_empty(),
@@ -168,21 +126,22 @@ tacit := &{ @* * . . };
 
 #[test]
 fn an_expansive_export_cannot_be_specialized_by_its_consumer() {
-    let fixture = Fixture::new(
+    let fixture = script(
+        "inference",
         r#"<< "lib.flx" : lib;
 value := @ lib.claimed 7z;
 !{ () };
 "#,
     );
     fs::write(
-        fixture.0.join("lib.flx"),
+        fixture.join("lib.flx"),
         r#">> (claimed);
 id(x) := x;
 claimed:~a->~a := @ &id &id;
 "#,
     )
     .unwrap();
-    let out = fixture.cli("check");
+    let out = run_script(&fixture, &["check"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success()

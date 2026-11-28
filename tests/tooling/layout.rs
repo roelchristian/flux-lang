@@ -1,51 +1,24 @@
+use crate::support::{flux, TempDir};
 use flux_lang::lexer::lex;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
+    process::Output,
 };
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Fixture(PathBuf);
-
-impl Fixture {
-    fn new() -> Self {
-        loop {
-            let path = std::env::temp_dir().join(format!(
-                "flux-layout-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::create_dir(&path) {
-                Ok(()) => return Self(path),
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(err) => panic!("cannot create fixture: {err}"),
-            }
-        }
-    }
-
-    fn write(&self, name: &str, data: impl AsRef<[u8]>) -> PathBuf {
-        let path = self.0.join(name);
-        fs::write(&path, data).expect("write fixture");
-        path
-    }
-
-    fn cli(&self, args: &[&str], path: &Path) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_flux"))
-            .current_dir(&self.0)
-            .args(args)
-            .arg(path)
-            .output()
-            .expect("invoke Flux")
-    }
+fn write(dir: &Path, name: &str, data: impl AsRef<[u8]>) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, data).expect("write fixture");
+    path
 }
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
+fn cli(dir: &Path, args: &[&str], path: &Path) -> Output {
+    flux()
+        .current_dir(dir)
+        .args(args)
+        .arg(path)
+        .output()
+        .expect("invoke Flux")
 }
 
 fn success(out: Output) -> String {
@@ -77,32 +50,34 @@ label:=@ id "literal -- spaces  { } &. \"";
 
 #[test]
 fn check_mode_detects_changes_and_never_rewrites() {
-    let fixture = Fixture::new();
+    let fixture = TempDir::new("layout");
     let before = MESSY.replace('\n', "\r\n");
-    let original = fixture.write("source.flx", &before);
-    let diff = fixture.cli(&["fmt", "--check"], &original);
+    let original = write(fixture.path(), "source.flx", &before);
+    let diff = cli(fixture.path(), &["fmt", "--check"], &original);
     assert_eq!(diff.status.code(), Some(1), "{diff:?}");
     assert_eq!(fs::read(&original).unwrap(), before.as_bytes());
 
-    let formatted = success(fixture.cli(&["fmt"], &original));
+    let formatted = success(cli(fixture.path(), &["fmt"], &original));
     assert_ne!(formatted, before);
     assert_eq!(fs::read(&original).unwrap(), before.as_bytes());
     assert!(formatted.ends_with('\n') && !formatted.contains('\r'));
 
-    let canonical = fixture.write("canonical.flx", &formatted);
-    assert!(fixture
-        .cli(&["fmt", "--check"], &canonical)
+    let canonical = write(fixture.path(), "canonical.flx", &formatted);
+    assert!(cli(fixture.path(), &["fmt", "--check"], &canonical)
         .status
         .success());
     assert_eq!(fs::read(&canonical).unwrap(), formatted.as_bytes());
-    assert_eq!(success(fixture.cli(&["fmt"], &canonical)), formatted);
+    assert_eq!(
+        success(cli(fixture.path(), &["fmt"], &canonical)),
+        formatted
+    );
 }
 
 #[test]
 fn preserves_tokens_and_evaluation_across_reformatting() {
-    let fixture = Fixture::new();
-    let original = fixture.write("source.flx", MESSY);
-    let formatted = success(fixture.cli(&["fmt"], &original));
+    let fixture = TempDir::new("layout");
+    let original = write(fixture.path(), "source.flx", MESSY);
+    let formatted = success(cli(fixture.path(), &["fmt"], &original));
     assert_eq!(tokens(MESSY), tokens(&formatted));
     assert!(formatted.contains("id := &.;"), "{formatted}");
     assert!(
@@ -113,11 +88,11 @@ fn preserves_tokens_and_evaluation_across_reformatting() {
         formatted.contains("-- attached to the preceding declaration"),
         "{formatted}"
     );
-    let staged = fixture.write("formatted.flx", formatted);
+    let staged = write(fixture.path(), "formatted.flx", formatted);
     for path in [&original, &staged] {
-        success(fixture.cli(&["check"], path));
+        success(cli(fixture.path(), &["check"], path));
         assert_eq!(
-            success(fixture.cli(&["run-hir"], path)),
+            success(cli(fixture.path(), &["run-hir"], path)),
             "(literal -- spaces  { } &. \", [4 9])\n"
         );
     }
@@ -125,10 +100,10 @@ fn preserves_tokens_and_evaluation_across_reformatting() {
 
 #[test]
 fn expands_multi_statement_blocks_with_four_space_nesting() {
-    let fixture = Fixture::new();
+    let fixture = TempDir::new("layout");
     let source = r#"!{ ^{ x:=2z; y:=+ x 3z; ^? ! print y; () } };"#;
-    let original = fixture.write("source.flx", source);
-    let formatted = success(fixture.cli(&["fmt"], &original));
+    let original = write(fixture.path(), "source.flx", source);
+    let formatted = success(cli(fixture.path(), &["fmt"], &original));
     assert_eq!(tokens(source), tokens(&formatted));
     let lines = formatted.lines().collect::<Vec<_>>();
     assert!(lines.contains(&"!{"), "{formatted}");
@@ -143,13 +118,16 @@ fn expands_multi_statement_blocks_with_four_space_nesting() {
         lines.contains(&"    }") && lines.contains(&"};"),
         "{formatted}"
     );
-    let rewritten = fixture.write("expanded.flx", formatted);
-    assert_eq!(success(fixture.cli(&["run-hir"], &rewritten)), "5\n");
+    let rewritten = write(fixture.path(), "expanded.flx", formatted);
+    assert_eq!(
+        success(cli(fixture.path(), &["run-hir"], &rewritten)),
+        "5\n"
+    );
 }
 
 #[test]
 fn multiline_tacit_and_guarded_cases_keep_nested_structure() {
-    let fixture = Fixture::new();
+    let fixture = TempDir::new("layout");
     let source = r#"square:z->z:=&{
 -- Compose the arithmetic beside the source comment.
 @* * . .
@@ -157,8 +135,8 @@ fn multiline_tacit_and_guarded_cases_keep_nested_structure() {
 measure(x:z):z:=?{ > x 10z : @ square x; _ : x; };
 !{ ^= ! print (measure 3z,measure 11z) { _ : (); }; };
 "#;
-    let original = fixture.write("source.flx", source);
-    let formatted = success(fixture.cli(&["fmt"], &original));
+    let original = write(fixture.path(), "source.flx", source);
+    let formatted = success(cli(fixture.path(), &["fmt"], &original));
     assert_eq!(tokens(source), tokens(&formatted));
     assert!(formatted
         .lines()
@@ -167,8 +145,11 @@ measure(x:z):z:=?{ > x 10z : @ square x; _ : x; };
         formatted.lines().any(|line| line.starts_with("    @* *")),
         "{formatted}"
     );
-    let rewritten = fixture.write("formatted.flx", formatted);
-    assert_eq!(success(fixture.cli(&["run-hir"], &rewritten)), "(3, 121)\n");
+    let rewritten = write(fixture.path(), "formatted.flx", formatted);
+    assert_eq!(
+        success(cli(fixture.path(), &["run-hir"], &rewritten)),
+        "(3, 121)\n"
+    );
 }
 
 #[test]
@@ -197,7 +178,7 @@ fn preserves_comment_anchors_literals_and_adjacent_signs_in_lf_and_crlf() {
         result
     }
 
-    let fixture = Fixture::new();
+    let fixture = TempDir::new("layout");
     let source = r#"--- Difference
 difference := - -2z 3z; -- a negative operand, not a comment
 a := .{
@@ -211,22 +192,21 @@ a := .{
         ("lf.flx", source.to_owned()),
         ("crlf.flx", source.replace('\n', "\r\n")),
     ] {
-        let path = fixture.write(name, &bytes);
-        let before = fixture.cli(&["fmt", "--check"], &path);
+        let path = write(fixture.path(), name, &bytes);
+        let before = cli(fixture.path(), &["fmt", "--check"], &path);
         assert_eq!(before.status.code(), Some(1));
         assert!(before.stdout.is_empty());
         assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
-        let formatted = success(fixture.cli(&["fmt"], &path));
+        let formatted = success(cli(fixture.path(), &["fmt"], &path));
         assert_eq!(tokens(source), tokens(&formatted));
         assert_eq!(anchors(source), anchors(&formatted));
         assert!(formatted.contains("\n    -- Stays above"), "{formatted}");
-        let formatted_path = fixture.write("canonical.flx", &formatted);
-        assert!(fixture
-            .cli(&["fmt", "--check"], &formatted_path)
+        let formatted_path = write(fixture.path(), "canonical.flx", &formatted);
+        assert!(cli(fixture.path(), &["fmt", "--check"], &formatted_path)
             .status
             .success());
         assert_eq!(
-            success(fixture.cli(&["run-hir"], &formatted_path)),
+            success(cli(fixture.path(), &["run-hir"], &formatted_path)),
             "(-5, -- literal; [] {})\n"
         );
     }
@@ -234,8 +214,9 @@ a := .{
 
 #[test]
 fn keeps_small_tacit_forms_compact_and_divides_long_forks_into_branches() {
-    let fixture = Fixture::new();
-    let original = fixture.write(
+    let fixture = TempDir::new("layout");
+    let original = write(
+        fixture.path(),
         "tacit.flx",
         r#"sq := &{ @* * . . };
 point :: { x:q; y:q; };
@@ -246,12 +227,12 @@ mag:point->q := &{
 };
 "#,
     );
-    let formatted = success(fixture.cli(&["fmt"], &original));
+    let formatted = success(cli(fixture.path(), &["fmt"], &original));
     assert!(formatted.contains("sq := &{ @* * . . };"), "{formatted}");
     assert!(
         formatted.contains("    @* +\n        @. sq .x\n        @. sq .y"),
         "{formatted}"
     );
-    let path = fixture.write("formatted.flx", &formatted);
-    assert_eq!(success(fixture.cli(&["fmt"], &path)), formatted);
+    let path = write(fixture.path(), "formatted.flx", &formatted);
+    assert_eq!(success(cli(fixture.path(), &["fmt"], &path)), formatted);
 }

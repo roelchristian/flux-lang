@@ -1,43 +1,11 @@
+use super::{hir_validation::checked, run_script, script};
+use crate::support::TempDir;
 use std::fs;
-use std::path::PathBuf;
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Fixture(PathBuf);
-
-impl Fixture {
-    fn new(source: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "flux-review-fixes-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).expect("isolated fixture directory");
-        fs::write(path.join("test.flx"), source).expect("fixture source");
-        Self(path)
-    }
-
-    fn cli(&self, command: &str) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_flux"))
-            .current_dir(&self.0)
-            .args([command, "test.flx"])
-            .output()
-            .expect("Flux CLI")
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn accepts(source: &str, stdout: &str) -> Fixture {
-    let f = Fixture::new(source);
+fn accepts(source: &str, stdout: &str) -> TempDir {
+    let f = script("compiler-regression", source);
     for command in ["check", "hir", "run-hir"] {
-        let result = f.cli(command);
+        let result = run_script(&f, &[command]);
         assert!(
             result.status.success(),
             "{command}: {}\n{source}",
@@ -56,9 +24,9 @@ fn rejects(source: &str, diagnostic_fragments: &[&str]) {
     } else {
         format!("{source}\n!{{ () }};")
     };
-    let f = Fixture::new(&executable);
+    let f = script("compiler-regression", &executable);
     for command in ["check", "run-hir"] {
-        let result = f.cli(command);
+        let result = run_script(&f, &[command]);
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(
             !result.status.success()
@@ -172,7 +140,7 @@ input:#row := #[];
         "",
     );
     assert_eq!(
-        fs::read_to_string(f.0.join("out.csv"))
+        fs::read_to_string(f.join("out.csv"))
             .expect("typed-only write")
             .replace("\r\n", "\n"),
         "key,count\n"
@@ -203,7 +171,6 @@ op := &+;
 #[test]
 fn aggregate_hir_carries_statically_ordered_schema() {
     use flux_lang::hir::{CoreOp, ExprKind, TableSchema, Target};
-    use flux_lang::{parser, semantic};
 
     let source = r#"
 << "df";
@@ -212,16 +179,8 @@ summary(k:s,t:#row) := .{ key := k; count := # t; };
 group(t:#row) := { summarizer := &summary; df.agg &.key (summarizer) t };
 res := group (#[row { key := "k"; n := 3; }]);
 "#;
-    let program = parser::parse(source).expect("aggregate source");
-    let prepared = semantic::prepare(
-        &program,
-        semantic::Mode::Script,
-        semantic::Policy::TypedOnly,
-    )
-    .expect("typed-only aggregate");
+    let prepared = checked(source);
     let node = prepared
-        .hir()
-        .expect("HIR")
         .arena
         .iter()
         .find(|node| {
@@ -243,17 +202,9 @@ fn generic_named_calls_carry_distinct_checked_instances_in_hir() {
     use flux_lang::hir::{ExprKind, Target};
     use flux_lang::infer::Operation;
     use flux_lang::types::{Prim, Type};
-    use flux_lang::{parser, semantic};
 
-    let program = parser::parse("sq(x:~a):~a | num ~a := * x x; z := sq 2z; q := sq 0.5;")
-        .expect("generic numeric source");
-    let prepared = semantic::prepare(
-        &program,
-        semantic::Mode::Script,
-        semantic::Policy::TypedOnly,
-    )
-    .expect("typed instances");
-    let arena = &prepared.hir().expect("HIR").arena;
+    let prepared = checked("sq(x:~a):~a | num ~a := * x x; z := sq 2z; q := sq 0.5;");
+    let arena = &prepared.arena;
     for prim in [Prim::Z, Prim::Q] {
         let want = Type::Fun(Box::new(Type::Prim(prim)), Box::new(Type::Prim(prim)));
         assert!(arena.iter().any(|node| {

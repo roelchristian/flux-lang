@@ -1,29 +1,16 @@
+use crate::support::{flux, TempDir};
 use std::{
     fs,
     io::Write,
-    path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
-    sync::atomic::{AtomicUsize, Ordering},
+    path::Path,
+    process::{Output, Stdio},
 };
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Fixture(PathBuf);
+struct Fixture(TempDir);
 
 impl Fixture {
     fn new() -> Self {
-        loop {
-            let root = std::env::temp_dir().join(format!(
-                "flux-draft07-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed),
-            ));
-            match fs::create_dir(&root) {
-                Ok(()) => return Self(root),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("create fixture directory: {e}"),
-            }
-        }
+        Self(TempDir::new("flux-tacit"))
     }
 
     fn write(&self, path: &str, data: &str) {
@@ -33,18 +20,12 @@ impl Fixture {
     }
 
     fn cli(&self, from: &str, command: &str, root: impl AsRef<Path>) -> Output {
-        let mut app = Command::new(env!("CARGO_BIN_EXE_flux"));
+        let mut app = flux();
         app.current_dir(self.0.join(from));
         if !command.is_empty() {
             app.arg(command);
         }
         app.arg(root.as_ref()).output().expect("invoke Flux CLI")
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -85,10 +66,13 @@ fn reject(f: &Fixture, path: &str, fragments: &[&str]) -> String {
 #[test]
 fn examples_run_in_both_modes() {
     let f = Fixture::new();
-    f.write("tacit.flx", include_str!("fixtures/pre-corpus/tacit.flx"));
+    f.write(
+        "tacit.flx",
+        include_str!("../fixtures/pre-corpus/tacit.flx"),
+    );
     f.write(
         "finance.flx",
-        include_str!("fixtures/pre-corpus/tacit-finance.flx"),
+        include_str!("../fixtures/pre-corpus/tacit-finance.flx"),
     );
     accept(&f, "", "tacit.flx", "(10, 13, 12, identity)\n");
     accept(&f, "", "finance.flx", "([C], [0.00 0.00 0.02])\n");
@@ -314,8 +298,8 @@ fn repl_and_formatter_handle_multiline_tacit_delimiters() {
     };
     assert_eq!(token_text(source), token_text(&formatted));
     assert!(formatted.contains("-- Keep this comment and both signs."));
-    let mut repl = Command::new(env!("CARGO_BIN_EXE_flux"))
-        .current_dir(&f.0)
+    let mut repl = flux()
+        .current_dir(f.0.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

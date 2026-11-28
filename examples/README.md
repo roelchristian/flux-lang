@@ -72,7 +72,7 @@ For example, run `flux examples/io/arguments.flx -- report 2026`, or pipe
 copy of the examples tree for file-writing specimens: monitoring creates
 `summary.csv` and files creates `corpus_files/note.txt`.
 
-`cargo test --locked --test example_corpus` checks the inventory and tests
+`cargo test --locked --test examples` checks the inventory and tests
 each program in ordinary and strict HIR modes in isolated directories.
 It tests library files through their consumers. For the language rules,
 see the [Flux reference](../docs/specification.md).

@@ -1,88 +1,26 @@
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use super::script::Script;
+use std::fs;
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Fixture(PathBuf);
-
-impl Fixture {
-    fn new(source: &str) -> Self {
-        loop {
-            let dir = std::env::temp_dir().join(format!(
-                "flux-arrays-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::create_dir(&dir) {
-                Ok(()) => {
-                    fs::write(dir.join("main.flx"), source).expect("main fixture");
-                    return Self(dir);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("fixture directory: {e}"),
-            }
-        }
-    }
-
-    fn cli(&self, mode: &str) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_flux"));
-        command.current_dir(&self.0);
-        if !mode.is_empty() {
-            command.arg(mode);
-        }
-        command.arg("main.flx").output().expect("execute Flux")
-    }
-
-    fn accepts(&self, expected: &str) {
-        for mode in ["check", "hir", "run-hir", ""] {
-            let out = self.cli(mode);
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            assert!(
-                out.status.success() && stderr.is_empty(),
-                "{mode}: {stderr}"
-            );
-            match mode {
-                "check" => assert!(stdout.is_empty(), "{stdout}"),
-                "hir" => assert!(stdout.contains("HirProgram"), "{stdout}"),
-                _ => assert_eq!(stdout, expected, "{mode}"),
-            }
-        }
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
+fn script(source: &str) -> Script {
+    Script::new("flux-arrays", "main.flx", source)
 }
 
 fn rejects(source: &str, words: &[&str]) {
-    let out = Fixture::new(source).cli("check");
-    let error = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success() && out.stdout.is_empty(), "{source}");
-    assert!(
-        words.iter().all(|word| error.contains(word)),
-        "expected {words:?}: {error}"
-    );
+    super::script::rejects(&script(source), source, words);
 }
 
-fn array_program(source: &str) -> Fixture {
-    Fixture::new(&format!("<< \"arr\";\n{source}"))
+fn array_program(source: &str) -> Script {
+    script(&format!("<< \"arr\";\n{source}"))
 }
 
 fn runtime_rejects(expr: &str, fragment: &str) {
     let fixture = array_program(&format!("!{{ ^{{ ^? ! print ({expr}); () }} }};"));
     assert!(
-        fixture.cli("check").status.success(),
+        fixture.run(Some("check")).status.success(),
         "{expr} must type-check"
     );
     for mode in ["run-hir", ""] {
-        let out = fixture.cli(mode);
+        let out = fixture.run((!mode.is_empty()).then_some(mode));
         let error = String::from_utf8_lossy(&out.stderr);
         assert!(
             !out.status.success() && out.stdout.is_empty(),
@@ -280,7 +218,7 @@ b := @ &t.keep (arr.reshape [1] ["flux"]);
 "#,
     );
     fs::write(
-        fixture.0.join("types.flx"),
+        fixture.path().join("types.flx"),
         ">> (keep); keep(x:array[~a]):array[~a] := x;",
     )
     .unwrap();

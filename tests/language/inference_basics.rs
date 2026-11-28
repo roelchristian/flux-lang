@@ -1,46 +1,21 @@
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::support::{flux, TempDir};
+use std::{fs, process::Output};
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-struct Source(PathBuf);
+struct Source(TempDir);
 
 impl Source {
     fn new(text: &str) -> Self {
-        loop {
-            let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("flux-draft04-{}-{n}.flx", std::process::id()));
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut f) => {
-                    f.write_all(text.as_bytes()).expect("write test source");
-                    return Self(path);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("cannot create Flux source: {e}"),
-            }
-        }
+        let dir = TempDir::new("flux-inference");
+        fs::write(dir.join("test.flx"), text).expect("write test source");
+        Self(dir)
     }
 
     fn invoke(&self, flags: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_flux"))
+        flux()
             .args(flags)
-            .arg(&self.0)
+            .arg(self.0.join("test.flx"))
             .output()
             .expect("run Flux")
-    }
-}
-
-impl Drop for Source {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -139,9 +114,8 @@ amount(x) := .amount x;
 
 #[test]
 fn empty_aggregate_has_runtime_schema_for_csv() {
-    let output =
-        std::env::temp_dir().join(format!("flux-draft04-schema-{}.csv", std::process::id()));
-    let _ = fs::remove_file(&output);
+    let dir = TempDir::new("flux-inference-schema");
+    let output = dir.join("schema.csv");
     // Flux expects an ASCII string. Encode any Unicode in the platform's temp path.
     let path = output
         .to_string_lossy()
@@ -175,7 +149,6 @@ res := df.agg &.key &summ input;
     assert!(!output.exists(), "check may not create CSV output");
     let result = f.invoke(&["run-hir"]);
     let csv = fs::read_to_string(&output);
-    let _ = fs::remove_file(&output);
     assert!(
         result.status.success(),
         "run: {}",

@@ -1,45 +1,22 @@
-use std::fs;
-use std::io::Write as _;
-use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use super::repl::repl_output;
+use crate::support::{flux, TempDir};
+use std::{fs, path::PathBuf, process::Output};
 
-static SERIAL: AtomicUsize = AtomicUsize::new(0);
-
-struct Script(PathBuf);
+struct Script(TempDir);
 
 impl Script {
     fn new(source: &str) -> Self {
-        loop {
-            let number = SERIAL.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("flux-cli-{}-{number}.flx", std::process::id()));
-            match fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&path)
-            {
-                Ok(mut f) => {
-                    f.write_all(source.as_bytes()).unwrap();
-                    return Self(path);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => panic!("cannot create test script: {error}"),
-            }
-        }
+        let script = Self(TempDir::new("cli"));
+        fs::write(script.path(), source).unwrap();
+        script
     }
-    fn invoke(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_flux"))
-            .args(args)
-            .arg(&self.0)
-            .output()
-            .unwrap()
-    }
-}
 
-impl Drop for Script {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+    fn path(&self) -> PathBuf {
+        self.0.join("test.flx")
+    }
+
+    fn invoke(&self, args: &[&str]) -> Output {
+        flux().args(args).arg(self.path()).output().unwrap()
     }
 }
 
@@ -120,19 +97,8 @@ fn check_rejects_retired_core_io_spelling() {
 
 #[test]
 fn repl_does_not_automatically_execute_suspended_action() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_flux"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"a := !{ ^= ! io.print \"marker-effect\" { _ : (); }; };\na\n! a\n:q\n")
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
+    let output =
+        repl_output("a := !{ ^= ! io.print \"marker-effect\" { _ : (); }; };\na\n! a\n:q\n");
     assert!(output.status.success(), "{}", text(&output.stderr));
     assert!(output.stderr.is_empty(), "{}", text(&output.stderr));
     assert_eq!(
@@ -166,7 +132,7 @@ fn fmt_normalizes_whitespace_without_editing_input() {
     assert!(output.status.success(), "{}", text(&output.stderr));
     assert_eq!(text(&output.stdout), "-- comment\n!{ 7 };\n");
     assert_eq!(
-        fs::read_to_string(&file.0).unwrap(),
+        fs::read_to_string(file.path()).unwrap(),
         "-- comment  \r\n!{ 7 }; \r\n"
     );
 }
