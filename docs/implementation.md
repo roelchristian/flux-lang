@@ -170,6 +170,52 @@ both a transposed right operand and a contiguous copy of it.
 budgets explicitly. A checked limit or timeout is not a successful
 timing. See the harness's `--help` for per-binary overrides.
 
+### Machina II baseline
+
+Keep a locked Rust 1.85 release from Draft 0.20 at `2e447bd`. Before
+taking timing comparisons, cross-check the candidate in both typed modes:
+
+```sh
+python3 benchmarks/numerical_equivalence.py FLUX_020 FLUX_CANDIDATE
+```
+
+The differential gate observes exit status, stdout and the first diagnostic
+(including its source location). It pairs optimized and generic execution
+at comparable logical budgets and uses independent Python expectations
+where available. Do not treat the generic path as a requirement for identical
+physical memory use: packed and generic layouts can reserve different bytes.
+The Linux CI smoke runs the fixed cases and two generated sets against its
+own release. Use `--cases 0` for just the fixed cases.
+
+For performance, keep construction-only controls alongside all kernel
+cases, and compare the same repeat count for each binary. Repeated-operation
+medians still include common setup; the difference between repeat counts
+can estimate its effect but is not an isolated kernel timer. Flux's
+`phases` command instruments the frontend and combined evaluation, not
+individual planner or kernel internals. Keep preview measurements separate
+from timings collected under explicitly raised budgets.
+
+An A/A control using the same locked Draft 0.20 binary in both arms on one
+Linux x86-64 logical CPU completed the 10-million-element inline construction
+cases. Three samples per arm measured 941–963 ms for signed integers and
+992–1,260 ms for explicit conversion to binary64 (range of arm medians).
+Peak RSS medians were about 942,000 KiB. These are construction-and-validation
+measurements, not new-engine speedups or memory guarantees.
+
+```sh
+python3 benchmarks/machina.py FLUX_020 FLUX_CANDIDATE --phases --groups construction \
+  --large --match '^construction-inline-(z|r)-10000000$' --runs 3 \
+  --before-env FLUX_MAX_ELEMENTS=10000000 --after-env FLUX_MAX_ELEMENTS=10000000 \
+  --before-env FLUX_MAX_WORK=300000000 --after-env FLUX_MAX_WORK=300000000 \
+  --before-env FLUX_MAX_MEMORY=1300000000 --after-env FLUX_MAX_MEMORY=1300000000
+```
+
+The benchmark clears inherited `FLUX_*` variables and records its configured
+overrides. The optional generic arm uses comparable logical budgets.
+Large-array output checks sample verified coordinates; the differential gate
+covers complete outputs on smaller inputs. Phase samples come from separate
+verified invocations. A limit or timeout is not a successful timing.
+
 ### Draft 0.19 paired sample
 
 Locked Rust 1.85 release builds of Drafts 0.17–0.19 were checked on

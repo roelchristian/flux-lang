@@ -30,3 +30,6 @@ jobs:
         run: cargo +1.85.0 clippy --locked --all-targets -- -D warnings
       - name: Release build
         run: cargo +1.85.0 build --locked --release
+      - name: Numerical execution equivalence smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 benchmarks/numerical_equivalence.py target/release/flux target/release/flux --cases 2
