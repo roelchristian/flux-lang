@@ -51,6 +51,7 @@ pub(in crate::hir_eval) fn guard_embedded(value: V) -> NumericResult<V> {
     enum Next {
         Value(V),
         Items(Rc<[V]>, usize),
+        Table(Rc<crate::hir_eval::Table>, usize),
         Dense(Rc<Dense>, usize),
         Record(Rc<[(Box<str>, V)]>, usize),
         Dict(Rc<[(V, V)]>, usize),
@@ -60,9 +61,8 @@ pub(in crate::hir_eval) fn guard_embedded(value: V) -> NumericResult<V> {
         match next {
             Next::Value(item) => match item {
                 V::Exact(n) if bits(n.n).max(bits(n.d)) > limit => return Err(RESOURCE),
-                V::Sequence(xs) | V::Tuple(xs) | V::Table(xs, _) => {
-                    pending.push(Next::Items(xs, 0))
-                }
+                V::Sequence(xs) | V::Tuple(xs) => pending.push(Next::Items(xs, 0)),
+                V::Table(table) => pending.push(Next::Table(table, 0)),
                 V::Dense(xs) => pending.push(Next::Dense(xs, 0)),
                 V::Record(fs) => pending.push(Next::Record(fs, 0)),
                 V::Dict(entries) => pending.push(Next::Dict(entries, 0)),
@@ -77,6 +77,12 @@ pub(in crate::hir_eval) fn guard_embedded(value: V) -> NumericResult<V> {
                 let value = xs[i].clone();
                 pending.push(Next::Items(xs, i + 1));
                 pending.push(Next::Value(value));
+            }
+            Next::Table(table, i) => {
+                if let Some(row) = table.get(i) {
+                    pending.push(Next::Table(table, i + 1));
+                    pending.push(Next::Value(row));
+                }
             }
             Next::Dense(xs, i) if i < xs.len() => {
                 let value = xs.value(i);

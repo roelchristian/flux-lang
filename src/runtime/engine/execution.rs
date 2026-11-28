@@ -107,7 +107,7 @@ impl Eval<'_> {
                     unreachable!("checked row round trip")
                 };
                 match self.eval(source[0], env)? {
-                    table @ V::Table(_, _) => table,
+                    table @ V::Table(_) => table,
                     _ => return Err(invariant(s, "checked row round trip needs a table")),
                 }
             }

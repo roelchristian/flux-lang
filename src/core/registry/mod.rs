@@ -252,14 +252,14 @@ pub static REGISTRY: &[Builtin] = with_math_catalog!(math_registry(
     prelude!(Map, "@:", 2, Map, Collection),
     prelude!(Filter, "?:", 2, Filter, Collection),
     prelude!(Group, "=:", 2, Group, Collection, equality: Equality::Structural),
-    prelude!(SortAsc, ">:", 2, Sort, Collection),
+    prelude!(SortAsc, ">:", 2, Sort, Collection, aliases: &["df.sort", "table.sort"]),
     prelude!(SortDesc, "<:", 2, Sort, Collection),
-    prelude!(Concat, "+:", 2, Concat, Collection),
+    prelude!(Concat, "+:", 2, Concat, Collection, aliases: &["df.concat", "table.concat"]),
     prelude!(Zip, "&:", 2, Household, Collection),
     prelude!(Cartesian, "*:", 2, Household, Collection),
     prelude!(Distinct, "=.", 1, Household, Collection, equality: Equality::Structural),
     prelude!(Lookup, ".:", 2, Lookup, Dependent, equality: Equality::Structural),
-    prelude!(Take, "[:", 2, Household, Collection, aliases: &["take"]),
+    prelude!(Take, "[:", 2, Household, Collection, aliases: &["take", "df.take", "table.take"]),
     prelude!(Fold, "/:", 3, Fold, Reduction),
     prelude!(Reduce, "@/", 2, Fold, Reduction),
     prelude!(Scan, "\\:", 3, Fold, Collection),
@@ -287,7 +287,7 @@ pub static REGISTRY: &[Builtin] = with_math_catalog!(math_registry(
         aliases: &["statistics.cor", "stats.cor", "stat.cor"],
         availability: Recognized
     ),
-    prelude!(Drop, ":]", 2, Household, Collection, aliases: &["drop"]),
+    prelude!(Drop, ":]", 2, Household, Collection, aliases: &["drop", "df.drop", "table.drop"]),
     prelude!(Slice, "sect", 3, Household, Collection, aliases: &["slice"]),
     prelude!(Reverse, "rev", 1, Household, Collection),
     prelude!(Flatten, ",.", 1, Household, Collection, aliases: &["flat"]),
@@ -511,6 +511,27 @@ mod tests {
         assert_eq!(prelude_arity("@/"), Some(2));
         assert_eq!(for_operation(CoreOp::Reduce), lookup("@/"));
         assert_eq!(prelude_arity("statistics.mean"), None);
+    }
+
+    #[test]
+    fn qualified_table_collection_names_reuse_existing_operations() {
+        for (member, canonical_name, op) in [
+            ("sort", ">:", CoreOp::SortAsc),
+            ("concat", "+:", CoreOp::Concat),
+            ("take", "[:", CoreOp::Take),
+            ("drop", ":]", CoreOp::Drop),
+        ] {
+            let spec = for_operation(op).unwrap();
+            assert_eq!(spec.canonical, canonical_name);
+            for module in ["df", "table"] {
+                let qualified = format!("{module}.{member}");
+                assert!(module_items(module)
+                    .unwrap()
+                    .any(|item| item == (member, 2)));
+                assert_eq!(lookup(&qualified), Some(spec));
+                assert_eq!(prelude_arity(&qualified), None);
+            }
+        }
     }
 
     #[test]

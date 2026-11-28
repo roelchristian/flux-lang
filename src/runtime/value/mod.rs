@@ -1,5 +1,5 @@
 //! Runtime values and operations on their structural representation.
-use super::{array, engine::Failure, Exact, Wide};
+use super::{array, engine::Failure, Exact, Table, Wide};
 use crate::{
     hir::{CoreOp, ExprId, TableSchema},
     resolve::SymbolId,
@@ -12,7 +12,7 @@ mod compare;
 pub(super) mod display;
 pub(super) use cells::{read_cell, write_cell};
 pub(super) use collections::{
-    as_bool, as_seq, collection, column_rows, layout, named, projection, wrap,
+    as_bool, as_seq, collection, column_rows, layout, named, projection, wrap, Collection,
 };
 pub(super) use compare::{equal, key, key_with_budget, order, Key, KEY_WORK_LIMIT};
 
@@ -30,7 +30,7 @@ pub(in crate::hir_eval) enum V {
     Sequence(Rc<[V]>),
     Dense(Rc<array::Dense>),
     Record(Rc<[(Box<str>, V)]>),
-    Table(Rc<[V]>, Rc<TableSchema>),
+    Table(Rc<Table>),
     Dict(Rc<[(V, V)]>),
     Optional(Option<Rc<V>>),
     Variant(Rc<VariantValue>),

@@ -1,5 +1,5 @@
 //! Runtime value rendering for script output and REPL inspection.
-use super::V;
+use super::{Table, V};
 use crate::hir::TableSchema;
 
 #[derive(Clone, Copy)]
@@ -47,11 +47,12 @@ fn render(value: &V, style: Style) -> String {
                 format!("{{{fields}}}")
             }
         }
-        V::Table(rows, schema) if inspect => table_view(rows, schema),
-        V::Table(rows, schema) => format!(
+        V::Table(table) if inspect => table_view(table),
+        V::Table(table) => format!(
             "#[{}]",
-            rows.iter()
-                .map(|row| repr_table_row(row, schema))
+            table
+                .iter()
+                .map(|row| repr_table_row(&row, table.schema()))
                 .collect::<Vec<_>>()
                 .join(" ")
         ),
@@ -102,13 +103,13 @@ fn repr_table_row(row: &V, schema: &TableSchema) -> String {
     repr(row)
 }
 
-fn table_view(rows: &[V], schema: &TableSchema) -> String {
-    let headers = match schema {
+fn table_view(table: &Table) -> String {
+    let headers = match table.schema().as_ref() {
         TableSchema::Named(fields) => fields.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
         TableSchema::Positional(fields) => (1..=fields.len()).map(|i| format!(".{i}")).collect(),
     };
     if headers.is_empty() {
-        return format!("#[ ]  ({} rows)", rows.len());
+        return format!("#[ ]  ({} rows)", table.len());
     }
     let safe = |text: String| {
         let snippet = text.chars().take(32).collect::<String>();
@@ -126,8 +127,8 @@ fn table_view(rows: &[V], schema: &TableSchema) -> String {
         escaped
     };
     let mut display = vec![headers.iter().map(|h| safe(h.clone())).collect::<Vec<_>>()];
-    for row in rows.iter().take(12) {
-        let cells = match row {
+    for row in table.iter().take(12) {
+        let cells = match &row {
             V::Record(fs) => headers
                 .iter()
                 .map(|key| {
@@ -138,7 +139,7 @@ fn table_view(rows: &[V], schema: &TableSchema) -> String {
                 })
                 .collect(),
             V::Tuple(xs) => xs.iter().map(|x| safe(repr(x))).collect(),
-            _ => vec![safe(repr(row))],
+            _ => vec![safe(repr(&row))],
         };
         display.push(cells);
     }
@@ -171,8 +172,8 @@ fn table_view(rows: &[V], schema: &TableSchema) -> String {
             )
         }
     }
-    if rows.len() > 12 {
-        out.push(format!("... ({} rows total)", rows.len()))
+    if table.len() > 12 {
+        out.push(format!("... ({} rows total)", table.len()))
     }
     out.join("\n")
 }

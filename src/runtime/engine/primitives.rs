@@ -5,9 +5,9 @@ use crate::{
     hir_eval::{
         array, array_sequences, as_bool, as_seq, collection, collections, column_rows, combinators,
         decimal, domain, effects, equal, error, exact_index, exact_unary, finite, invariant, joins,
-        json, key_with_budget, layout, lift, lift_one, math, named, native, numeric_reduce, order,
-        packed, range_with_fuel, real_of, reduction, relations, scalar_binary, stats, to_exact,
-        wide, wrap, Action, Domain, Exact, KEY_WORK_LIMIT, R, V,
+        json, layout, lift, lift_one, math, named, native, numeric_reduce, order, packed,
+        range_with_fuel, real_of, reduction, relations, resources, scalar_binary, stats, to_exact,
+        wide, wrap, Action, Collection, Domain, Exact, Table, R, V,
     },
     types::{Prim, Type},
 };
@@ -56,27 +56,6 @@ pub(in crate::hir_eval) fn operation_arity(op: CoreOp, span: Span) -> R<usize> {
 }
 
 impl Eval<'_> {
-    fn group(&mut self, f: V, xs: &[V], span: Span) -> R<Vec<(V, Vec<V>)>> {
-        let mut groups: Vec<(V, Vec<V>)> = Vec::new();
-        let mut index = HashMap::new();
-        let mut budget = KEY_WORK_LIMIT;
-        for row in xs {
-            let k = self.apply(f.clone(), vec![row.clone()], span)?;
-            let key = key_with_budget(&k, &mut budget, 0).ok_or_else(|| {
-                error(
-                    span,
-                    "group key exceeds supported hash complexity or resource limit",
-                )
-            })?;
-            let i = *index.entry(key).or_insert(groups.len());
-            if let Some(g) = groups.get_mut(i) {
-                g.1.push(row.clone())
-            } else {
-                groups.push((k, vec![row.clone()]))
-            }
-        }
-        Ok(groups)
-    }
     pub(super) fn witnessed_core(
         &mut self,
         op: WitnessedOp,
@@ -224,7 +203,7 @@ impl Eval<'_> {
                 ));
             }
             StructuralRows => match a() {
-                value @ V::Table(_, _) => return Ok(value),
+                value @ V::Table(_) => return Ok(value),
                 _ => return Err(invariant(span, "checked structural view expects a table")),
             },
             InnerJoin | LeftJoin | SemiJoin | AntiJoin | TableUnion | TableDistinct
@@ -260,7 +239,8 @@ impl Eval<'_> {
             }),
             Count => {
                 let count = match a() {
-                    V::Sequence(v) | V::Table(v, _) => v.len(),
+                    V::Sequence(v) => v.len(),
+                    V::Table(v) => v.len(),
                     V::Dict(v) => v.len(),
                     V::String(v) => v.chars().count(),
                     _ => {
@@ -303,10 +283,10 @@ impl Eval<'_> {
                     }
                     return Ok(V::Dict(out.into()));
                 }
-                let (xs, _) = collection(v, span)?;
+                let xs = collection(v, span)?;
                 let mut out = Vec::with_capacity(xs.len());
                 for v in xs.iter() {
-                    out.push(self.apply(f.clone(), vec![v.clone()], span)?)
+                    out.push(self.apply(f.clone(), vec![v], span)?)
                 }
                 Ok(V::Sequence(out.into()))
             }
@@ -314,32 +294,48 @@ impl Eval<'_> {
                 let v = a();
                 let schema = layout(schema, span)?;
                 if let V::Sequence(rows) = v {
-                    return Ok(V::Table(rows, schema));
+                    return Ok(Table::from_checked_rows(rows, schema));
                 }
                 if op == TableRows {
                     return Err(error(span, "table rows require a sequence"));
+                }
+                if let Some(table) = Table::from_column_record(&v, schema.clone(), span) {
+                    return table;
                 }
                 let rows = column_rows(&v, span)?
                     .into_iter()
                     .map(|r| V::Record(r.into()))
                     .collect::<Vec<_>>();
-                Ok(V::Table(rows.into(), schema))
+                Ok(Table::from_rows(rows.into(), schema))
             }
             Rows => match a() {
-                V::Table(rows, _) => Ok(V::Sequence(rows)),
+                V::Table(table) => Ok(V::Sequence(table.materialize_rows(span)?)),
                 _ => Err(":# expects a table"),
             },
             Filter => {
                 let (predicate, v) = (a(), a());
-                let (xs, shape) = collection(v, span)?;
+                let xs = collection(v, span)?;
                 let mut out = Vec::new();
                 if let V::Sequence(mask) = predicate {
                     if mask.len() != xs.len() {
                         return Err(error(span, "mask length differs from collection length"));
                     }
+                    if let Collection::Table(table) = &xs {
+                        if table.columnar() {
+                            let memory = resources::reserve_for::<usize>(table.len())
+                                .map_err(|why| error(span, why))?;
+                            let mut selected = Vec::with_capacity(table.len());
+                            for (index, value) in mask.iter().enumerate() {
+                                if as_bool(value).map_err(fail)? {
+                                    selected.push(index);
+                                }
+                            }
+                            return table.gather(selected, memory, span);
+                        }
+                    }
                     for (x, b) in xs.iter().zip(mask.iter()) {
                         if as_bool(b).map_err(fail)? {
-                            out.push(x.clone())
+                            out.push(x)
                         }
                     }
                 } else {
@@ -347,45 +343,26 @@ impl Eval<'_> {
                         if as_bool(&self.apply(predicate.clone(), vec![x.clone()], span)?)
                             .map_err(fail)?
                         {
-                            out.push(x.clone())
+                            out.push(x)
                         }
                     }
                 }
-                Ok(wrap(out, shape))
+                Ok(wrap(out, xs.schema().cloned()))
             }
             Group | Aggregate => {
                 let key = a();
                 let summarizer = if op == Aggregate { Some(a()) } else { None };
-                let (xs, in_schema) = collection(a(), span)?;
-                if xs.len() > 8192 {
-                    return Err(error(span, "prototype grouping limit (8192 rows) exceeded"));
-                }
-                let groups = self.group(key, &xs, span)?;
-                if let Some(f) = summarizer {
-                    let schema = layout(schema, span)?;
-                    let mut rows = Vec::with_capacity(groups.len());
-                    for (key, items) in groups {
-                        let p = self.apply(f.clone(), vec![key], span)?;
-                        let row = self.apply(p, vec![wrap(items, in_schema.clone())], span)?;
-                        rows.push(row);
-                    }
-                    Ok(V::Table(rows.into(), schema))
-                } else {
-                    Ok(V::Dict(
-                        groups
-                            .into_iter()
-                            .map(|(k, items)| (k, wrap(items, in_schema.clone())))
-                            .collect::<Vec<_>>()
-                            .into(),
-                    ))
-                }
+                let rows = collection(a(), span)?;
+                return super::super::relational::grouping::apply(
+                    self, key, summarizer, rows, schema, span,
+                );
             }
             Extend => {
                 let (new, source) = (a(), a());
                 let schema = layout(schema, span)?;
-                let (rows, input) = collection(source, span)?;
+                let rows = collection(source, span)?;
                 let (Some(TableSchema::Named(source_fields)), TableSchema::Named(output_fields)) =
-                    (input.as_deref(), schema.as_ref())
+                    (rows.schema().map(Rc::as_ref), schema.as_ref())
                 else {
                     return Err(invariant(
                         span,
@@ -420,7 +397,7 @@ impl Eval<'_> {
                 }
                 let mut out = Vec::with_capacity(rows.len());
                 for (row, new) in rows.iter().zip(extra) {
-                    let mut fs = named(row, span)?.to_vec();
+                    let mut fs = named(&row, span)?.to_vec();
                     for (k, v) in new {
                         if fs.iter().any(|(f, _)| *f == k) {
                             return Err(error(
@@ -432,14 +409,14 @@ impl Eval<'_> {
                     }
                     out.push(V::Record(fs.into()));
                 }
-                Ok(V::Table(out.into(), schema))
+                Ok(Table::from_rows(out.into(), schema))
             }
             SortAsc | SortDesc => {
                 let (f, source) = (a(), a());
-                let (values, schema) = collection(source, span)?;
+                let values = collection(source, span)?;
                 let mut pairs = Vec::with_capacity(values.len());
                 for v in values.iter() {
-                    pairs.push((self.apply(f.clone(), vec![v.clone()], span)?, v.clone()))
+                    pairs.push((self.apply(f.clone(), vec![v.clone()], span)?, v))
                 }
                 if let Some((first, _)) = pairs.first() {
                     for (k, _) in &pairs {
@@ -454,7 +431,10 @@ impl Eval<'_> {
                         cmp.reverse()
                     }
                 });
-                Ok(wrap(pairs.into_iter().map(|(_, v)| v).collect(), schema))
+                Ok(wrap(
+                    pairs.into_iter().map(|(_, v)| v).collect(),
+                    values.schema().cloned(),
+                ))
             }
             Mean | Median | StdDev => return stats(op, a(), span),
             CsvRead => {

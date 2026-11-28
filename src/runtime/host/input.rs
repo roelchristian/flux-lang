@@ -244,7 +244,36 @@ pub(crate) fn decode041(s: &str) -> CsvResult<Vec<Vec<String>>> {
 pub fn typed_rows(s: &str, ordered_header: &[String]) -> Rt<Vec<Vec<String>>> {
     typed_rows041(s, ordered_header).map_err(|e| e.diagnostic)
 }
+#[cfg(any(test, feature = "legacy-oracle"))]
 pub(crate) fn typed_rows041(s: &str, ordered_header: &[String]) -> CsvResult<Vec<Vec<String>>> {
+    let grid = checked_typed_grid(s, ordered_header)?;
+    Ok(grid
+        .rows
+        .map(|row| {
+            let mut row = row.into_iter().map(Some).collect::<Vec<_>>();
+            grid.order.iter().map(|&i| row[i].take().unwrap()).collect()
+        })
+        .collect())
+}
+
+/// Completed structural validation, still in physical CSV column order.
+/// Typed decoders address cells in schema order without reordering strings.
+pub(crate) struct TypedGrid {
+    rows: std::vec::IntoIter<Vec<String>>,
+    order: Vec<usize>,
+}
+
+impl TypedGrid {
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(crate) fn cell(&self, row: usize, slot: usize) -> &str {
+        &self.rows.as_slice()[row][self.order[slot]]
+    }
+}
+
+pub(crate) fn checked_typed_grid(s: &str, ordered_header: &[String]) -> CsvResult<TypedGrid> {
     use std::collections::{HashMap, HashSet};
     let mut rows = decode041(s)
         .map_err(|e| match e.kind {
@@ -293,12 +322,7 @@ pub(crate) fn typed_rows041(s: &str, ordered_header: &[String]) -> CsvResult<Vec
             )));
         }
     }
-    Ok(rows
-        .map(|row| {
-            let mut row = row.into_iter().map(Some).collect::<Vec<_>>();
-            order.iter().map(|&i| row[i].take().unwrap()).collect()
-        })
-        .collect())
+    Ok(TypedGrid { rows, order })
 }
 
 /// Encode a rectangular grid. CRLF separates records; embedded line endings are preserved.

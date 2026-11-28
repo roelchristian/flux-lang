@@ -24,11 +24,14 @@ mod native;
 mod numeric;
 #[path = "../stdlib/reduce.rs"]
 mod reduction;
+mod relational;
 #[path = "../stdlib/relations.rs"]
 mod relations;
 mod resources;
+mod table;
 use array::{packed, sequence as array_sequences};
 use numeric::{arithmetic, decimal, plan as numerical_plan, wide};
+use table::Table;
 use value::display::{inspect, repr};
 use wide::Wide;
 #[path = "../stdlib/effects.rs"]
@@ -60,8 +63,8 @@ pub(crate) use engine::{
 };
 use value::{
     as_bool, as_seq, collection, column_rows, equal, function, key, key_with_budget, layout, named,
-    order, projection, read_cell, wrap, write_cell, Action, Function, Key, VariantValue,
-    KEY_WORK_LIMIT, V,
+    order, projection, read_cell, wrap, write_cell, Action, Collection, Function, Key,
+    VariantValue, KEY_WORK_LIMIT, V,
 };
 
 const COLLECTION_LIMIT: usize = 100_000;

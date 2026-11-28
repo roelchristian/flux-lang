@@ -10,6 +10,14 @@ obsolete specifications are not kept as duplicate files.
 - Consolidate shared Rust internals and streamline the reference and example
   index without changing the language. Group integration tests by topic.
 
+## Draft 0.23
+
+- Add Tabula column buffers, validity masks and ordered table views behind
+  checked HIR. Retain the row-backed typed path for reference execution.
+- Share proven projections and decode eligible typed CSV directly into
+  columns without changing schema, cell diagnostics or row ordering.
+- Export `df.sort`, `df.concat`, `df.take` and `df.drop` as aliases of
+  existing operators; use `df.select` for checked column renames.
 ## Draft 0.22
 
 - Add `lin` for exact determinants, rank, solutions, inverses and matrix
