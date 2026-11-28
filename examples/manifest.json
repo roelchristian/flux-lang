@@ -77,6 +77,10 @@
     "stdout": "(3, 2, [12.300 0.000], 1b)\n"
   },
   {
+    "entry": "examples/io/fallible-actions.flx",
+    "stdout": "Executed twice\nExecuted twice\n"
+  },
+  {
     "entry": "examples/io/files.flx",
     "stdout": "(note.txt, 1b, [note.txt])\nFlux keeps files explicit.\n",
     "files": {
@@ -123,6 +127,10 @@
   {
     "entry": "examples/mathematics/arrays.flx",
     "stdout": "([2 3], [66 75])\n([0 1 3 6 0 4 9 15], [east north west])\n"
+  },
+  {
+    "entry": "examples/mathematics/array-tacit-script.flx",
+    "stdout": "[2 3]\n[11 22 33 14 25 36]\n[1694 2117]\n17\n"
   },
   {
     "entry": "examples/mathematics/axis-reduction.flx",

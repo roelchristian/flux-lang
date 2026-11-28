@@ -70,6 +70,11 @@ Unless noted in the [manifest](manifest.json), run `flux PATH` from the root.
 - [Astronomy](applications/astronomy/README.md): matching synthetic identifiers, not sky positions.
 - [Demography](applications/demography/README.md): exact regional shares from a synthetic census.
 
+For a compact introduction to effects, try
+[fallible actions](io/fallible-actions.flx); the
+[array-and-tacit script](mathematics/array-tacit-script.flx) combines
+broadcasting, axis reduction and explicit execution.
+
 ## Inputs and verification
 
 The [manifest](manifest.json) records arguments and standard input as well

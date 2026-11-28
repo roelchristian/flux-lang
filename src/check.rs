@@ -707,7 +707,12 @@ fn expr(env: &Env, e: &Expr, want: Option<&T>, effect: bool) -> R<T> {
             fun(ts, expr(&nested, b, cursor, false)?)
         }
         Expr::Match(..) => return Err("match expressions require typed HIR".into()),
-        Expr::Fallible(..) | Expr::Raise(..) | Expr::Propagate(..) | Expr::Recover(..) => {
+        Expr::Fallible(..)
+        | Expr::FallibleActionBody(..)
+        | Expr::Raise(..)
+        | Expr::Propagate(..)
+        | Expr::AutoPropagate(..)
+        | Expr::Recover(..) => {
             return Err("typed error handling requires typed HIR".into());
         }
         Expr::NamedRecord(n, fields) => {

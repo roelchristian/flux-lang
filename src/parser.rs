@@ -131,8 +131,12 @@ pub enum Expr {
     Block(Vec<Stmt>, Option<Box<Expr>>),
     Action(Vec<Stmt>, Option<Box<Expr>>),
     Fallible(Vec<Stmt>, Option<Box<Expr>>),
+    /// Fallible region inside a combined action; its unresolved error defaults to unit.
+    FallibleActionBody(Vec<Stmt>, Option<Box<Expr>>),
     Raise(Box<Expr>),
     Propagate(Box<Expr>),
+    /// Immediate execution statement in a combined action, checked before elaboration.
+    AutoPropagate(Box<Expr>),
     Recover(Box<Expr>, Vec<RecoveryCase>),
     Match(Box<Expr>, Vec<MatchCase>),
     Num(String),
@@ -169,7 +173,7 @@ fn expression_signature(expr: &Expr) -> u64 {
         }
         Expr::Tuple(es) | Expr::Array(es) | Expr::Pipeline(es) => es.len().hash(&mut hash),
         Expr::Cases(arms, _) => arms.len().hash(&mut hash),
-        Expr::Raise(_) | Expr::Propagate(_) => {}
+        Expr::Raise(_) | Expr::Propagate(_) | Expr::AutoPropagate(_) => {}
         Expr::Recover(_, arms) => {
             for arm in arms {
                 arm.pattern.hash(&mut hash);
@@ -199,7 +203,10 @@ fn expression_signature(expr: &Expr) -> u64 {
                 n.hash(&mut hash);
             }
         }
-        Expr::Block(stmts, last) | Expr::Action(stmts, last) | Expr::Fallible(stmts, last) => {
+        Expr::Block(stmts, last)
+        | Expr::Action(stmts, last)
+        | Expr::Fallible(stmts, last)
+        | Expr::FallibleActionBody(stmts, last) => {
             stmts.len().hash(&mut hash);
             last.is_some().hash(&mut hash);
             for stmt in stmts {
@@ -261,7 +268,8 @@ impl Expr {
             Self::Lambda(_, body)
             | Self::TypedLambda(_, _, body)
             | Self::Raise(body)
-            | Self::Propagate(body) => visit(body),
+            | Self::Propagate(body)
+            | Self::AutoPropagate(body) => visit(body),
             Self::Record(fields) | Self::NamedRecord(_, fields) => {
                 fields.iter().try_for_each(|(_, e)| visit(e))
             }
@@ -273,7 +281,10 @@ impl Expr {
                 visit(body)?;
                 arms.iter().try_for_each(|a| visit(&a.body))
             }
-            Self::Block(stmts, tail) | Self::Action(stmts, tail) | Self::Fallible(stmts, tail) => {
+            Self::Block(stmts, tail)
+            | Self::Action(stmts, tail)
+            | Self::Fallible(stmts, tail)
+            | Self::FallibleActionBody(stmts, tail) => {
                 for (body, _) in stmts.iter().filter_map(Stmt::body_and_arity) {
                     visit(body)?;
                 }
@@ -1025,7 +1036,7 @@ impl Parser {
                 }
                 self.expect(")")?;
                 self.expect(";")?;
-            } else if matches!(self.peek(), "!" | "!{") {
+            } else if matches!(self.peek(), "!" | "!{" | "!^{") {
                 let start = self.offset();
                 let e = self.expr(false)?;
                 if !matches!(e, Expr::Action(..)) {
@@ -1492,6 +1503,7 @@ impl Parser {
             "^?" => Ok(Expr::Propagate(Box::new(self.expr(effect)?))),
             "^=" => self.recover(effect),
             "!{" => self.block(true),
+            "!^{" => self.combined_action(t.start),
             "!" if self.eat("{") => self.block(true),
             "!" if effect => self.call(t.text, 1, effect, t.start..t.end),
             "!" => Err(Error::new(
@@ -1700,19 +1712,20 @@ impl Parser {
         effect: bool,
         sequence: bool,
         implicit_unit: bool,
+        auto_propagate: bool,
     ) -> PResult<(Vec<Stmt>, Option<Box<Expr>>)> {
         let (bindings, types) = self.prepass(self.pos, false)?;
         self.scopes.push(bindings);
         self.type_scopes
             .push(types.into_iter().map(|n| (n.clone(), n)).collect());
-        let result = self.block_sequence(effect, sequence, implicit_unit);
+        let result = self.block_sequence(effect, sequence, implicit_unit, auto_propagate);
         self.scopes.pop();
         self.type_scopes.pop();
         result
     }
 
     fn block(&mut self, effect: bool) -> PResult<Expr> {
-        let (stmts, last) = self.scoped_block(effect, effect, effect)?;
+        let (stmts, last) = self.scoped_block(effect, effect, effect, false)?;
         Ok(if effect {
             Expr::Action(stmts, last)
         } else {
@@ -1721,8 +1734,16 @@ impl Parser {
     }
 
     fn fallible(&mut self, effect: bool) -> PResult<Expr> {
-        let (stmts, last) = self.scoped_block(effect, true, false)?;
+        let (stmts, last) = self.scoped_block(effect, true, false, false)?;
         Ok(Expr::Fallible(stmts, last))
+    }
+
+    fn combined_action(&mut self, start: usize) -> PResult<Expr> {
+        let (stmts, last) = self.scoped_block(true, true, true, true)?;
+        let body = Expr::FallibleActionBody(stmts, last);
+        self.origins
+            .push(Origin::new(&body, Some(start..self.toks[self.pos - 1].end)));
+        Ok(Expr::Action(Vec::new(), Some(Box::new(body))))
     }
 
     fn match_expression(&mut self, effect: bool) -> PResult<Expr> {
@@ -1891,6 +1912,7 @@ impl Parser {
         effect: bool,
         sequence: bool,
         implicit_unit: bool,
+        auto_propagate: bool,
     ) -> PResult<(Vec<Stmt>, Option<Box<Expr>>)> {
         let mut stmts = Vec::new();
         loop {
@@ -1906,8 +1928,14 @@ impl Parser {
                 continue;
             }
             let start = self.offset();
-            let body = self.expr(effect)?;
+            let immediate_execution = auto_propagate && self.peek() == "!";
+            let mut body = self.expr(effect)?;
             if sequence && self.eat(";") {
+                if immediate_execution && matches!(&body, Expr::Call(op, _) if op == "!") {
+                    body = Expr::AutoPropagate(Box::new(body));
+                    self.origins
+                        .push(Origin::new(&body, Some(start..self.toks[self.pos - 1].end)));
+                }
                 stmts.push(Stmt::Effect {
                     name: None,
                     body,

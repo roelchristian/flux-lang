@@ -22,6 +22,10 @@ expanded singleton data. Numeric, JSON and array limits are in the
 [reference](specification.md); relational evaluation is ordered,
 not a columnar optimizer.
 
+The combined `!^{ ... }` opener lowers to ordinary action/fallible HIR.
+Inference checks immediate unit action statements before elaboration
+inserts lexical propagation nodes at their original spans.
+
 ## Verification
 
 Use Rust 1.85 or later. From the project root:
