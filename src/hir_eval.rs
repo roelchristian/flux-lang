@@ -870,7 +870,7 @@ enum WitnessedOp {
     Join(CoreOp),
     Relation(CoreOp),
     Combinator(CoreOp),
-    Reduce,
+    ArrayOverload(CoreOp, usize),
 }
 
 fn witnessed_op(op: CoreOp) -> Option<WitnessedOp> {
@@ -884,10 +884,9 @@ fn witnessed_op(op: CoreOp) -> Option<WitnessedOp> {
         WitnessedOp::Relation(op)
     } else if combinators05::handles(op) {
         WitnessedOp::Combinator(op)
-    } else if op == CoreOp::Reduce {
-        WitnessedOp::Reduce
     } else {
-        return None;
+        let index = arrays012::overloaded_operand(op)?;
+        WitnessedOp::ArrayOverload(op, index)
     })
 }
 fn key(v: &V) -> Option<Key> {
@@ -1078,13 +1077,6 @@ fn fun_arg(mut sig: &Type, i: usize) -> Option<&Type> {
         None
     }
 }
-fn concrete_shape(ty: &Type) -> NumericResult<bool> {
-    match ty {
-        Type::Var(_) => Err("numeric lift shape is unresolved at indirect application"),
-        Type::Seq(_) => Ok(true),
-        _ => Ok(false),
-    }
-}
 fn callable_lift(op: CoreOp, operands: &[Type]) -> NumericResult<Option<LiftMode>> {
     let Some(arity) = op.lift_arity() else {
         return Ok(None);
@@ -1092,19 +1084,16 @@ fn callable_lift(op: CoreOp, operands: &[Type]) -> NumericResult<Option<LiftMode
     if operands.len() != arity {
         return Err("invalid typed lifting argument count");
     }
-    let l = concrete_shape(&operands[0])?;
-    let r = if arity == 2 {
-        concrete_shape(&operands[1])?
-    } else {
-        false
-    };
-    Ok(Some(LiftMode::from_shapes(l, r)))
+    if operands.iter().any(|ty| matches!(ty, Type::Var(_))) {
+        return Err("numeric lift shape is unresolved at indirect application");
+    }
+    LiftMode::for_operands(&operands[0], operands.get(1)).map(Some)
 }
 fn inner_type(t: &Type) -> &Type {
     if let Type::Seq(x) = t {
         x
     } else {
-        t
+        t.array_element().unwrap_or(t)
     }
 }
 fn result_type(mut t: &Type, n: usize) -> &Type {
@@ -1149,6 +1138,9 @@ fn lift(
                     .into(),
             )
         }
+        LiftMode::LeftArray | LiftMode::RightArray | LiftMode::ArrayPair => {
+            arrays012::lift_binary(a, b, mode, f)?
+        }
         LiftMode::Pairwise => {
             let (a, b) = (as_seq(&a)?, as_seq(&b)?);
             if a.len() != b.len() {
@@ -1178,6 +1170,7 @@ fn lift_one(a: V, mode: Option<LiftMode>, f: &impl Fn(V) -> NumericResult<V>) ->
                 .collect::<NumericResult<Vec<_>>>()?
                 .into(),
         )),
+        LiftMode::LeftArray => arrays012::lift_unary(a, f),
         _ => Err("invalid unary lifting mode in typed HIR"),
     }
 }
@@ -1256,6 +1249,29 @@ fn scalar_binary(op: CoreOp, a: V, b: V, ty: &Type) -> NumericResult<V> {
         _ => return Err("invalid binary operation in typed HIR"),
     })
 }
+fn numeric_identity(ty: &Type, product: bool) -> NumericResult<V> {
+    let identity = i128::from(product);
+    if *ty == Type::Prim(Prim::R) {
+        return Ok(V::Real(identity as f64));
+    }
+    let d = domain(ty).ok_or("reduction has no checked numeric domain")?;
+    if d == Domain::Decimal {
+        decimal05::decimal_literal(if product { "1" } else { "0" })
+    } else {
+        Ok(exact_i128(identity, d))
+    }
+}
+
+fn numeric_reduce(op: CoreOp, items: impl IntoIterator<Item = V>, ty: &Type) -> NumericResult<V> {
+    let product = op == CoreOp::Product;
+    let choice = if product { CoreOp::Mul } else { CoreOp::Add };
+    let mut accumulator = numeric_identity(ty, product)?;
+    for item in items {
+        accumulator = scalar_binary(choice, accumulator, item, ty)?;
+    }
+    Ok(accumulator)
+}
+
 fn operation_arity(op: CoreOp, span: Span) -> R<usize> {
     crate::builtins::for_operation(op)
         .map(|m| m.arity)
@@ -2058,7 +2074,16 @@ impl Eval<'_> {
             WitnessedOp::Combinator(core) => {
                 combinators05::apply(core, args, inputs, output, self, span)
             }
-            WitnessedOp::Reduce => reduce014::apply(&args, inputs, output, self, span),
+            WitnessedOp::ArrayOverload(core, index) => {
+                if inputs.get(index).and_then(Type::array_element).is_some() {
+                    self.tick(span)?;
+                    arrays012::apply(core, &args, inputs, output, self, span)
+                } else if core == CoreOp::Reduce {
+                    reduce014::apply(&args, inputs, output, self, span)
+                } else {
+                    self.core(core, args, output, schema, None, span)
+                }
+            }
         }
     }
 
@@ -2118,8 +2143,10 @@ impl Eval<'_> {
                 ))
             }
             Reduce => return Err(invariant(span, "checked reduce requires operand evidence")),
-            ArrayReshape | ArrayShape | ArrayRavel | ArrayAt | ArrayMap | ArrayZip | ArrayOuter
-            | ArrayRankMap | ArrayScan | ArrayWindows | ArraySelect | ArrayGrade | ArrayPermute => {
+            ArrayReshape | ArrayForm | ArrayShape | ArrayRavel | ArrayAt | ArrayMap | ArrayZip
+            | ArrayOuter | ArrayRankMap | ArrayScan | ArrayWindows | ArraySelect | ArrayGrade
+            | ArrayPermute | ArrayAxes | ArraySection | ArrayReduce | ArrayFold | ArrayScanAxis
+            | ArrayDot | ArrayMatMul | ArrayDiag => {
                 return Err(invariant(
                     span,
                     "checked array operation requires operand evidence",
@@ -2182,24 +2209,7 @@ impl Eval<'_> {
             Sum | Product => {
                 let xs = a();
                 let xs = as_seq(&xs).map_err(fail)?;
-                let identity = i128::from(op == Product);
-                let choice = if op == Sum { Add } else { Mul };
-                let mut n = if *ty == Type::Prim(Prim::R) {
-                    V::Real(identity as f64)
-                } else {
-                    let d = domain(ty)
-                        .ok_or_else(|| error(span, "reduction has no checked numeric domain"))?;
-                    if d == Domain::Decimal {
-                        decimal05::decimal_literal(if identity == 0 { "0" } else { "1" })
-                            .map_err(fail)?
-                    } else {
-                        exact_i128(identity, d)
-                    }
-                };
-                for v in xs {
-                    n = scalar_binary(choice, n, v.clone(), ty).map_err(fail)?;
-                }
-                Ok(n)
+                numeric_reduce(op, xs.iter().cloned(), ty)
             }
             Apply => return self.apply(a(), vec![a()], span),
             ApplyTuple => {

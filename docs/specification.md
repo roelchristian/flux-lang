@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for Draft 0.14. **Limited** features
+This is the normative reference for Draft 0.15. **Limited** features
 work only as stated; **Proposed** features are unavailable and do not
 reserve a design. See the [example corpus](../examples/README.md) for
 complete programs, the [implementation guide](implementation.md) for Rust
@@ -371,7 +371,8 @@ equal-length sequence rows and rejects ragged input.
 `>: KEY X` sorts ascending and `<: KEY X` descending; equal keys retain
 their input order.
 
-Reductions consume sequences; project a table column first. `+/ X`,
+Sequence reductions take sequences, not tables; project a table column
+first. The [dense forms](#reduction-scan-and-contraction) use an axis. `+/ X`,
 `*/ X`, `&&/ X` and `||/ X` have empty identities zero, one, true and
 false, respectively. Numeric reductions use the checked domain; `>/ X`
 and `</ X` return optional numeric extrema, absent on empty input.
@@ -406,43 +407,117 @@ and [descriptive statistics](../examples/statistics/descriptive.flx).
 
 ## Dense arrays and indexed sequences
 
-An `array[a]` is a dense array of homogeneous elements with a checked
-dynamic shape. It is distinct from the ordinary sequence type `[a]`;
-a nested sequence can still have ragged rows. The name `array` is
-reserved as a built-in type constructor and takes exactly one type
-argument. Import `<< "arr";` to use the operations below.
+An `array[a]` has homogeneous elements of static type `a` and a
+checked dynamic shape. It is distinct from a sequence `[a]`; nested
+sequences may be ragged and are never implicitly flattened into arrays.
+The reserved type constructor `array` takes one type argument. Elements
+are stored in row-major order: the last coordinate varies fastest.
+Rank-zero shape `[]` contains one element; a zero dimension makes the
+array empty without discarding any dimensions.
+
+### Construction and indexing
 
 | Operation | Contract |
 | --- | --- |
-| `arr.reshape SHAPE ITEMS` | Make an array from `[n]` and `[a]`, with the same element count as the product of the dimensions. |
-| `arr.shape A`, `arr.ravel A` | Return the dimensions as `[n]` or elements as `[a]` in row-major order. |
-| `arr.at INDEX A` | Return the optional element at one-based coordinates. Wrong coordinate count, zero, and out-of-range coordinates return absence. |
-| `arr.map F A` | Apply a checked unary function to each element and retain the shape. |
-| `arr.zip F A B` | Apply a checked binary function to broadcast element pairs. Align trailing axes; a missing axis counts as one. Each pair of lengths must be equal or include a singleton. |
-| `arr.outer F A B` | Apply F to each pair in A-major then B order; the output dimensions are A's followed by B's. |
-| `arr.rankmap K F A` | Pass each trailing rank-K cell as an array to F and collect its results in the leading frame shape. K must not exceed A's rank. |
-| `arr.scan F SEED A` | Scan each last-axis row with F applied to the accumulator and next element. Include each seed, increasing the last dimension by one. Rank-zero input is invalid. |
-| `arr.windows W XS` | Return all full, overlapping windows of positive natural width W as a nested sequence, in input order. A wide window produces no rows. |
-| `arr.select IS XS` | Gather sequence items by one-based natural indices, allowing duplicates and reordering. Return absence if any index is invalid. |
-| `arr.grade KEY XS` | Return the stable ascending permutation of one-based indices; evaluate KEY once per item. Key values must satisfy `ord`. |
-| `arr.permute IS XS` | Reorder a sequence with a complete permutation; reject missing, repeated or invalid positions. |
+| `form SHAPE ITEMS` | Shape has type `[n]`. Consume a sequence or ravel an array in row-major order. The element count must equal the product of the dimensions; no cycling, truncation or padding. |
+| `dim A`, `# A`, `,. A` | Inspect dimensions as `[n]`, count elements as `n`, or ravel to `[a]`, respectively. |
+| `.: COORDS A` | Return `?a` at one-based natural coordinates. Wrong coordinate count, zero or an out-of-range coordinate gives absence. For rank zero use `[]`. |
+| `@: F A` | Map a checked unary function over elements in row-major order, preserving shape. |
+| `\|: A` | Reverse the order of the axes. Rank-zero and rank-one arrays are unchanged. |
+| `arr.axes PERM A` | Rearrange axes in the given order, using a full, one-based permutation. |
+| `arr.sect STARTS COUNTS A` | Take a rectangular section. Both vectors of naturals must match the rank. Starts are one-based; zero is invalid and an out-of-range start gives zero width on that axis. Counts clamp to the available length; zero counts give zero width. No axes are removed. |
 
-Rank-zero shape `[]` contains one scalar cell. Any dimension of zero makes
-the element count zero without discarding other dimensions. A leading
-zero frame means rank mapping performs no callbacks; a zero-width
-trailing cell still supplies an empty array for each existing frame
-position. An empty last scan axis yields one seed per frame position.
-Array shapes and permutation validity are checked before the corresponding
-output is built. Reference limits are rank 16 and at most 100,000 per
-dimension or materialized element count. An indexed sequence operation
-may reject a materialized result exceeding the same bound.
+The unqualified forms need no import. Use `<< "arr";` for qualified
+operations. The existing names `arr.reshape` (sequence input),
+`arr.shape`, `arr.ravel`, `arr.at` and `arr.map` remain available.
+An ambiguous first-class `&form` needs a checked input type to choose
+sequence or array input. On sequences the shared operators retain their
+[sequence semantics](#sequence-operators-and-reductions).
 
-Array operations are explicit: ordinary arithmetic does not implicitly
-lift to `array[a]`, and static types do not encode dimensions. Callbacks
-have ordinary rank-one types and cannot implicitly execute actions.
-Arrays are not equality or hash keys in this draft; compare their shape
-and raveled data explicitly when the element type supports equality.
-See the [matrix and indexing example](../examples/mathematics/arrays.flx).
+### Elementwise operations and broadcasting
+
+Arithmetic (`+`, `-`, `*`, `/`, `//`, `%`, `^`, `-:`, absolute
+value and square root), ordinary comparisons (`=`, `/=`, `<`, `<=`,
+`>`, `>=`), Boolean operators (`~`, `&&`, `||`) and the numerical
+conversions `:n`, `:z`, `:d`, `:q`, `:r` may operate on arrays.
+Unary operations keep shape and ordinary comparisons return `array[b]`.
+Each operation uses the same checked element domain, exact promotion,
+decimal scale and approximation rules as the scalar operation.
+
+A scalar broadcasts across an array. Two arrays align trailing axes;
+missing axes have length one. Each pair of lengths must be equal or
+include a singleton, which expands to the other length. Thus zero with
+one yields zero, while zero with a length greater than one is
+incompatible. Sequences and arrays do not broadcast together. Shape
+incompatibility is diagnosed before element operations run. Use an
+annotation when inference cannot distinguish array and sequence forms.
+These rules also apply to checked first-class calls. Lifted `*` is
+elementwise, not matrix multiplication.
+
+Whole-array `==` returns one Boolean. Its operands must have compatible
+element types that support equality. It compares shape and corresponding
+elements without broadcasting, so unequal shapes compare false even
+when both arrays are empty. Arrays are not hash keys.
+
+### Reduction, scan and contraction
+
+Reductions `+/`, `*/`, `>/`, `</`, `&&/`, `||/`, `@/` and `/:`
+act on the final axis, remove it and return an array. Rank-one input
+therefore yields a rank-zero array, not a scalar. Rank-zero input has no
+axis to reduce or scan. The outer cells are visited in row-major order
+and each contracted axis is traversed from left to right.
+
+- Sum, product and Boolean reductions retain scalar semantics and their
+  empty identities: zero, one, true and false, respectively.
+- Extrema and unseeded `@/ F A` return arrays of optionals. An empty cell
+  yields absence; for `@/` only elements after the first invoke F.
+- `/: F SEED A` folds each cell starting with SEED. `\: F SEED A` scans
+  and includes the seed, extending the final dimension by one. A zero
+  axis length gives one seed per existing outer cell, not one seed for
+  the whole array.
+
+Use `arr.red AXIS F A`, `arr.fold AXIS F SEED A` and
+`arr.scana AXIS F SEED A` to select a one-based axis for an unseeded
+reduction, seeded fold or scan. Axes must exist. The older
+`arr.scan F SEED A` scans the final axis. A zero outer frame yields no
+callbacks; mapping or reducing a zero-width cell of a nonempty frame
+follows the corresponding empty-cell rules. Callbacks never execute
+suspended actions, propagate typed failures or unwrap optionals on
+behalf of the caller.
+
+| Operation | Contract |
+| --- | --- |
+| `arr.dot A B` | Multiply and sum equal-length rank-one arrays; return a scalar. |
+| `arr.mul A B` | Multiply rank-two arrays of shapes `[m k]` and `[k n]` to obtain `[m n]`. |
+| `arr.diag A` | Return the main diagonal of a rank-two array as a rank-one array of length `min(m,n)`. |
+| `arr.zip F A B` | Apply a checked binary function to broadcast pairs. |
+| `arr.outer F A B` | Apply F to pairs in A-major then B order; concatenate the input shapes. |
+| `arr.rankmap K F A` | Pass each trailing rank-K cell as an array to F. Collect results in the leading frame shape; K cannot exceed the rank. |
+
+Dot and matrix multiplication use a statically checked numeric domain
+and accumulate left to right. An empty contraction yields the additive
+identity of that domain. Unlike pairwise broadcasting, contracted axis
+lengths must match exactly. Multiply-accumulate steps count against the
+interpreter’s execution budget. An empty leading rankmap frame invokes no
+callback; a zero-width trailing cell still supplies an empty array for
+each existing frame position.
+
+### Indexed sequence operations and limits
+
+| Operation | Contract |
+| --- | --- |
+| `arr.windows W XS` | Return full, overlapping windows of positive natural width W in input order. A wide window yields no rows. |
+| `arr.select IS XS` | Gather by one-based natural indices, allowing duplicates and reordering. Return absence if any index is invalid. |
+| `arr.grade KEY XS` | Return a stable ascending permutation of one-based indices. Evaluate KEY once per item; keys must satisfy `ord`. |
+| `arr.permute IS XS` | Reorder by a complete permutation. Reject missing, repeated or invalid positions. |
+
+The reference limits rank to 16 and each dimension or materialized
+collection to 100,000. Shapes, counts and permutations are validated
+before output allocation and callbacks; singleton expansion does not
+copy an expanded input. See [array calculus](../examples/mathematics/array-calculus.flx),
+[matrix products](../examples/mathematics/matrix-products.flx),
+[axis reductions](../examples/mathematics/axis-reduction.flx) and
+[indexed sequences](../examples/mathematics/arrays.flx).
 
 ## Relational operations
 

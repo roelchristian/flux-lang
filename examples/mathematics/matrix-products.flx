@@ -1,0 +1,21 @@
+<< "arr";
+
+--- A matrix product contracts matching axes, without broadcasting.
+a := form [2n 3n] [1z 2z 3z 4z 5z 6z];
+b := form [3n 2n] [7z 8z 9z 10z 11z 12z];
+product := arr.mul a b;
+diagonal := arr.diag product;
+
+--- A decimal dot product retains its checked scale.
+exact :=
+    arr.dot
+        form [2n] [1.20d 2.00d]
+        form [2n] [3n 4n];
+
+!{
+    ^{
+        ^? ! print (dim product, ,. product, ,. diagonal);
+        ^? ! print exact;
+        ()
+    }
+};

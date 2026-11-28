@@ -209,11 +209,18 @@ fn matrix(op: CoreOp, v: &V, span: Span) -> R<V> {
 }
 
 fn extrema(op: CoreOp, v: &V, span: Span) -> R<V> {
-    let seq = as_seq(v).map_err(|e| error(span, e))?;
-    let Some((mut best, tail)) = seq.split_first() else {
+    extrema_iter(op, as_seq(v).map_err(|e| error(span, e))?.iter(), span)
+}
+
+pub(super) fn extrema_iter<'a>(
+    op: CoreOp,
+    mut items: impl Iterator<Item = &'a V>,
+    span: Span,
+) -> R<V> {
+    let Some(mut best) = items.next() else {
         return Ok(V::Optional(None));
     };
-    for item in tail {
+    for item in items {
         let c = order(best, item).map_err(|e| error(span, e))?;
         if if op == CoreOp::Max {
             c.is_lt()
@@ -227,10 +234,17 @@ fn extrema(op: CoreOp, v: &V, span: Span) -> R<V> {
 }
 
 fn bool_reduce(op: CoreOp, v: &V, span: Span) -> R<V> {
-    let seq = as_seq(v).map_err(|e| error(span, e))?;
+    bool_reduce_iter(op, as_seq(v).map_err(|e| error(span, e))?, span)
+}
+
+pub(super) fn bool_reduce_iter<'a>(
+    op: CoreOp,
+    items: impl IntoIterator<Item = &'a V>,
+    span: Span,
+) -> R<V> {
     let all = op == CoreOp::All;
     let mut result = all;
-    for value in seq {
+    for value in items {
         let value = as_bool(value).map_err(|e| error(span, e))?;
         result = if all {
             result && value

@@ -1,6 +1,10 @@
 //! Checked row-major dense arrays. No shape is inferred from element values.
 use super::*;
 
+#[path = "dense_algebra015.rs"]
+mod algebra;
+use algebra::{axis, last_axis, LaneOp};
+
 const MAX_RANK: usize = 16;
 
 pub(super) struct Dense {
@@ -41,11 +45,15 @@ impl Dense {
 }
 
 fn volume(shape: &[usize], span: Span) -> R<usize> {
+    checked_volume(shape).map_err(|message| error(span, message))
+}
+
+fn checked_volume(shape: &[usize]) -> NumericResult<usize> {
     if shape.len() > MAX_RANK {
-        return Err(error(span, "array rank exceeds 16"));
+        return Err("array rank exceeds 16");
     }
     if shape.iter().any(|&n| n > COLLECTION_LIMIT) {
-        return Err(error(span, "array dimension exceeds the collection limit"));
+        return Err("array dimension exceeds the collection limit");
     }
     if shape.contains(&0) {
         return Ok(0);
@@ -53,7 +61,7 @@ fn volume(shape: &[usize], span: Span) -> R<usize> {
     shape.iter().try_fold(1usize, |size, &n| {
         size.checked_mul(n)
             .filter(|&product| product <= COLLECTION_LIMIT)
-            .ok_or_else(|| error(span, "array element count exceeds the collection limit"))
+            .ok_or("array element count exceeds the collection limit")
     })
 }
 
@@ -110,7 +118,7 @@ fn at(arg: &V, arr: &Dense, span: Span) -> R<V> {
     Ok(V::Optional(arr.cells.get(off).cloned().map(Rc::new)))
 }
 
-fn broadcast(a: &[usize], b: &[usize], span: Span) -> R<Rc<[usize]>> {
+fn broadcast(a: &[usize], b: &[usize]) -> NumericResult<Rc<[usize]>> {
     let rank = a.len().max(b.len());
     let axis = |xs: &[usize], i: usize| i.checked_sub(rank - xs.len()).map_or(1, |j| xs[j]);
     (0..rank)
@@ -120,10 +128,7 @@ fn broadcast(a: &[usize], b: &[usize], span: Span) -> R<Rc<[usize]>> {
                 (x, y) if x == y => Ok(x),
                 (1, y) => Ok(y),
                 (x, 1) => Ok(x),
-                _ => Err(error(
-                    span,
-                    "incompatible trailing axes for array broadcasting",
-                )),
+                _ => Err("incompatible trailing axes for array broadcasting"),
             }
         })
         .collect()
@@ -141,6 +146,96 @@ fn broadcast_strides(shape: &[usize], rank: usize) -> [usize; MAX_RANK] {
     out
 }
 
+/// Enumerate offsets in output row-major order. Do not construct strides
+/// for zero-volume arrays: other axes of an empty shape can be very large.
+fn broadcast_indices<'a>(
+    shape: &'a [usize],
+    left: &[usize],
+    right: &[usize],
+    len: usize,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let axes = if len == 0 {
+        ([0; MAX_RANK], [0; MAX_RANK])
+    } else {
+        (
+            broadcast_strides(left, shape.len()),
+            broadcast_strides(right, shape.len()),
+        )
+    };
+    (0..len).map(move |mut index| {
+        let (mut x, mut y) = (0, 0);
+        for (i, &n) in shape.iter().enumerate().rev() {
+            let coord = index % n;
+            index /= n;
+            x += axes.0[i] * coord;
+            y += axes.1[i] * coord;
+        }
+        (x, y)
+    })
+}
+
+fn expect_dense(arg: &V) -> NumericResult<&Dense> {
+    match arg {
+        V::Dense(array) => Ok(array),
+        _ => Err("expected a checked dense array operand"),
+    }
+}
+
+pub(super) fn lift_binary(
+    a: V,
+    b: V,
+    mode: LiftMode,
+    f: &impl Fn(V, V) -> NumericResult<V>,
+) -> NumericResult<V> {
+    let (shape, cells) = match mode {
+        LiftMode::LeftArray => {
+            let a = expect_dense(&a)?;
+            let cells = a
+                .cells
+                .iter()
+                .cloned()
+                .map(|x| f(x, b.clone()))
+                .collect::<NumericResult<Rc<_>>>()?;
+            (a.shape.clone(), cells)
+        }
+        LiftMode::RightArray => {
+            let b = expect_dense(&b)?;
+            let cells = b
+                .cells
+                .iter()
+                .cloned()
+                .map(|x| f(a.clone(), x))
+                .collect::<NumericResult<Rc<_>>>()?;
+            (b.shape.clone(), cells)
+        }
+        LiftMode::ArrayPair => {
+            let (a, b) = (expect_dense(&a)?, expect_dense(&b)?);
+            let shape = broadcast(&a.shape, &b.shape)?;
+            let len = checked_volume(&shape)?;
+            let cells = broadcast_indices(&shape, &a.shape, &b.shape, len)
+                .map(|(i, j)| f(a.cells[i].clone(), b.cells[j].clone()))
+                .collect::<NumericResult<Rc<_>>>()?;
+            (shape, cells)
+        }
+        _ => return Err("invalid dense lifting mode in typed HIR"),
+    };
+    Ok(V::Dense(Rc::new(Dense { shape, cells })))
+}
+
+pub(super) fn lift_unary(a: V, f: &impl Fn(V) -> NumericResult<V>) -> NumericResult<V> {
+    let a = expect_dense(&a)?;
+    let cells = a
+        .cells
+        .iter()
+        .cloned()
+        .map(f)
+        .collect::<NumericResult<Rc<_>>>()?;
+    Ok(V::Dense(Rc::new(Dense {
+        shape: a.shape.clone(),
+        cells,
+    })))
+}
+
 fn pairwise(
     outer: bool,
     f: &V,
@@ -153,7 +248,7 @@ fn pairwise(
     let shape = if outer {
         a.0.shape.iter().chain(b.0.shape.iter()).copied().collect()
     } else {
-        broadcast(&a.0.shape, &b.0.shape, span)?
+        broadcast(&a.0.shape, &b.0.shape).map_err(|message| error(span, message))?
     };
     let len = volume(&shape, span)?;
     let mut cells = Vec::with_capacity(len);
@@ -171,17 +266,8 @@ fn pairwise(
                 }
             }
         }
-    } else if len != 0 {
-        let ax = broadcast_strides(&a.0.shape, shape.len());
-        let bx = broadcast_strides(&b.0.shape, shape.len());
-        for offset in 0..len {
-            let (mut x, mut y, mut index) = (0, 0, offset);
-            for (i, &n) in shape.iter().enumerate().rev() {
-                let coord = index % n;
-                index /= n;
-                x += ax[i] * coord;
-                y += bx[i] * coord;
-            }
+    } else {
+        for (x, y) in broadcast_indices(&shape, &a.0.shape, &b.0.shape, len) {
             cells.push(eval.apply_dyadic(
                 f,
                 (a.0.cells[x].clone(), a.1),
@@ -232,34 +318,16 @@ fn rankmap(
     Dense::pack(frame, out.into(), span)
 }
 
-fn scan(
-    f: &V,
-    seed: &V,
-    input: &Dense,
-    item: &Type,
-    acc: &Type,
-    eval: &mut Eval<'_>,
-    span: Span,
-) -> R<V> {
-    let (&width, frame) = input
-        .shape
-        .split_last()
-        .ok_or_else(|| error(span, "array scan needs a last axis (rank zero has none)"))?;
-    let mut shape = frame.to_vec();
-    shape.push(width + 1);
-    let n = volume(&shape, span)?;
-    let mut out = Vec::with_capacity(n);
-    // Output volume is zero when a leading axis is zero. An empty last
-    // axis, on the other hand, contributes one seed per leading cell.
-    for i in 0..n / (width + 1) {
-        let mut current = seed.clone();
-        out.push(current.clone());
-        for value in &input.cells[i * width..(i + 1) * width] {
-            current = eval.apply_dyadic(f, (current, acc), (value.clone(), item), acc, span)?;
-            out.push(current.clone());
-        }
+/// Position of the collection argument for operations overloaded on checked
+/// array/sequence evidence. No choice of semantics is made from a value tag.
+pub(super) fn overloaded_operand(op: CoreOp) -> Option<usize> {
+    use CoreOp::*;
+    match op {
+        Count | Flatten | Transpose | Sum | Product | Max | Min | All | Any => Some(0),
+        Lookup | Map | Reduce => Some(1),
+        Fold | Scan => Some(2),
+        _ => None,
     }
-    Dense::pack(shape.into(), out.into(), span)
 }
 
 pub(super) fn handles(op: CoreOp) -> bool {
@@ -267,6 +335,7 @@ pub(super) fn handles(op: CoreOp) -> bool {
     matches!(
         op,
         ArrayReshape
+            | ArrayForm
             | ArrayShape
             | ArrayRavel
             | ArrayAt
@@ -275,6 +344,14 @@ pub(super) fn handles(op: CoreOp) -> bool {
             | ArrayOuter
             | ArrayRankMap
             | ArrayScan
+            | ArrayAxes
+            | ArraySection
+            | ArrayReduce
+            | ArrayFold
+            | ArrayScanAxis
+            | ArrayDot
+            | ArrayMatMul
+            | ArrayDiag
     )
 }
 
@@ -290,6 +367,15 @@ pub(super) fn apply(
     eval.tick(span)?;
     match (op, args, types) {
         (ArrayReshape, [dims, xs], [_, _]) => Dense::pack(shape(dims, span)?, seq(xs, span)?, span),
+        (ArrayForm, [dims, xs], [_, input]) => {
+            let dims = shape(dims, span)?;
+            let cells = if input.array_element().is_some() {
+                dense(xs, span)?.cells.clone()
+            } else {
+                seq(xs, span)?
+            };
+            Dense::pack(dims, cells, span)
+        }
         (ArrayShape, [xs], [_]) => Ok(V::Sequence(
             dense(xs, span)?
                 .shape
@@ -297,9 +383,13 @@ pub(super) fn apply(
                 .map(|&n| exact_i128(n as i128, Domain::Natural))
                 .collect(),
         )),
-        (ArrayRavel, [xs], [_]) => Ok(V::Sequence(dense(xs, span)?.cells.clone())),
-        (ArrayAt, [coords, xs], [_, _]) => at(coords, dense(xs, span)?, span),
-        (ArrayMap, [f, xs], [_, t]) => {
+        (Count, [xs], [_]) => Ok(exact_i128(
+            dense(xs, span)?.cells.len() as i128,
+            Domain::Natural,
+        )),
+        (ArrayRavel | Flatten, [xs], [_]) => Ok(V::Sequence(dense(xs, span)?.cells.clone())),
+        (ArrayAt | Lookup, [coords, xs], [_, _]) => at(coords, dense(xs, span)?, span),
+        (ArrayMap | Map, [f, xs], [_, t]) => {
             let xs = dense(xs, span)?;
             let input = element(t, span)?;
             let out = element(output, span)?;
@@ -328,15 +418,78 @@ pub(super) fn apply(
             eval,
             span,
         ),
-        (ArrayScan, [f, seed, xs], [_, _, t]) => scan(
-            f,
-            seed,
-            dense(xs, span)?,
-            element(t, span)?,
+        (Transpose, [xs], [_]) => {
+            let input = dense(xs, span)?;
+            let permutation: Vec<_> = (0..input.shape.len()).rev().collect();
+            algebra::reorder(input, &permutation, span)
+        }
+        (ArrayAxes, [permutation, xs], [_, _]) => {
+            let indices = as_seq(permutation).map_err(|e| invariant(span, e))?;
+            let input = dense(xs, span)?;
+            if indices.len() != input.shape.len() {
+                return Err(error(
+                    span,
+                    "arr.axes requires a complete one-based axis permutation",
+                ));
+            }
+            let indices = indices
+                .iter()
+                .map(|index| exact_index(index).map_err(|e| error(span, e)))
+                .collect::<R<Vec<_>>>()?;
+            algebra::axes(&indices, input, span)
+        }
+        (ArraySection, [starts, counts, xs], [_, _, _]) => {
+            let starts = shape(starts, span)?;
+            let counts = shape(counts, span)?;
+            algebra::section(&starts, &counts, dense(xs, span)?, span)
+        }
+        (Sum | Product | Max | Min | All | Any, [xs], [_]) => {
+            let input = dense(xs, span)?;
+            let kernel = LaneOp::Intrinsic(op, element(output, span)?);
+            algebra::along_axis(input, last_axis(input, span)?, kernel, eval, span)
+        }
+        (Reduce, [f, xs], [_, t]) | (ArrayReduce, [_, f, xs], [_, _, t]) => {
+            let input = dense(xs, span)?;
+            let axis = if op == ArrayReduce {
+                axis(&args[0], input, span)?
+            } else {
+                last_axis(input, span)?
+            };
+            let kernel = LaneOp::Reduce {
+                callback: f,
+                item: element(t, span)?,
+            };
+            algebra::along_axis(input, axis, kernel, eval, span)
+        }
+        (Fold | Scan | ArrayScan, [f, seed, xs], [_, _, t])
+        | (ArrayFold | ArrayScanAxis, [_, f, seed, xs], [_, _, _, t]) => {
+            let input = dense(xs, span)?;
+            let explicit_axis = matches!(op, ArrayFold | ArrayScanAxis);
+            let axis = if explicit_axis {
+                axis(&args[0], input, span)?
+            } else {
+                last_axis(input, span)?
+            };
+            let kernel = LaneOp::Seeded {
+                callback: f,
+                seed,
+                item: element(t, span)?,
+                accumulator: element(output, span)?,
+                scan: matches!(op, Scan | ArrayScan | ArrayScanAxis),
+            };
+            algebra::along_axis(input, axis, kernel, eval, span)
+        }
+        (ArrayDot, [a, b], [_, _]) => {
+            algebra::dot(dense(a, span)?, dense(b, span)?, output, eval, span)
+        }
+        (ArrayMatMul, [a, b], [_, _]) => algebra::matmul(
+            dense(a, span)?,
+            dense(b, span)?,
             element(output, span)?,
             eval,
             span,
         ),
+        (ArrayDiag, [a], [_]) => algebra::diag(dense(a, span)?, span),
         _ => Err(invariant(span, "invalid checked array operands")),
     }
 }

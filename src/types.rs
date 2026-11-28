@@ -780,6 +780,9 @@ impl InferCtx {
                     Self::class_obligations(class, x, out)?;
                 }
             }
+            t if class == Eq && t.array_element().is_some() => {
+                Self::class_obligations(class, t.array_element().unwrap(), out)?;
+            }
             Seq(x) if matches!(class, Eq | Ord) => Self::class_obligations(class, x, out)?,
             Table(x) if class == Eq => Self::class_obligations(class, x, out)?,
             Dict(k, v) if class == Eq => {

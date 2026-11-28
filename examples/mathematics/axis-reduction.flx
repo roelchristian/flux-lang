@@ -1,0 +1,30 @@
+<< "arr";
+
+--- Reducing the first axis instead of the last leaves three cells.
+a := form [2n 3n] [1z 2z 3z 4z 5z 6z];
+differences := arr.red 1n &- a;
+running := arr.scana 1n &+ 0z a;
+
+--- A nonempty frame of empty cells still produces reductions and seeds.
+empty: [z] := [];
+no_columns := form [2n 0n] empty;
+totals := +/ no_columns;
+without_seed := @/ &+ no_columns;
+with_seed := \: &+ 7z no_columns;
+
+--- A zero frame has no cell results; a rank-zero array has one element.
+no_rows := form [0n 2n] empty;
+no_totals := +/ no_rows;
+scalar := form [] [42z];
+
+!{
+    ^{
+        ^? ! print (dim differences, ,. differences);
+        ^? ! print (dim running, ,. running);
+        ^? ! print (dim totals, ,. totals, ,. without_seed);
+        ^? ! print (dim with_seed, ,. with_seed);
+        ^? ! print (dim no_totals, ,. no_totals);
+        ^? ! print (dim scalar, # scalar, .: [] scalar);
+        ()
+    }
+};

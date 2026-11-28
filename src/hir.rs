@@ -147,25 +147,69 @@ pub enum CoreOp {
     ArraySelect,
     ArrayGrade,
     ArrayPermute,
+    ArrayForm,
+    ArrayAxes,
+    ArraySection,
+    ArrayReduce,
+    ArrayFold,
+    ArrayScanAxis,
+    ArrayDot,
+    ArrayMatMul,
+    ArrayDiag,
 }
 
-/// Static shape execution plan for direct pointwise operations. Pairwise
-/// lifting includes a runtime equality check on the two sequence lengths.
+/// Static shape execution plan for pointwise operations. Sequences remain
+/// length-matched; arrays broadcast along compatible trailing axes at runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LiftMode {
     Scalar,
     LeftSequence,
     RightSequence,
     Pairwise,
+    LeftArray,
+    RightArray,
+    ArrayPair,
 }
 impl LiftMode {
-    pub(crate) fn from_shapes(left: bool, right: bool) -> Self {
-        match (left, right) {
-            (false, false) => Self::Scalar,
-            (true, false) => Self::LeftSequence,
-            (false, true) => Self::RightSequence,
-            (true, true) => Self::Pairwise,
+    /// Choose the lift using checked types, never runtime value tags.
+    pub(crate) fn for_operands(left: &Type, right: Option<&Type>) -> Result<Self, &'static str> {
+        let left_seq = matches!(left, Type::Seq(_));
+        let right_seq = matches!(right, Some(Type::Seq(_)));
+        let left_array = left.array_element().is_some();
+        let right_array = right.is_some_and(|ty| ty.array_element().is_some());
+        if (left_seq || right_seq) && (left_array || right_array) {
+            return Err("checked lifting cannot mix sequences and dense arrays");
         }
+        Ok(match (left_seq, right_seq, left_array, right_array) {
+            (_, _, true, true) => Self::ArrayPair,
+            (_, _, true, false) => Self::LeftArray,
+            (_, _, false, true) => Self::RightArray,
+            (true, true, _, _) => Self::Pairwise,
+            (true, false, _, _) => Self::LeftSequence,
+            (false, true, _, _) => Self::RightSequence,
+            _ => Self::Scalar,
+        })
+    }
+
+    fn for_call(
+        op: CoreOp,
+        args: &[ExprId],
+        arena: &[ExprNode],
+        result: &Type,
+    ) -> Result<Option<Self>, &'static str> {
+        let Some(arity) = op.lift_arity() else {
+            return Ok(None);
+        };
+        let mode = match (arity, args) {
+            (1, [left]) => Self::for_operands(&arena[left.0].ty, None)?,
+            (2, [left, right]) => Self::for_operands(&arena[left.0].ty, Some(&arena[right.0].ty))?,
+            _ => return Err("invalid direct lifting arity"),
+        };
+        let dense = matches!(mode, Self::LeftArray | Self::RightArray | Self::ArrayPair);
+        if *result != Type::Never && dense != result.array_element().is_some() {
+            return Err("HIR lifting evidence disagrees with result shape");
+        }
+        Ok(Some(mode))
     }
 }
 
@@ -879,21 +923,10 @@ impl Lower<'_> {
                 "typed CSV read requires a closed row schema",
             ));
         }
-        let lift_mode = if let Call(Target::Builtin(op), args) = &kind {
-            if let Some(arity) = op.lift_arity() {
-                if args.len() != arity {
-                    return Err(Boundary::missing(span, "invalid direct lifting arity"));
-                }
-                let sequence = |i: usize| {
-                    args.get(i)
-                        .is_some_and(|id| matches!(self.arena[id.0].ty, Type::Seq(_)))
-                };
-                Some(LiftMode::from_shapes(sequence(0), sequence(1)))
-            } else {
-                None
-            }
-        } else {
-            None
+        let lift_mode = match &kind {
+            Call(Target::Builtin(op), args) => LiftMode::for_call(*op, args, &self.arena, &ty)
+                .map_err(|reason| Boundary::missing(span, reason))?,
+            _ => None,
         };
         let evidence = self.inference.operation_at(source_id).cloned();
         let id = ExprId(self.arena.len());

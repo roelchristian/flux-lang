@@ -3,6 +3,7 @@ use super::*;
 use crate::{
     builtins,
     diagnostic::{Category, Diagnostic},
+    types::Prim,
     Error,
 };
 use std::collections::{HashMap, HashSet};
@@ -57,6 +58,16 @@ enum SymbolUse {
     Call(usize),
 }
 
+fn check_arity(expected: usize, received: usize, span: Span) -> Result<(), Error> {
+    if expected != received {
+        return Err(invalid(
+            span,
+            format!("HIR target expects {expected} operand(s)"),
+        ));
+    }
+    Ok(())
+}
+
 fn target(
     p: &HirProgram,
     target: &Target,
@@ -95,11 +106,8 @@ fn target(
             "invalid HIR reference to a special or nullary operation",
         ));
     }
-    if arity.is_some_and(|n| n != expected) {
-        return Err(invalid(
-            span,
-            format!("HIR target expects {expected} operand(s)"),
-        ));
+    if let Some(received) = arity {
+        check_arity(expected, received, span)?;
     }
     Ok(())
 }
@@ -121,6 +129,75 @@ fn layout_matches(p: &HirProgram, mut ty: &Type, witness: Option<&TableSchema>) 
         }
     }
     witness.is_none()
+}
+
+fn is_new_dense_operation(op: CoreOp) -> bool {
+    use CoreOp::*;
+    matches!(
+        op,
+        ArrayForm
+            | ArrayAxes
+            | ArraySection
+            | ArrayReduce
+            | ArrayFold
+            | ArrayScanAxis
+            | ArrayDot
+            | ArrayMatMul
+            | ArrayDiag
+    )
+}
+
+// Check the collection kinds used for both direct and first-class dispatch.
+// Ranks, dimensions and promotion have their own runtime and inference rules.
+fn dense_signature(op: CoreOp, inputs: &[&Type], output: &Type, at: Span) -> Result<(), Error> {
+    use CoreOp::*;
+    if *output == Type::Never {
+        return Ok(());
+    }
+    let natural = |ty: &Type| *ty == Type::Prim(Prim::N);
+    let dimensions = |ty: &Type| matches!(ty, Type::Seq(n) if natural(n));
+    let numeric = |ty: &Type| {
+        matches!(
+            ty,
+            Type::Var(_) | Type::Prim(Prim::N | Prim::Z | Prim::Q | Prim::D | Prim::R)
+        )
+    };
+    let array = |ty: &Type| ty.array_element().is_some();
+    let checked = match (op, inputs) {
+        (ArrayForm, [shape, items]) => {
+            dimensions(shape) && (matches!(items, Type::Seq(_)) || array(items)) && array(output)
+        }
+        (ArrayAxes, [order, input]) => dimensions(order) && array(input) && array(output),
+        (ArraySection, [starts, counts, input]) => {
+            dimensions(starts) && dimensions(counts) && array(input) && array(output)
+        }
+        (ArrayReduce, [axis, _, input]) => {
+            natural(axis)
+                && array(input)
+                && matches!(output.array_element(), Some(Type::Optional(_)))
+        }
+        (ArrayFold | ArrayScanAxis, [axis, _, _, input]) => {
+            natural(axis) && array(input) && array(output)
+        }
+        (ArrayDot | ArrayMatMul, [left, right]) => {
+            left.array_element().is_some_and(numeric)
+                && right.array_element().is_some_and(numeric)
+                && if op == ArrayDot {
+                    numeric(output)
+                } else {
+                    output.array_element().is_some_and(numeric)
+                }
+        }
+        (ArrayDiag, [input]) => array(input) && array(output),
+        _ => false,
+    };
+    if !checked {
+        return Err(invalid(
+            at,
+            "HIR dense-array operation disagrees with its checked signature",
+        ));
+    }
+    Ok(())
 }
 
 fn pattern_binders(
@@ -205,16 +282,17 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
         }
         let child = |id| edge(id, i, at);
         let expected_lift = match &node.kind {
-            ExprKind::Call(Target::Builtin(op), operands) if op.lift_arity().is_some() => {
-                for &operand in operands {
-                    child(operand)?;
+            ExprKind::Call(Target::Builtin(op), operands) => {
+                if let Some(arity) = op.lift_arity() {
+                    for &operand in operands {
+                        child(operand)?;
+                    }
+                    check_arity(arity, operands.len(), at)?;
+                    LiftMode::for_call(*op, operands, &p.arena, &node.ty)
+                        .map_err(|reason| invalid(at, reason))?
+                } else {
+                    None
                 }
-                let seq = |i: usize| {
-                    operands
-                        .get(i)
-                        .is_some_and(|id| matches!(p.arena[id.0].ty, Type::Seq(_)))
-                };
-                Some(LiftMode::from_shapes(seq(0), seq(1)))
             }
             _ => None,
         };
@@ -263,11 +341,36 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
         match &node.kind {
             ExprKind::Literal(_) => {}
             ExprKind::Load(id) => references.push((*id, at, SymbolUse::Load)),
-            ExprKind::Reference(t) => target(p, t, None, at, &mut references)?,
+            ExprKind::Reference(t) => {
+                target(p, t, None, at, &mut references)?;
+                if let Target::Builtin(op) = t {
+                    if is_new_dense_operation(*op) {
+                        let mut output = &node.ty;
+                        let mut inputs = Vec::new();
+                        for _ in 0..builtins::for_operation(*op).unwrap().arity {
+                            let Type::Fun(input, next) = output else {
+                                return Err(invalid(
+                                    at,
+                                    "incomplete HIR dense-array callable type",
+                                ));
+                            };
+                            inputs.push(input.as_ref());
+                            output = next;
+                        }
+                        dense_signature(*op, &inputs, output, at)?;
+                    }
+                }
+            }
             ExprKind::Call(t, ids) => {
                 target(p, t, Some(ids.len()), at, &mut references)?;
                 for &id in ids {
                     child(id)?;
+                }
+                if let Target::Builtin(op) = t {
+                    if is_new_dense_operation(*op) {
+                        let inputs: Vec<_> = ids.iter().map(|id| &p.arena[id.0].ty).collect();
+                        dense_signature(*op, &inputs, &node.ty, at)?;
+                    }
                 }
             }
             ExprKind::Tuple(ids) | ExprKind::Sequence(ids) => {
@@ -617,4 +720,76 @@ fn validate_steps(
         edge(tail, limit, span)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checked_hir(source: &str) -> HirProgram {
+        let program = crate::parser::parse(source).unwrap();
+        let names = crate::resolve::resolve(&program).unwrap();
+        let types = crate::infer::infer(&program, &names).unwrap();
+        lower(&program, &types, &names).unwrap()
+    }
+
+    #[test]
+    fn dense_pointwise_plans_are_checked_before_execution() {
+        let ir =
+            checked_hir("a := form [1n] [1z]; b := + a a; c := + a 1z; d := + 1z a; e := -: a;");
+        validate(&ir).unwrap();
+        let modes = ir
+            .groups
+            .iter()
+            .flatten()
+            .filter_map(|d| ir.node(d.body).lift_mode)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            modes,
+            [
+                LiftMode::ArrayPair,
+                LiftMode::LeftArray,
+                LiftMode::RightArray,
+                LiftMode::LeftArray
+            ]
+        );
+        let mut forged = ir.clone();
+        let i = forged
+            .arena
+            .iter()
+            .position(|node| node.lift_mode == Some(LiftMode::ArrayPair))
+            .unwrap();
+        forged.arena[i].lift_mode = Some(LiftMode::Pairwise);
+        assert!(validate(&forged)
+            .unwrap_err()
+            .message
+            .contains("lifting evidence"));
+        forged.arena[i].lift_mode = Some(LiftMode::ArrayPair);
+        forged.arena[i].ty = Type::Prim(Prim::Z);
+        assert!(validate(&forged)
+            .unwrap_err()
+            .message
+            .contains("result shape"));
+    }
+
+    #[test]
+    fn a_forged_array_callable_signature_is_not_admitted() {
+        let mut ir = checked_hir("f:[n]->[z]->array[z] := &form; g:array[z]->[n] := &dim;");
+        validate(&ir).unwrap();
+        let node = ir
+            .arena
+            .iter_mut()
+            .find(|node| {
+                matches!(
+                    node.kind,
+                    ExprKind::Reference(Target::Builtin(CoreOp::ArrayForm))
+                )
+            })
+            .unwrap();
+        node.ty = Type::Fun(Box::new(Type::Prim(Prim::N)), Box::new(Type::Prim(Prim::Z)));
+        assert!(validate(&ir)
+            .unwrap_err()
+            .message
+            .contains("incomplete HIR dense-array callable type"));
+    }
 }

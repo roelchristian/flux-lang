@@ -13,9 +13,13 @@ guide explains the Rust pipeline and verification.
 | Evaluation | Execute only admitted HIR in scripts and the REPL. The `legacy-oracle` Cargo feature enables a separate differential-testing interpreter, not fallback. Runtime I/O is attached to suspended actions. |
 | Formatting | Use original tokens and opt-in parser ranges to change layout without changing the token stream. |
 
-Evaluation is eager and resource-bounded. Numeric, JSON and array
-limits are specified in the [reference](specification.md); the relational
-runtime preserves ordered results rather than optimizing columnar queries.
+Evaluation is eager and resource-bounded. Dense-array HIR selects the
+same numeric operation for direct or first-class application and carries
+the specific lift for scalar or pairwise broadcasting. The runtime
+checks dynamic shapes and walks row-major offsets rather than copying
+expanded singleton data. Numeric, JSON and array limits are in the
+[reference](specification.md); relational evaluation is ordered,
+not a columnar optimizer.
 
 ## Verification
 

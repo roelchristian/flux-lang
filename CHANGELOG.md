@@ -10,6 +10,13 @@ obsolete specifications are not kept as duplicate files.
 - Consolidate shared Rust internals and streamline the reference and example
   index without changing the language. Group integration tests by topic.
 
+## Draft 0.15
+
+- Add `form` and `dim`; extend shared numeric, Boolean, selection,
+  mapping and reduction operators to dense arrays without changing sequences.
+- Add axis permutation, sections, axis-specific folds and scans, and exact
+  dot products, matrix multiplication and diagonals in `arr`.
+
 ## Draft 0.14
 
 - Prefer `[:` (take), `:]` (drop), `sect` (section), `,.` (flatten one level),
