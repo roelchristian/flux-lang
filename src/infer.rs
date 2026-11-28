@@ -1,10 +1,10 @@
 //! Rank-one inference for the Draft 0.4 checked subset.
 use crate::{
     parser::{
-        Expr, Program, RecoveryCase, RecoveryPattern, Stmt, TypeAnnotation, TypeAnnotationKind,
-        TypePrimitive,
+        Expr, Program, RecoveryCase, RecoveryPattern, Stmt, SyntaxId, TypeAnnotation,
+        TypeAnnotationKind, TypePrimitive,
     },
-    resolve::{Resolution, SymbolId},
+    resolve::{ProgramShape, Resolution, SymbolId, SyntaxLocator},
     types::{Class, Constraint, InferCtx, NominalId, Prim, Row, Scheme, Type},
 };
 use std::collections::{HashMap, HashSet};
@@ -24,6 +24,7 @@ pub struct InferError {
     pub message: String,
     pub expected: Option<String>,
     pub actual: Option<String>,
+    pub constraint: Option<String>,
 }
 impl std::fmt::Display for InferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -44,38 +45,49 @@ pub struct Constructor {
 }
 #[derive(Debug, Default)]
 pub struct InferResult {
-    pub expressions: HashMap<usize, Type>,
+    syntax: std::sync::Arc<SyntaxLocator>,
+    pub(crate) program_shape: Option<std::sync::Arc<ProgramShape>>,
+    pub expressions: HashMap<SyntaxId, Type>,
     pub bindings: HashMap<SymbolId, Scheme>,
-    pub operations: HashMap<usize, Operation>,
-    pub callees: HashMap<usize, Type>,
+    pub operations: HashMap<SyntaxId, Operation>,
+    pub callees: HashMap<SyntaxId, Type>,
     pub schemas: HashMap<NominalId, Row>,
     pub constructors: HashMap<SymbolId, Constructor>,
-    pub boundaries: HashMap<usize, usize>,
-}
-fn address(e: &Expr) -> usize {
-    (e as *const Expr) as usize
+    pub boundaries: HashMap<SyntaxId, SyntaxId>,
 }
 impl InferResult {
     pub fn constructor(&self, id: SymbolId) -> Option<&Constructor> {
         self.constructors.get(&id)
     }
-    pub fn boundary_of(&self, e: &Expr) -> Option<usize> {
-        self.boundaries.get(&address(e)).copied()
+    pub fn boundary_of(&self, e: &Expr) -> Option<SyntaxId> {
+        self.boundary_at(self.syntax.id(e)?)
+    }
+    pub fn boundary_at(&self, id: SyntaxId) -> Option<SyntaxId> {
+        self.boundaries.get(&id).copied()
     }
     pub fn nominal_schema(&self, id: &NominalId) -> Option<&Row> {
         self.schemas.get(id)
     }
     pub fn type_of(&self, e: &Expr) -> Option<&Type> {
-        self.expressions.get(&address(e))
+        self.type_at(self.syntax.id(e)?)
+    }
+    pub fn type_at(&self, id: SyntaxId) -> Option<&Type> {
+        self.expressions.get(&id)
     }
     pub fn binding_type(&self, id: SymbolId) -> Option<&Scheme> {
         self.bindings.get(&id)
     }
     pub fn callee_type(&self, e: &Expr) -> Option<&Type> {
-        self.callees.get(&address(e))
+        self.callee_type_at(self.syntax.id(e)?)
+    }
+    pub fn callee_type_at(&self, id: SyntaxId) -> Option<&Type> {
+        self.callees.get(&id)
     }
     pub fn operation_of(&self, e: &Expr) -> Option<&Operation> {
-        self.operations.get(&address(e))
+        self.operation_at(self.syntax.id(e)?)
+    }
+    pub fn operation_at(&self, id: SyntaxId) -> Option<&Operation> {
+        self.operations.get(&id)
     }
 }
 type R<T> = Result<T, InferError>;
@@ -198,25 +210,29 @@ fn type_has_nominal(t: &Type) -> bool {
         _ => false,
     }
 }
-fn solve_numeric(a: Prim, b: Prim) -> Option<Prim> {
-    use crate::builtins::{promote, Numeric as K};
-    fn to(x: Prim) -> Option<K> {
-        Some(match x {
-            Prim::N => K::N,
-            Prim::Z => K::Z,
-            Prim::Q => K::Q,
-            Prim::D => K::D,
-            Prim::R => K::R,
-            _ => return None,
-        })
-    }
-    Some(match promote(to(a)?, to(b)?)? {
+fn numeric_kind(x: Prim) -> Option<crate::builtins::Numeric> {
+    use crate::builtins::Numeric as K;
+    Some(match x {
+        Prim::N => K::N,
+        Prim::Z => K::Z,
+        Prim::Q => K::Q,
+        Prim::D => K::D,
+        Prim::R => K::R,
+        _ => return None,
+    })
+}
+fn numeric_prim(x: crate::builtins::Numeric) -> Prim {
+    use crate::builtins::Numeric as K;
+    match x {
         K::N => Prim::N,
         K::Z => Prim::Z,
         K::Q => Prim::Q,
         K::D => Prim::D,
         K::R => Prim::R,
-    })
+    }
+}
+fn solve_numeric(a: Prim, b: Prim) -> Option<Prim> {
+    crate::builtins::promote(numeric_kind(a)?, numeric_kind(b)?).map(numeric_prim)
 }
 
 #[derive(Clone)]
@@ -233,11 +249,11 @@ struct Engine<'r> {
     schemas: HashMap<NominalId, Row>,
     schema_scopes: Vec<HashMap<String, NominalId>>,
     sums: HashMap<NominalId, Vec<SymbolId>>,
-    boundaries: Vec<(usize, Type)>,
+    boundaries: Vec<(SyntaxId, Type)>,
     discarded_results: Vec<(Type, usize, usize)>,
-    entry_natural_tail: Option<usize>,
-    entry_boundary: Option<usize>,
-    raise_payload: Option<usize>,
+    entry_natural_tail: Option<SyntaxId>,
+    entry_boundary: Option<SyntaxId>,
+    raise_payload: Option<SyntaxId>,
     saw_result: bool,
     start: usize,
     literals: Vec<(Type, bool, usize, usize)>,
@@ -247,6 +263,10 @@ struct Engine<'r> {
     qualifiers: &'r std::collections::BTreeMap<usize, Vec<(String, String)>>,
 }
 impl Engine<'_> {
+    fn syntax_id(&self, expr: &Expr) -> SyntaxId {
+        self.resolver.syntax_id(expr).expect("indexed expression")
+    }
+
     fn err(&self, text: impl Into<String>) -> InferError {
         InferError {
             kind: InferErrorKind::TypeError,
@@ -258,6 +278,7 @@ impl Engine<'_> {
                 .map_or(self.start, |s| s.end),
             expected: None,
             actual: None,
+            constraint: None,
             message: text.into(),
         }
     }
@@ -272,6 +293,7 @@ impl Engine<'_> {
                 .map_or(self.start, |s| s.end),
             expected: None,
             actual: None,
+            constraint: None,
             message: text.into(),
         }
     }
@@ -330,7 +352,14 @@ impl Engine<'_> {
             .unify_committing(x, y)
             .map_err(|e| match error_conflict {
                 Some((actual, expected)) => self.incompatible(&actual, &expected),
-                None => self.err(e),
+                None => {
+                    let mut failure = self.err(e);
+                    if left != right {
+                        failure.actual = Some(left.to_string());
+                        failure.expected = Some(right.to_string());
+                    }
+                    failure
+                }
             })?;
         for c in pending {
             self.nominal_evidence(c.class, &c.ty, &mut HashSet::new())?;
@@ -339,7 +368,12 @@ impl Engine<'_> {
     }
     fn req(&mut self, c: Class, t: &Type) -> R<()> {
         self.nominal_evidence(c, t, &mut HashSet::new())?;
-        self.cx.require(c, t).map_err(|e| self.err(e))
+        self.cx.require(c, t).map_err(|e| {
+            let mut failure = self.err(e);
+            failure.actual = Some(self.cx.resolve(t).to_string());
+            failure.constraint = Some(format!("{c} {}", self.cx.resolve(t)));
+            failure
+        })
     }
     fn nominal_evidence(&mut self, c: Class, t: &Type, seen: &mut HashSet<NominalId>) -> R<()> {
         if !matches!(c, Class::Eq | Class::Hash) {
@@ -665,7 +699,7 @@ impl Engine<'_> {
             .last()
             .ok_or_else(|| self.err("no lexically enclosing fallible boundary"))?
             .clone();
-        self.result.boundaries.insert(address(e), id);
+        self.result.boundaries.insert(self.syntax_id(e), id);
         Ok(err)
     }
     fn recover(
@@ -815,7 +849,13 @@ impl Engine<'_> {
         let entries = self.literals[from..].to_vec();
         for (t, negative, start, end) in entries {
             match self.cx.resolve(&t) {
-                Type::Var(_) => self.unify(&t, &p(Prim::Z))?,
+                Type::Var(_) => {
+                    self.unify(&t, &p(Prim::Z)).map_err(|mut failure| {
+                        failure.start = start;
+                        failure.end = end;
+                        failure
+                    })?;
+                }
                 Type::Prim(Prim::N) if negative => {
                     return Err(InferError {
                         kind: InferErrorKind::TypeError,
@@ -823,6 +863,7 @@ impl Engine<'_> {
                         end,
                         expected: None,
                         actual: None,
+                        constraint: None,
                         message: "negative integer literal cannot have type n".into(),
                     })
                 }
@@ -892,11 +933,11 @@ impl Engine<'_> {
     fn expr_inner(&mut self, env: &Env, e: &Expr, want: Option<&Type>, effects: bool) -> R<Type> {
         use Prim::*;
         let t = match e {
-            Expr::Int(n) if self.entry_natural_tail == Some(address(e)) => {
+            Expr::Int(n) if self.entry_natural_tail == Some(self.syntax_id(e)) => {
                 self.int(*n, Some(&p(N)))?
             }
             Expr::Int(n) => self.int(*n, want)?,
-            Expr::Num(_) if self.entry_natural_tail == Some(address(e)) => {
+            Expr::Num(_) if self.entry_natural_tail == Some(self.syntax_id(e)) => {
                 self.int_signed(false, Some(&p(N)))?
             }
             Expr::Num(raw)
@@ -1087,7 +1128,7 @@ impl Engine<'_> {
                     Some(Type::Result(ok, err)) => (*ok, *err),
                     _ => (self.cx.fresh(), self.cx.fresh()),
                 };
-                let id = address(e);
+                let id = self.syntax_id(e);
                 self.result.boundaries.insert(id, id);
                 self.boundaries.push((id, err.clone()));
                 let output = self.block_body(env, defs, tail.as_deref(), Some(&ok), effects);
@@ -1106,7 +1147,7 @@ impl Engine<'_> {
             }
             Expr::Raise(value) => {
                 let err = self.at_boundary(e)?;
-                let old = self.raise_payload.replace(address(value));
+                let old = self.raise_payload.replace(self.syntax_id(value));
                 let typed = self.expr(env, value, Some(&err), effects);
                 self.raise_payload = old;
                 typed?;
@@ -1175,11 +1216,15 @@ impl Engine<'_> {
             }
             Expr::Call(n, args) => {
                 if let Some(callee) = self.constructor_type(e) {
-                    self.result.callees.insert(address(e), callee.clone());
+                    self.result
+                        .callees
+                        .insert(self.syntax_id(e), callee.clone());
                     self.apply(env, callee, args, want, effects)?
                 } else if env.contains_key(n) {
                     let callee = self.lookup(env, n)?;
-                    self.result.callees.insert(address(e), callee.clone());
+                    self.result
+                        .callees
+                        .insert(self.syntax_id(e), callee.clone());
                     self.apply(env, callee, args, want, effects)?
                 } else {
                     self.builtin_call(env, e, n, args, want, effects)?
@@ -1188,7 +1233,7 @@ impl Engine<'_> {
         };
         if let Some(w) = want {
             if t != Type::Never {
-                if self.raise_payload == Some(address(e)) {
+                if self.raise_payload == Some(self.syntax_id(e)) {
                     let target = self.cx.resolve(w);
                     let actual = self.cx.resolve(&t);
                     if target != actual
@@ -1201,7 +1246,7 @@ impl Engine<'_> {
                 self.unify(&t, w)?;
             }
         }
-        self.result.expressions.insert(address(e), t.clone());
+        self.result.expressions.insert(self.syntax_id(e), t.clone());
         Ok(t)
     }
     fn apply(
@@ -1296,8 +1341,19 @@ impl Engine<'_> {
             _ => Err(self.err(format!("{n} expects an exact numeric type, found {t}"))),
         }
     }
+    fn numeric_mixture(&self, op: &str, a: Prim, b: Prim) -> InferError {
+        let mut failure = self.err("r does not implicitly mix with exact numerical types");
+        failure.actual = Some(format!("{}, {}", p(a), p(b)));
+        failure.expected = Some("two exact operands or two approximate operands".into());
+        failure.constraint = Some(format!("compatible numerical domains for {op}"));
+        failure
+    }
     fn numeric_binary(&mut self, n: &str, ta: &Type, tb: &Type, out: Option<&Type>) -> R<Type> {
+        use crate::builtins::{lookup, BinaryDomain};
         use Prim::*;
+        let rule = lookup(n)
+            .and_then(|entry| BinaryDomain::from_rule(entry.rule))
+            .ok_or_else(|| self.err(format!("missing numerical domain rule for {n}")))?;
         let ta = self.cx.resolve(ta);
         let tb = self.cx.resolve(tb);
         if [&ta, &tb]
@@ -1325,7 +1381,7 @@ impl Engine<'_> {
             };
             return Ok(s(self.numeric_binary(n, &ta, b, se)?));
         }
-        if n == "^" {
+        if rule == BinaryDomain::Power {
             self.unify(&tb, &p(N))?;
             self.req(Class::Num, &ta)?;
             return Ok(ta);
@@ -1333,8 +1389,9 @@ impl Engine<'_> {
         self.req(Class::Num, &ta)?;
         self.req(Class::Num, &tb)?;
         let k = match (&ta, &tb) {
-            (Type::Prim(a), Type::Prim(b)) => p(solve_numeric(*a, *b)
-                .ok_or_else(|| self.err("r does not implicitly mix with exact numerical types"))?),
+            (Type::Prim(a), Type::Prim(b)) => {
+                p(solve_numeric(*a, *b).ok_or_else(|| self.numeric_mixture(n, *a, *b))?)
+            }
             (Type::Var(_), Type::Prim(_)) => {
                 self.unify(&ta, &tb)?;
                 tb.clone()
@@ -1346,7 +1403,7 @@ impl Engine<'_> {
             (Type::Var(_), Type::Var(_)) => {
                 self.unify(&ta, &tb)?;
                 if let Some(t @ Type::Prim(_)) = out.as_ref() {
-                    if n != "/" || t == &p(R) {
+                    if rule != BinaryDomain::Division || t == &p(R) {
                         self.unify(&ta, t)?;
                     }
                 }
@@ -1354,24 +1411,23 @@ impl Engine<'_> {
             }
             _ => return Err(self.err("expected numerical operands")),
         };
-        let k = self.cx.resolve(&k);
-        if matches!(n, "//" | "%" | "..") {
-            match k {
-                Type::Prim(N | Z) => {}
-                Type::Var(_) => self.unify(&k, &p(Z))?,
-                _ => return Err(self.err(format!("{n} requires integral operands"))),
-            }
+        let mut k = self.cx.resolve(&k);
+        if rule == BinaryDomain::Integral && matches!(k, Type::Var(_)) {
+            self.unify(&k, &p(Z))?;
+            k = p(Z);
         }
-        Ok(if n == "/" {
-            if k == p(R) {
-                p(R)
-            } else {
-                self.require_exact_numeric(&k, "division")?;
-                p(Q)
-            }
+        if rule == BinaryDomain::Division && matches!(k, Type::Var(_)) {
+            self.require_exact_numeric(&k, "division")?;
+            k = self.cx.resolve(&k);
+        }
+        if let Type::Prim(t) = k {
+            let domain = numeric_kind(t).ok_or_else(|| self.err("expected numerical operands"))?;
+            Ok(p(numeric_prim(
+                rule.result(n, domain).map_err(|e| self.err(e))?,
+            )))
         } else {
-            k
-        })
+            Ok(k)
+        }
     }
     fn binary_rel(&mut self, n: &str, a: &Type, b: &Type) -> R<Type> {
         let at = self.cx.resolve(a);
@@ -1392,9 +1448,7 @@ impl Engine<'_> {
         }
         let k = if let (Type::Prim(a), Type::Prim(b)) = (&at, &bt) {
             if num(*a) && num(*b) {
-                p(solve_numeric(*a, *b).ok_or_else(|| {
-                    self.err("r does not implicitly mix with exact numerical types")
-                })?)
+                p(solve_numeric(*a, *b).ok_or_else(|| self.numeric_mixture(n, *a, *b))?)
             } else {
                 self.unify(&at, &bt)?;
                 at
@@ -2013,7 +2067,7 @@ impl Engine<'_> {
                 }
                 self.result
                     .expressions
-                    .insert(address(&args[0]), s(row.clone()));
+                    .insert(self.syntax_id(&args[0]), s(row.clone()));
                 match self.cx.resolve(&row) {
                     Type::Record(_) | Type::Nominal(_) | Type::Tuple(_) => {}
                     _ => return Err(self.err("table rows need a tuple or record schema")),
@@ -2189,7 +2243,7 @@ impl Engine<'_> {
             }
         };
         self.result.operations.insert(
-            address(call),
+            self.syntax_id(call),
             if matches!(n, "+" | "-" | "*" | "/" | "//" | "%" | "^" | "-:" | "|") {
                 Operation::Numeric {
                     operator: n.to_owned(),
@@ -2810,6 +2864,7 @@ impl Engine<'_> {
             params,
             param_types,
             result_type,
+            body,
             start,
             ..
         } = stmt
@@ -2818,6 +2873,13 @@ impl Engine<'_> {
         };
         self.start = *start;
         let mut sig = self.signature(params, param_types, result_type.as_ref())?;
+        // Checking a polymorphic annotation against rigid variables and then
+        // storing it as a monotype would silently specialize that annotation.
+        if params.is_empty() && !sig.explicit.is_empty() && !syntactic_value(body) {
+            return Err(self.err(
+                "the value restriction does not allow a quantified signature on an expansive binding",
+            ));
+        }
         if let Some(qs) = self.qualifiers.get(start) {
             for (c, v) in qs {
                 let class = match c.as_str() {
@@ -2886,7 +2948,7 @@ impl Engine<'_> {
         }
         let z = p(Prim::Z);
         for node in nodes {
-            let addr = address(node);
+            let addr = self.syntax_id(node);
             self.result.expressions.insert(addr, z.clone());
             if let Expr::Call(op, _) = node {
                 self.result.operations.insert(
@@ -3205,7 +3267,7 @@ fn fallible_builtin(name: &str) -> bool {
             | "res.optional"
     )
 }
-fn find_entry_natural_tail(p: &Program) -> Option<usize> {
+fn find_entry_natural_tail(p: &Program, resolver: &Resolution) -> Option<SyntaxId> {
     let Expr::Action(_, Some(tail)) = p.entry.as_ref()? else {
         return None;
     };
@@ -3217,22 +3279,42 @@ fn find_entry_natural_tail(p: &Program) -> Option<usize> {
         Expr::Num(raw) => !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()),
         _ => false,
     };
-    nonnegative.then(|| address(final_))
+    nonnegative.then(|| resolver.syntax_id(final_)).flatten()
 }
 pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
+    let compatible = resolver.for_program(p).ok_or_else(|| InferError {
+        kind: InferErrorKind::TypeError,
+        start: 0,
+        end: 0,
+        message: "resolution metadata belongs to a different syntax tree".into(),
+        expected: None,
+        actual: None,
+        constraint: None,
+    })?;
+    infer_live(p, compatible.as_ref())
+}
+
+/// The compiler pipeline borrows one unchanged program across its stages.
+pub(crate) fn infer_live(p: &Program, resolver: &Resolution) -> R<InferResult> {
     let mut e = Engine {
         cx: InferCtx::new(),
-        result: InferResult::default(),
+        result: InferResult {
+            syntax: resolver.syntax.clone(),
+            program_shape: resolver.program_shape.clone(),
+            ..InferResult::default()
+        },
         resolver,
         schemas: HashMap::new(),
         schema_scopes: vec![HashMap::new()],
         sums: HashMap::new(),
         boundaries: vec![],
         discarded_results: vec![],
-        entry_natural_tail: find_entry_natural_tail(p),
+        entry_natural_tail: find_entry_natural_tail(p, resolver),
         entry_boundary: p.entry.as_ref().and_then(|e| {
             if let Expr::Action(_, Some(tail)) = e {
-                matches!(tail.as_ref(), Expr::Fallible(..)).then(|| address(tail))
+                matches!(tail.as_ref(), Expr::Fallible(..))
+                    .then(|| resolver.syntax_id(tail))
+                    .flatten()
             } else {
                 None
             }
@@ -3261,7 +3343,7 @@ pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
     if e.saw_result {
         for (t, start, end) in &e.discarded_results {
             if matches!(e.cx.resolve(t), Type::Result(..)) {
-                return Err(InferError{kind:InferErrorKind::TypeError,start:*start,end:*end,expected:None,actual:None,message:"result-valued statement would discard a failure; propagate, recover, or bind its result".into()});
+                return Err(InferError{kind:InferErrorKind::TypeError,start:*start,end:*end,expected:None,actual:None,constraint:None,message:"result-valued statement would discard a failure; propagate, recover, or bind its result".into()});
             }
         }
         let quantified = e
@@ -3284,6 +3366,7 @@ pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
                         end: span.end,
                         expected: None,
                         actual: None,
+                        constraint: None,
                         message: "ambiguous fallible result: annotate the success and error types"
                             .into(),
                     });
@@ -3304,6 +3387,7 @@ pub fn infer(p: &Program, resolver: &Resolution) -> R<InferResult> {
                 end: *end,
                 expected: None,
                 actual: None,
+                constraint: None,
                 message: "empty sequence has an ambiguous element type; add an annotation".into(),
             });
         }

@@ -76,6 +76,12 @@ pub enum RecoveryPattern {
     Bind(String),
     Constructor(String, Vec<String>),
 }
+/// Postorder syntax identity, scoped to one complete Program. Independent
+/// parses and clones of the same syntax have identical IDs. Structural
+/// edits or changes to the order of linked modules may renumber them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct SyntaxId(pub usize);
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Int(i128),
@@ -476,7 +482,7 @@ fn expression_signature(expr: &Expr) -> u64 {
     hash.finish()
 }
 impl Program {
-    pub(crate) fn expression_origins(&self) -> Vec<(&Expr, Range<usize>)> {
+    fn expressions_postorder(&self) -> Vec<&Expr> {
         fn stmt<'p>(s: &'p Stmt, nodes: &mut Vec<&'p Expr>) {
             match s {
                 Stmt::Def { body, .. } | Stmt::Effect { body, .. } => expr(body, nodes),
@@ -536,6 +542,28 @@ impl Program {
         if let Some(e) = &self.entry {
             expr(e, &mut nodes);
         }
+        nodes
+    }
+
+    /// The full deterministic syntax index, including generated expressions
+    /// (such as tacit expansion nodes), independent of source span availability.
+    pub fn identified_expressions(&self) -> impl Iterator<Item = (SyntaxId, &Expr)> {
+        self.expressions_postorder()
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| (SyntaxId(i), e))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expression_origins(&self) -> Vec<(&Expr, Range<usize>)> {
+        self.identified_origins()
+            .into_iter()
+            .map(|(_, expr, span)| (expr, span))
+            .collect()
+    }
+
+    pub(crate) fn identified_origins(&self) -> Vec<(SyntaxId, &Expr, Range<usize>)> {
+        let nodes = self.expressions_postorder();
         if nodes.len() != self.origins.len()
             || nodes
                 .iter()
@@ -548,7 +576,10 @@ impl Program {
         nodes
             .into_iter()
             .zip(&self.origins)
-            .filter_map(|(node, origin)| origin.span.clone().map(|span| (node, span)))
+            .enumerate()
+            .filter_map(|(i, (node, origin))| {
+                origin.span.clone().map(|span| (SyntaxId(i), node, span))
+            })
             .collect()
     }
 }

@@ -83,11 +83,11 @@ impl Prepared<'_> {
     }
 
     pub fn run(&self) -> Result<eval::Output, Error> {
-        hir_eval::run(&self.hir)
+        hir_eval::run_prevalidated(&self.hir)
     }
 
     pub fn run_with_output(&self, sink: &mut dyn std::io::Write) -> Result<eval::Output, Error> {
-        hir_eval::run_with_output(&self.hir, sink)
+        self.run_with_io(&mut crate::FsInput, sink)
     }
 
     pub fn run_with_io(
@@ -95,7 +95,7 @@ impl Prepared<'_> {
         input: &mut dyn crate::RuntimeInput,
         output: &mut dyn std::io::Write,
     ) -> Result<eval::Output, Error> {
-        hir_eval::run_with_io(&self.hir, input, output)
+        self.run_with_host(input, &mut std::io::empty(), &[], output)
     }
 
     pub fn run_with_host(
@@ -105,7 +105,7 @@ impl Prepared<'_> {
         arguments: &[String],
         output: &mut dyn std::io::Write,
     ) -> Result<eval::Output, Error> {
-        hir_eval::run_with_host(&self.hir, input, stdin, arguments, output)
+        hir_eval::run_with_host_prevalidated(&self.hir, input, stdin, arguments, output)
     }
 
     pub fn view_with_host(
@@ -115,18 +115,18 @@ impl Prepared<'_> {
         arguments: &[String],
         output: &mut dyn std::io::Write,
     ) -> Result<eval::ReplOutput, Error> {
-        hir_eval::view_with_host(&self.hir, input, stdin, arguments, output)
+        hir_eval::view_with_host_prevalidated(&self.hir, input, stdin, arguments, output)
     }
 
     pub fn view_with_output(
         &self,
         sink: &mut dyn std::io::Write,
     ) -> Result<eval::ReplOutput, Error> {
-        hir_eval::view_with_output(&self.hir, sink)
+        self.view_with_host(&mut crate::FsInput, &mut std::io::empty(), &[], sink)
     }
 
     pub fn view(&self) -> Result<eval::ReplOutput, Error> {
-        hir_eval::view_entry(&self.hir)
+        hir_eval::view_entry_prevalidated(&self.hir)
     }
 }
 
@@ -258,26 +258,30 @@ pub fn prepare_modules_timed<'a>(
         },
     });
     let start = Instant::now();
-    let lowered = hir::lower(program, &inferred, &names);
+    let lowered = hir::lower_live(program, &inferred, &names)
+        .map_err(|boundary| {
+            Diagnostic::new(
+                if boundary.is_migration() {
+                    Category::MigrationBoundary
+                } else {
+                    Category::InvalidHir
+                },
+                boundary.span,
+                public_text(&boundary.message),
+            )
+            .into_error()
+        })
+        .and_then(|hir| {
+            hir::validate(&hir)?;
+            Ok(hir)
+        });
     timing.elaboration = start.elapsed();
-    match lowered {
-        Ok(hir) => Ok(Prepared {
-            hir,
-            inspection,
-            module_interfaces,
-            source: std::marker::PhantomData,
-        }),
-        Err(boundary) => Err(Diagnostic::new(
-            if boundary.is_migration() {
-                Category::MigrationBoundary
-            } else {
-                Category::InvalidHir
-            },
-            boundary.span,
-            public_text(&boundary.message),
-        )
-        .into_error()),
-    }
+    Ok(Prepared {
+        hir: lowered?,
+        inspection,
+        module_interfaces,
+        source: std::marker::PhantomData,
+    })
 }
 
 fn resolve_and_infer(
@@ -285,11 +289,11 @@ fn resolve_and_infer(
     timing: &mut Timings,
 ) -> Result<(Resolution, infer::InferResult), Error> {
     let start = Instant::now();
-    let names =
-        resolve::resolve(program).map_err(|e| issue(Category::Resolution, e.start, e.message))?;
+    let names = resolve::resolve_live(program)
+        .map_err(|e| issue(Category::Resolution, e.start, e.message))?;
     timing.resolution = start.elapsed();
     let start = Instant::now();
-    let inference = infer::infer(program, &names);
+    let inference = infer::infer_live(program, &names);
     timing.inference = start.elapsed();
     let inferred = match inference {
         Ok(value) => value,
@@ -307,6 +311,7 @@ fn resolve_and_infer(
             );
             diagnostic.expected = failure.expected.as_deref().map(public_text);
             diagnostic.actual = failure.actual.as_deref().map(public_text);
+            diagnostic.constraint = failure.constraint.as_deref().map(public_text);
             diagnostic.suggestion = match category {
                 Category::IncompatibleError => {
                     Some("recover and convert the error explicitly before propagating".into())

@@ -88,6 +88,40 @@ pub const fn promote(a: Numeric, b: Numeric) -> Option<Numeric> {
     }
 }
 
+/// Domain rule after collection shape and operand constraints have been established.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BinaryDomain {
+    Common,
+    Integral,
+    Division,
+    Power,
+}
+
+impl BinaryDomain {
+    pub(crate) const fn from_rule(rule: Rule) -> Option<Self> {
+        match rule {
+            Rule::Arithmetic | Rule::Order | Rule::Equality | Rule::StructuralEquality => {
+                Some(Self::Common)
+            }
+            Rule::IntegralArithmetic | Rule::Range => Some(Self::Integral),
+            Rule::Division => Some(Self::Division),
+            Rule::Power => Some(Self::Power),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn result(self, operator: &str, common: Numeric) -> Result<Numeric, String> {
+        use Numeric::*;
+        match (self, common) {
+            (Self::Integral, N | Z) => Ok(common),
+            (Self::Integral, _) => Err(format!("{operator} requires integral operands")),
+            (Self::Division, R) => Ok(R),
+            (Self::Division, _) => Ok(Q),
+            (Self::Common | Self::Power, _) => Ok(common),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Builtin {
     pub canonical: &'static str,
@@ -1093,6 +1127,29 @@ mod tests {
         assert_eq!(canonical("print"), "io.print");
         assert_eq!(runtime_arity(":q"), Some(1));
     }
+    #[test]
+    fn registered_numeric_rules_fix_result_domains() {
+        use Numeric::*;
+        let domain = |name| BinaryDomain::from_rule(lookup(name).unwrap().rule).unwrap();
+        for op in ["+", "-", "*"] {
+            for value in [N, Z, Q, D, R] {
+                assert_eq!(domain(op).result(op, value), Ok(value));
+            }
+        }
+        for op in ["//", "%", ".."] {
+            assert_eq!(domain(op).result(op, N), Ok(N));
+            assert_eq!(domain(op).result(op, Z), Ok(Z));
+            for value in [Q, D, R] {
+                assert!(domain(op).result(op, value).is_err());
+            }
+        }
+        for value in [N, Z, Q, D] {
+            assert_eq!(domain("/").result("/", value), Ok(Q));
+        }
+        assert_eq!(domain("/").result("/", R), Ok(R));
+        assert_eq!(domain("^"), BinaryDomain::Power);
+    }
+
     #[test]
     fn joins_are_symmetric_and_keep_approximate_separate() {
         use Numeric::*;

@@ -1,9 +1,13 @@
 //! Lexical identities and dependency ordering for a parsed Flux program.
-use crate::parser::{standard_owners, Expr, Program, RecoveryCase, RecoveryPattern, Stmt, Variant};
+use crate::parser::{
+    standard_owners, Expr, Program, RecoveryCase, RecoveryPattern, Stmt, SyntaxId, Variant,
+};
 use crate::{builtins, errors041, Error};
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap},
     ops::Range,
+    sync::Arc,
 };
 
 /// Deterministic within the same parsed syntax tree; unrelated edits may renumber IDs.
@@ -31,18 +35,20 @@ pub struct Symbol {
 
 #[derive(Clone, Debug, Default)]
 pub struct Resolution {
+    pub(crate) syntax: Arc<SyntaxLocator>,
+    pub(crate) program_shape: Option<Arc<ProgramShape>>,
     /// Program.defs indices in dependency order. A recursive group consists only
     /// of named function declarations. Its members are in source order.
     pub groups: Vec<Vec<usize>>,
     pub top: Vec<Option<SymbolId>>,
     pub symbols: Vec<Symbol>,
-    refs: HashMap<usize, SymbolId>,
+    refs: HashMap<SyntaxId, SymbolId>,
     defs: HashMap<usize, SymbolId>,
     params: HashMap<usize, Vec<SymbolId>>,
-    lambdas: HashMap<usize, Vec<SymbolId>>,
-    placeholders: HashMap<usize, SymbolId>,
-    offsets: HashMap<usize, usize>,
-    spans: HashMap<usize, Range<usize>>,
+    lambdas: HashMap<SyntaxId, Vec<SymbolId>>,
+    placeholders: HashMap<SyntaxId, SymbolId>,
+    offsets: HashMap<SyntaxId, usize>,
+    spans: HashMap<SyntaxId, Range<usize>>,
     owners: HashMap<SymbolId, SymbolId>,
     variants: HashMap<usize, SymbolId>,
     recovery_symbols: HashMap<usize, Vec<SymbolId>>,
@@ -51,36 +57,72 @@ pub struct Resolution {
 }
 
 impl Resolution {
-    /// Resolve against the same AST object that was passed to `resolve`, not a clone.
-    pub fn reference(&self, expr: &Expr) -> Option<SymbolId> {
-        self.refs.get(&key(expr)).copied()
+    /// Stable metadata can be reused with an exact clone/reparse. Only the
+    /// adapter translating borrowed AST nodes needs reindexing.
+    pub(crate) fn for_program<'a>(&'a self, program: &Program) -> Option<Cow<'a, Self>> {
+        if !self.program_shape.as_ref()?.matches(program) {
+            return None;
+        }
+        if self.syntax.matches(program) {
+            return Some(Cow::Borrowed(self));
+        }
+        let mut resolution = self.clone();
+        resolution.syntax = Arc::new(SyntaxLocator::new(program));
+        resolution.spans = program
+            .identified_origins()
+            .into_iter()
+            .map(|(id, _, span)| (id, span))
+            .collect();
+        Some(Cow::Owned(resolution))
     }
+
+    /// Locate one occurrence in the same live AST passed to `resolve`.
+    /// Across a clone/reparse, use the deterministic Program syntax index.
+    pub fn syntax_id(&self, expr: &Expr) -> Option<SyntaxId> {
+        self.syntax.id(expr)
+    }
+    pub fn reference(&self, expr: &Expr) -> Option<SymbolId> {
+        self.reference_at(self.syntax_id(expr)?)
+    }
+    pub fn reference_at(&self, id: SyntaxId) -> Option<SymbolId> {
+        self.refs.get(&id).copied()
+    }
+    pub fn span_at(&self, id: SyntaxId) -> Option<Range<usize>> {
+        self.spans.get(&id).cloned()
+    }
+    /// Look up a statement in this resolution's parsed source, or an exact
+    /// clone. Declaration identity uses its source position; callers must
+    /// not supply a statement from an unrelated or edited program.
     pub fn declaration(&self, stmt: &Stmt) -> Option<SymbolId> {
-        self.defs.get(&key(stmt)).copied()
+        self.defs.get(&stmt_start(stmt)).copied()
     }
     pub fn parameters(&self, stmt: &Stmt) -> &[SymbolId] {
-        self.params.get(&key(stmt)).map_or(&[], Vec::as_slice)
+        self.params
+            .get(&stmt_start(stmt))
+            .map_or(&[], Vec::as_slice)
     }
     pub fn lambda_parameters(&self, lambda: &Expr) -> &[SymbolId] {
-        self.lambdas.get(&key(lambda)).map_or(&[], Vec::as_slice)
+        self.syntax_id(lambda)
+            .and_then(|id| self.lambdas.get(&id))
+            .map_or(&[], Vec::as_slice)
     }
     /// Symbol for the preceding stage's value, visible within this stage.
     pub fn placeholder(&self, stage: &Expr) -> Option<SymbolId> {
-        self.placeholders.get(&key(stage)).copied()
+        self.placeholders.get(&self.syntax_id(stage)?).copied()
     }
     pub fn constructor_owner(&self, id: SymbolId) -> Option<SymbolId> {
         self.owners.get(&id).copied()
     }
     pub fn variant(&self, variant: &Variant) -> Option<SymbolId> {
-        self.variants.get(&key(variant)).copied()
+        self.variants.get(&variant.start).copied()
     }
     pub fn recovery_bindings(&self, arm: &RecoveryCase) -> &[SymbolId] {
         self.recovery_symbols
-            .get(&key(arm))
+            .get(&arm.start)
             .map_or(&[], Vec::as_slice)
     }
     pub fn recovery_constructor(&self, arm: &RecoveryCase) -> Option<SymbolId> {
-        self.recovery_ctors.get(&key(arm)).copied()
+        self.recovery_ctors.get(&arm.start).copied()
     }
     pub fn standard_owner(&self, owner: &str) -> Option<SymbolId> {
         errors041::owner_id(owner).map(SymbolId)
@@ -102,24 +144,93 @@ impl Resolution {
     /// Exact source expression envelope, if present. Synthetic expressions
     /// and manually changed AST trees have no exact source envelope.
     pub fn span(&self, expr: &Expr) -> Option<Range<usize>> {
-        self.spans.get(&key(expr)).cloned()
+        self.span_at(self.syntax_id(expr)?)
     }
     /// Exact expression start or nearest declaration/entry fallback.
     pub fn offset(&self, expr: &Expr) -> Option<usize> {
+        let id = self.syntax_id(expr)?;
         self.spans
-            .get(&key(expr))
+            .get(&id)
             .map(|s| s.start)
-            .or_else(|| self.offsets.get(&key(expr)).copied())
+            .or_else(|| self.offsets.get(&id).copied())
     }
 }
 
-fn key<T>(node: &T) -> usize {
-    node as *const T as usize
+// Exact (not hashed) guard against using checked metadata on an edited tree.
+#[derive(Clone, Debug)]
+pub(crate) struct ProgramShape {
+    defs: Vec<Stmt>,
+    entry: Option<Expr>,
+    entry_start: Option<usize>,
+    imports: Vec<String>,
+    constraints: std::collections::BTreeMap<usize, Vec<(String, String)>>,
+}
+impl ProgramShape {
+    fn new(p: &Program) -> Self {
+        Self {
+            defs: p.defs.clone(),
+            entry: p.entry.clone(),
+            entry_start: p.entry_start,
+            imports: p.imports.clone(),
+            constraints: p.constraints.clone(),
+        }
+    }
+    pub(crate) fn matches(&self, p: &Program) -> bool {
+        self.entry_start == p.entry_start
+            && self.imports == p.imports
+            && self.constraints == p.constraints
+            && self.defs == p.defs
+            && self.entry == p.entry
+    }
+}
+
+// Compatibility locator for borrowed AST APIs; only this map uses memory
+// identity. No symbol/type/origin/evidence table is keyed by an address.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SyntaxLocator(HashMap<usize, SyntaxId>);
+impl SyntaxLocator {
+    pub(crate) fn id(&self, node: &Expr) -> Option<SyntaxId> {
+        self.0.get(&(std::ptr::from_ref(node) as usize)).copied()
+    }
+    fn matches(&self, program: &Program) -> bool {
+        program
+            .identified_expressions()
+            .all(|(id, expr)| self.id(expr) == Some(id))
+    }
+
+    fn new(program: &Program) -> Self {
+        Self(
+            program
+                .identified_expressions()
+                .map(|(id, e)| (std::ptr::from_ref(e) as usize, id))
+                .collect(),
+        )
+    }
+}
+fn stmt_start(stmt: &Stmt) -> usize {
+    match stmt {
+        Stmt::Def { start, .. }
+        | Stmt::Effect { start, .. }
+        | Stmt::Schema { start, .. }
+        | Stmt::Sum { start, .. } => *start,
+    }
 }
 
 pub fn resolve(p: &Program) -> Result<Resolution, Error> {
+    resolve_impl(p, true)
+}
+
+pub(crate) fn resolve_live(p: &Program) -> Result<Resolution, Error> {
+    resolve_impl(p, false)
+}
+
+fn resolve_impl(p: &Program, retain_shape: bool) -> Result<Resolution, Error> {
     let mut r = Resolver {
-        out: Resolution::default(),
+        out: Resolution {
+            syntax: Arc::new(SyntaxLocator::new(p)),
+            program_shape: retain_shape.then(|| Arc::new(ProgramShape::new(p))),
+            ..Resolution::default()
+        },
         scopes: Vec::new(),
         external: HashMap::new(),
         standard_visible: HashMap::new(),
@@ -129,9 +240,9 @@ pub fn resolve(p: &Program) -> Result<Resolution, Error> {
         offset: 0,
     };
     r.out.spans = p
-        .expression_origins()
+        .identified_origins()
         .into_iter()
-        .map(|(expr, span)| (key(expr), span))
+        .map(|(id, _, span)| (id, span))
         .collect();
     for &owner in errors041::OWNERS {
         if owner != "ioerr"
@@ -238,7 +349,7 @@ impl Resolver {
     fn allocate_decl(&mut self, stmt: &Stmt) -> Option<SymbolId> {
         let (name, kind, start) = decl_name(stmt)?;
         let id = self.fresh(name, kind, start);
-        self.out.defs.insert(key(stmt), id);
+        self.out.defs.insert(stmt_start(stmt), id);
         Some(id)
     }
     fn register_variants(&mut self, owner: SymbolId, variants: &[Variant]) -> Result<(), Error> {
@@ -250,7 +361,7 @@ impl Resolver {
             );
             self.bind(id)?;
             self.out.owners.insert(id, owner);
-            self.out.variants.insert(key(variant), id);
+            self.out.variants.insert(variant.start, id);
         }
         Ok(())
     }
@@ -342,7 +453,9 @@ impl Resolver {
             }
         };
         self.edge(id);
-        self.out.refs.insert(key(e), id);
+        self.out
+            .refs
+            .insert(self.out.syntax_id(e).expect("indexed expression"), id);
         Ok(())
     }
     fn parameter_scope(&mut self, names: &[String]) -> Result<Vec<SymbolId>, Error> {
@@ -362,7 +475,7 @@ impl Resolver {
             Stmt::Schema { .. } | Stmt::Sum { .. } => {}
             Stmt::Def { params, body, .. } if !params.is_empty() => {
                 let ids = self.parameter_scope(params)?;
-                self.out.params.insert(key(s), ids);
+                self.out.params.insert(stmt_start(s), ids);
                 self.expression(body)?;
                 self.scopes.pop();
             }
@@ -402,7 +515,10 @@ impl Resolver {
         Ok(())
     }
     fn expression(&mut self, e: &Expr) -> Result<(), Error> {
-        self.out.offsets.insert(key(e), self.offset);
+        self.out.offsets.insert(
+            self.out.syntax_id(e).expect("indexed expression"),
+            self.offset,
+        );
         match e {
             Expr::Name(n) => self.use_name(e, n, Usage::Plain)?,
             Expr::Ref(n) => self.use_name(e, n, Usage::Ref)?,
@@ -426,7 +542,9 @@ impl Resolver {
             }
             Expr::Lambda(params, body) | Expr::TypedLambda(params, _, body) => {
                 let ids = self.parameter_scope(params)?;
-                self.out.lambdas.insert(key(e), ids);
+                self.out
+                    .lambdas
+                    .insert(self.out.syntax_id(e).expect("indexed expression"), ids);
                 self.expression(body)?;
                 self.scopes.pop();
             }
@@ -435,7 +553,9 @@ impl Resolver {
                     self.expression(first)?;
                     for stage in rest {
                         let id = self.fresh("$", SymbolKind::Stage, self.offset);
-                        self.out.placeholders.insert(key(stage), id);
+                        self.out
+                            .placeholders
+                            .insert(self.out.syntax_id(stage).expect("indexed stage"), id);
                         self.scopes.push(HashMap::new());
                         self.bind(id)?;
                         self.expression(stage)?;
@@ -465,7 +585,7 @@ impl Resolver {
                             let id=self.lookup(name).filter(|&id|matches!(self.out.symbol(id).kind,SymbolKind::Constructor(n) if n==slots.len()))
                                 .ok_or_else(||Error::new(arm.start,format!("unknown recovery constructor or arity mismatch for `{name}`")))?;
                             self.edge(id);
-                            self.out.recovery_ctors.insert(key(arm), id);
+                            self.out.recovery_ctors.insert(arm.start, id);
                             slots
                                 .iter()
                                 .filter(|s| s.as_str() != "_")
@@ -477,7 +597,7 @@ impl Resolver {
                     self.offset = arm.start;
                     let ids = self.parameter_scope(&bindings)?;
                     self.offset = saved;
-                    self.out.recovery_symbols.insert(key(arm), ids);
+                    self.out.recovery_symbols.insert(arm.start, ids);
                     self.expression(&arm.body)?;
                     self.scopes.pop();
                 }
@@ -699,7 +819,7 @@ struct EagerWalk<'a, 's> {
     index: &'s EagerIndex<'a>,
     pending: &'s std::collections::HashSet<SymbolId>,
     masked: Vec<SymbolId>,
-    active: std::collections::HashSet<usize>,
+    active: std::collections::HashSet<SyntaxId>,
     depth: usize,
     fuel: usize,
 }
@@ -709,13 +829,18 @@ impl<'a> EagerWalk<'a, '_> {
         owner: &'a Expr,
         f: impl FnOnce(&mut Self) -> Result<Known<'a>, Error>,
     ) -> Result<Known<'a>, Error> {
-        if self.depth >= 128 || !self.active.insert(key(owner)) {
+        let id = self
+            .index
+            .resolution
+            .syntax_id(owner)
+            .expect("indexed owner");
+        if self.depth >= 128 || !self.active.insert(id) {
             return Ok(Known::Unknown);
         }
         self.depth += 1;
         let result = f(self);
         self.depth -= 1;
-        self.active.remove(&key(owner));
+        self.active.remove(&id);
         result
     }
     fn apply(&mut self, f: Known<'a>, args: usize) -> Result<Known<'a>, Error> {
