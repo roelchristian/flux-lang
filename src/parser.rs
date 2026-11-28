@@ -8,8 +8,10 @@ use std::{
 };
 
 mod annotation;
+mod tacit;
 use annotation::{adjacent_type_variable, annotation_tokens, split_callable_annotation};
 pub use annotation::{parse_type_annotation, TypeAnnotation, TypeAnnotationKind, TypePrimitive};
+pub(crate) use tacit::is_capture;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -566,89 +568,9 @@ pub fn needs_continuation(source: &str) -> bool {
 // pipeline binding. Every synthetic lambda owns its own resolver scope.
 const DIRECT_ARITY_LIMIT: usize = 64;
 
-const TACIT_INPUT: &str = "\0tacit-input";
-const TACIT_DEPTH_LIMIT: usize = 64;
-
-struct Tacit {
-    kind: TacitKind,
-    span: Range<usize>,
-}
-enum TacitKind {
-    Identity,
-    Reference(String),
-    Value(String),
-    Compose(Box<Tacit>, Box<Tacit>),
-    Fork(Box<Tacit>, Box<Tacit>, Box<Tacit>),
-    Hook(Box<Tacit>, Box<Tacit>),
-}
-
 fn originated(expr: Expr, span: Option<Range<usize>>, origins: &mut Vec<Origin>) -> Expr {
     origins.push(Origin::new(&expr, span));
     expr
-}
-
-fn tacit_input(origins: &mut Vec<Origin>, span: Option<Range<usize>>) -> Expr {
-    originated(Expr::Name(TACIT_INPUT.into()), span, origins)
-}
-
-fn tacit_value(tacit: Tacit, origins: &mut Vec<Origin>, record_root: bool) -> Expr {
-    let span = tacit.span.clone();
-    let expr = match tacit.kind {
-        TacitKind::Reference(name) => Expr::Ref(name),
-        kind => {
-            let body = tacit_call(
-                Tacit {
-                    kind,
-                    span: span.clone(),
-                },
-                origins,
-            );
-            Expr::Lambda(vec![TACIT_INPUT.into()], Box::new(body))
-        }
-    };
-    if record_root {
-        originated(expr, Some(span), origins)
-    } else {
-        // Parser::expr will record the span including the outside delimiters.
-        expr
-    }
-}
-
-fn tacit_call(tacit: Tacit, origins: &mut Vec<Origin>) -> Expr {
-    let Tacit { kind, span } = tacit;
-    let body = match kind {
-        TacitKind::Identity => return tacit_input(origins, Some(span)),
-        atom @ (TacitKind::Reference(_) | TacitKind::Value(_)) => {
-            let op = match atom {
-                TacitKind::Reference(name) => Expr::Ref(name),
-                TacitKind::Value(name) => Expr::Name(name),
-                _ => unreachable!(),
-            };
-            let op = originated(op, Some(span.clone()), origins);
-            let input = tacit_input(origins, None);
-            Expr::Call("@".into(), vec![op, input])
-        }
-        TacitKind::Compose(g, h) => {
-            let g = tacit_value(*g, origins, true);
-            let h = tacit_call(*h, origins);
-            Expr::Call("@".into(), vec![g, h])
-        }
-        TacitKind::Fork(f, g, h) => {
-            let f = tacit_value(*f, origins, true);
-            let g = tacit_call(*g, origins);
-            let h = tacit_call(*h, origins);
-            let args = originated(Expr::Tuple(vec![g, h]), None, origins);
-            Expr::Call("@@".into(), vec![f, args])
-        }
-        TacitKind::Hook(f, h) => {
-            let f = tacit_value(*f, origins, true);
-            let input = tacit_input(origins, None);
-            let h = tacit_call(*h, origins);
-            let args = originated(Expr::Tuple(vec![input, h]), None, origins);
-            Expr::Call("@@".into(), vec![f, args])
-        }
-    };
-    originated(body, Some(span), origins)
 }
 
 impl Parser {
@@ -1450,12 +1372,17 @@ impl Parser {
                 atom += 1;
                 last -= 1;
             }
-            if !matches!(self.at(atom), "&" | "&{" | "\\")
-                || !matches!(
-                    body,
-                    Expr::Lambda(..) | Expr::TypedLambda(..) | Expr::Ref(..)
-                )
-            {
+            let supported = match self.at(atom) {
+                "&{" => true, // A tacit expression may contain an eager capture block.
+                "&" | "\\" => {
+                    matches!(
+                        body,
+                        Expr::Lambda(..) | Expr::TypedLambda(..) | Expr::Ref(..)
+                    )
+                }
+                _ => false,
+            };
+            if !supported {
                 return Err(Error::new(
                     self.toks[rhs].start,
                     "callable arity right-hand side must be a tacit form, function reference, or lambda",
@@ -1507,95 +1434,6 @@ impl Parser {
         }
         r
     }
-    fn tacit(&mut self, level: usize) -> PResult<Tacit> {
-        if level >= TACIT_DEPTH_LIMIT || self.depth + level >= 256 {
-            return self.err("tacit expression depth limit exceeded");
-        }
-        let token = self.next()?;
-        let start = token.start;
-        let kind = match token.text.as_str() {
-            "." => TacitKind::Identity,
-            "(" => {
-                let inner = self.tacit(level + 1)?;
-                self.expect(")")?;
-                inner.kind
-            }
-            "@." | "@*" | "@?" => {
-                let (description, required) = match token.text.as_str() {
-                    "@." => ("composition requires two function operands", 2),
-                    "@*" => ("fork requires three function operands", 3),
-                    _ => ("hook requires two function operands", 2),
-                };
-                let operand = |parser: &mut Self| {
-                    if matches!(parser.peek(), "" | "}" | ")" | ";") {
-                        return Err(Error::new(start, description));
-                    }
-                    parser.tacit(level + 1).map(Box::new)
-                };
-                let first = operand(self)?;
-                let second = operand(self)?;
-                let third = if required == 3 {
-                    Some(operand(self)?)
-                } else {
-                    None
-                };
-                if let Some(layout) = &mut self.formatting_applications {
-                    let mut operands = vec![first.span.clone(), second.span.clone()];
-                    if let Some(third) = &third {
-                        operands.push(third.span.clone());
-                    }
-                    layout.push(FormattingApplication {
-                        span: token.start..operands.last().unwrap().end,
-                        operator: token.start..token.end,
-                        operands,
-                        tacit: true,
-                    });
-                }
-                if let Some(third) = third {
-                    TacitKind::Fork(first, second, third)
-                } else if token.text == "@." {
-                    TacitKind::Compose(first, second)
-                } else {
-                    TacitKind::Hook(first, second)
-                }
-            }
-            "!" => {
-                return Err(Error::new(
-                    start,
-                    "effect execution is not a tacit function",
-                ))
-            }
-            "$" => {
-                return Err(Error::new(
-                    start,
-                    "pipeline placeholder is not tacit identity",
-                ))
-            }
-            "&" => {
-                return Err(Error::new(
-                    start,
-                    "use a bare callable or `.` inside a tacit block",
-                ))
-            }
-            atom => match self.lookup(atom) {
-                Some(Binding::Callable(n) | Binding::Constructor(n)) if n > 0 => {
-                    TacitKind::Reference(self.canonical(atom))
-                }
-                Some(Binding::Value) => TacitKind::Value(self.canonical(atom)),
-                _ => {
-                    return Err(Error::new(
-                        start,
-                        format!("expected tacit callable or `.`, found `{atom}`"),
-                    ))
-                }
-            },
-        };
-        Ok(Tacit {
-            kind,
-            span: start..self.toks[self.pos - 1].end,
-        })
-    }
-
     fn atom(&mut self, effect: bool) -> PResult<Expr> {
         let t = self.next()?;
         match t.text.as_str() {
@@ -1709,14 +1547,7 @@ impl Parser {
                 t.start,
                 "dictionary literals are not implemented",
             )),
-            "&{" => {
-                let tacit = self.tacit(0)?;
-                if !matches!(self.peek(), "" | "}" | ";") {
-                    return self.err("unexpected additional tacit operand; expected `}`");
-                }
-                self.expect("}")?;
-                Ok(tacit_value(tacit, &mut self.origins, false))
-            }
+            "&{" => self.tacit_block(0),
             "@." | "@*" | "@?" | "." => Err(Error::new(
                 t.start,
                 format!("`{}` is only valid inside `&{{ ... }}`", t.text),
@@ -1724,14 +1555,7 @@ impl Parser {
             "&" => {
                 let n = self.next()?;
                 if n.text == "." && t.end == n.start {
-                    return Ok(tacit_value(
-                        Tacit {
-                            kind: TacitKind::Identity,
-                            span: n.start..n.end,
-                        },
-                        &mut self.origins,
-                        false,
-                    ));
+                    return Ok(tacit::identity(n.start..n.end, &mut self.origins));
                 }
                 if matches!(self.lookup(&n.text),Some(Binding::Callable(k)|Binding::Constructor(k)) if k>0)
                 {

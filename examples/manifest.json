@@ -253,12 +253,24 @@
     "stdout": "25\n(?1 8, ?1 5, ?0, ?0)\n"
   },
   {
+    "entry": "examples/tacit/generalised-forks.flx",
+    "stdout": "(29, 16)\n"
+  },
+  {
     "entry": "examples/tacit/hooks.flx",
     "stdout": "(16, -8)\n"
   },
   {
+    "entry": "examples/tacit/nary.flx",
+    "stdout": "(flux, 14)\n(25, 7)\n"
+  },
+  {
     "entry": "examples/tacit/normalisation.flx",
     "stdout": "[CA NY TX]\n"
+  },
+  {
+    "entry": "examples/tacit/partial.flx",
+    "stdout": "(20, 23, 2)\n42\n"
   },
   {
     "entry": "examples/tacit/predicates.flx",

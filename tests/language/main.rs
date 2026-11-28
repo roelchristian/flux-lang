@@ -4,6 +4,7 @@ mod support;
 mod callable_declarations;
 mod fixture;
 mod inference_basics;
+mod nary_tacit;
 mod patterns;
 mod sequences;
 mod tacit;

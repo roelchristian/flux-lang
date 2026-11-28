@@ -10,6 +10,11 @@ obsolete specifications are not kept as duplicate files.
 - Consolidate shared Rust internals and streamline the reference and example
   index without changing the language. Group integration tests by topic.
 
+## Draft 0.16
+
+- Add explicit-arity tacit functions `&{N: ... }`, positional arguments,
+  generalized forks and eager lexical captures. Unary tacit syntax is unchanged.
+
 ## Draft 0.15
 
 - Add `form` and `dim`; extend shared numeric, Boolean, selection,

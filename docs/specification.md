@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for Draft 0.15. **Limited** features
+This is the normative reference for Draft 0.16. **Limited** features
 work only as stated; **Proposed** features are unavailable and do not
 reserve a design. See the [example corpus](../examples/README.md) for
 complete programs, the [implementation guide](implementation.md) for Rust
@@ -144,6 +144,47 @@ does not run the body; application does not implicitly execute actions
 or unwrap optionals or results. See [composition](../examples/tacit/composition.flx),
 [forks](../examples/tacit/forks.flx) and [hooks](../examples/tacit/hooks.flx).
 
+### Explicit tacit arity
+
+`&{N: BODY }` constructs a curried function of N independent arguments.
+N is an unsuffixed decimal integer from 1 to 64. In BODY, `$1` through
+`$N` denote positional arguments; the numeral is adjacent, unsuffixed
+and one-based. This does not change the ordinary pipeline placeholder,
+or selectors such as `.1`. Bare `.` and the hook `@?` require a unary
+input context. The original `&{ BODY }` retains its existing behavior.
+
+A branch may select an argument, use a capture, or apply a callable
+or function value to all of its input arguments in order. One tuple
+argument is not implicitly spread. A **function operand** (the outer
+function of a composition or the combiner of a fork or hook) instead
+denotes a function: a bare callable or function-valued name is not
+applied to the enclosing block's arguments. An implicit tacit
+expression there uses unary input; use a nested `&{N: ... }` for
+explicit arity. Parentheses group a tacit expression.
+
+| Form | Behavior |
+| --- | --- |
+| `@. G H` | Evaluate branch H on all inputs, then apply G to its result. |
+| `@* F G H` | Evaluate G and then H on all inputs before applying curried F to both results. |
+| `@{ F; G1; ...; Gk }` | Evaluate 1–64 branches from left to right, exactly once each, then apply curried F to the results in that order. Semicolons separate the combiner and branches; no trailing separator. |
+| `@= EXPR` | Capture a pure ordinary expression as a constant branch or function operand. |
+
+A capture runs once, in source order, when the tacit block containing
+it is constructed, not at each application or only when saturated.
+Captures cannot read the tacit positional arguments. They may construct
+an action, but do not execute or unwrap it. Blocks with expansive
+captures are not generalized as values. `@{` and `@=`
+require adjacent punctuation inside explicitly arity-marked blocks;
+ordinary application outside such blocks is unchanged.
+
+Applying fewer than N arguments returns a residual function without
+running the body. A `name/M` declaration still consumes M operands
+syntactically, independent of a tacit block's N. Its right-hand side,
+including captures, is constructed only after those operands evaluate.
+The remaining type may be a function. See [multiple arguments](../examples/tacit/nary.flx),
+[partial application](../examples/tacit/partial.flx) and
+[generalized forks](../examples/tacit/generalised-forks.flx).
+
 ## Types and inference
 
 Annotations use `:`; omitted types are inferred where context suffices.
@@ -182,9 +223,9 @@ free in surrounding captures are not generalized. A named function can be
 generalized once its dependency group has been checked. Value bindings are
 generalized only for nonexpansive expressions: literals, unit, names,
 function references and lambdas, plus tuples, sequences and records
-containing only such expressions. This includes tacit values that lower to
-references or lambdas. Applications, applied constructors, pipelines, and
-fallible and action blocks do not qualify. Any unresolved variables in an
+containing only such expressions. Tacit values qualify if their captures, if any, are nonexpansive.
+Applications, applied constructors, pipelines, and fallible and action
+blocks do not qualify. Any unresolved variables in an
 expansive binding are shared monotypes; a universal annotation on such a
 binding is rejected, although a concrete annotation is allowed.
 
