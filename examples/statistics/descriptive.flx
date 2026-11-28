@@ -1,13 +1,12 @@
---- Exactly computed summaries of a small observation sample.
+--- Mean, median and population variance are exact for this rational sample.
 xs := [2q 4q 4q 4q 5q 5q 7q 9q];
 
+-- Population standard deviation returns an approximate real.
+-- An empty sample has no mean, rather than a mean of zero.
 empty: [q] := [];
 
-!{
-    ^{
-        ^? ! print (# xs, avg xs, med xs, var xs);
-        ^? ! print (</ xs, >/ xs, sd xs);
-        ^? ! print (avg empty);
-        ()
-    }
+!^{
+    ! print (# xs, avg xs, med xs, var xs);
+    ! print (</ xs, >/ xs, sd xs);
+    ! print (avg empty);
 };

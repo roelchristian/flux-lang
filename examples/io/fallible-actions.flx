@@ -2,6 +2,7 @@ show(text: s): !(() ^ ioerr) := !^{
     ! print text;
 };
 
+-- Constructing the action writes nothing. Each execution runs it again.
 message := show "Executed twice";
 !^{
     ! message;

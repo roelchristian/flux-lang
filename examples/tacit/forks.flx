@@ -25,14 +25,11 @@ mean(xs: [q]): ?q := ?{
     _         : ?1 @ average xs;
 };
 
-!{
-    ^{
-        ^? ! print (@ magnitude_squared point {
-            x := 3q;
-            y := 4q;
-        });
-        ^? !
-            print (range [2q 10q 3q], mean [2q 10q 3q], range [], mean []);
-        ()
-    }
+!^{
+    ! print (@ magnitude_squared point {
+        x := 3q;
+        y := 4q;
+    });
+    !
+        print (range [2q 10q 3q], mean [2q 10q 3q], range [], mean []);
 };

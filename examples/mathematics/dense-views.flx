@@ -1,11 +1,12 @@
 << "arr";
 
---- Work on a window of a transposed matrix, without expanding the window.
+--- Transpose and section can share the dense buffer. The window's indices
+--- follow its logical shape, regardless of the physical order of its cells.
 readings := : r (form [192n 128n] (.. 1z 24576z));
 negative := -: -: -: readings;
 window := arr.sect [17n 33n] [8n 16n] (|: negative);
 
---- Narrow storage has no effect on the exact result.
+--- This sum exceeds a packed signed 64-bit cell and remains an exact z.
 wide := + (form [1n] [9223372036854775807z]) 1z;
 
 !^{

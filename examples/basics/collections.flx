@@ -4,9 +4,6 @@ square(x: z): z := * x x;
 squares := @: &square nums;
 large := ?: (> squares 20z) squares;
 
-!{
-    ^{
-        ^? ! print (large, # large, +/ large);
-        ()
-    }
+!^{
+    ! print (large, # large, +/ large);
 };

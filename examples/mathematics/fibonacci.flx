@@ -2,9 +2,6 @@
 step(ab: (n, n), i: n): (n, n) := (.2 ab, + .1 ab .2 ab);
 fib(k: n): n := .1 /: &step (0n, 1n) .. 1n k;
 
-!{
-    ^{
-        ^? ! print (fib 20, fib 200);
-        ()
-    }
+!^{
+    ! print (fib 20, fib 200);
 };

@@ -1,19 +1,17 @@
---- Capture the lexical bias once when constructing the function.
+--- @= evaluates its expression once when the tacit function is constructed.
+--- The local bias is used, so the captured addend is 8, not 3.
 bias := 2z;
 adjust: z -> z -> z := {
     bias := 7z;
     &{ 2: @* + (@* * $1 $2) (@= + bias 1z) }
 };
 
---- Neither partial application runs the tacit body.
+--- Both bindings hold one-argument functions. @ supplies the remaining input.
 scale_by_three := @ adjust 3z;
 add/1: z -> z -> z := &{ 2: @* + $1 $2 };
 plus_ten := add 10z;
 
-!{
-    ^{
-        ^? ! print (@ scale_by_three 4z, @ scale_by_three 5z, bias);
-        ^? ! print (@ plus_ten 32z);
-        ()
-    }
+!^{
+    ! print (@ scale_by_three 4z, @ scale_by_three 5z, bias);
+    ! print (@ plus_ten 32z);
 };

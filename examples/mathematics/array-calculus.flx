@@ -1,9 +1,10 @@
 << "arr";
 
---- Broadcast calibration offsets across the rows of a matrix.
+--- The trailing axis has length three, so each row gets the same offsets.
 a := form [2n 3n] [1z 2z 3z 4z 5z 6z];
 offsets := form [3n] [10z 20z 30z];
 shifted := + a offsets;
+-- Sum each row along the last axis, leaving one value per row.
 sums := +/ shifted;
 
 --- Rectangular section starts are one-based; counts clamp.
@@ -12,12 +13,9 @@ transposed := |: a;
 row := form [6n] shifted;
 valid := > shifted 20z;
 
-!{
-    ^{
-        ^? ! print (dim shifted, # shifted, ,. shifted);
-        ^? ! print (dim sums, ,. sums, ,. section);
-        ^? ! print (dim transposed, ,. transposed, .: [2n 1n] a);
-        ^? ! print (dim row, ,. valid);
-        ()
-    }
+!^{
+    ! print (dim shifted, # shifted, ,. shifted);
+    ! print (dim sums, ,. sums, ,. section);
+    ! print (dim transposed, ,. transposed, .: [2n 1n] a);
+    ! print (dim row, ,. valid);
 };

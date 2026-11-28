@@ -12,10 +12,7 @@ exact :=
         form [2n] [1.20d 2.00d]
         form [2n] [3n 4n];
 
-!{
-    ^{
-        ^? ! print (dim product, ,. product, ,. diagonal);
-        ^? ! print exact;
-        ()
-    }
+!^{
+    ! print (dim product, ,. product, ,. diagonal);
+    ! print exact;
 };

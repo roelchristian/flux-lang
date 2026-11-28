@@ -28,7 +28,8 @@ b := #[
 !{
     ^{
         --- Concatenation retains duplicates; set union keeps first occurrences.
-        ^? ! print (# (+: a b), # (df.distinct a), # (df.union a b));
+        ^? !
+            print (# (df.concat a b), # (df.distinct a), # (df.union a b));
         ^? ! print .depth (df.union a b);
         ()
     }

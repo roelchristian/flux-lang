@@ -14,9 +14,6 @@ first(t: tree[~a]): ~a := ?= t {
 };
 
 samples := node (leaf "north") (node (leaf "south") (leaf "east"));
-!{
-    ^{
-        ^? ! print (size samples, first samples);
-        ()
-    }
+!^{
+    ! print (size samples, first samples);
 };

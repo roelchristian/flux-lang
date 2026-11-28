@@ -1,18 +1,18 @@
 # Demography: population change and regional shares
 
-From the repository root:
+Run [the script](main.flx) from the repository root:
 
 ```sh
 flux run-hir examples/applications/demography/main.flx
 ```
 
-The script totals a synthetic ward census by district and year, then
-left-joins newer totals to their baselines. East has no earlier total; West
+The script totals the [synthetic ward census](../../data/population.csv)
+by district and year, then left-joins newer totals to their baselines. East has no earlier total; West
 has an earlier total of zero. Neither has a defined percentage change, but
 the report keeps the two cases distinct.
 
-A second join attaches the regional classification in `examples/data/regions.csv`
-to the current-year totals. The script sums residents within each region and
+A second join attaches the [regional classification](../../data/regions.csv) to
+the current-year totals. The script sums residents within each region and
 divides by the total across classified districts. Unlike the displayed
 change percentages, these shares remain exact rationals.
 

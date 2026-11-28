@@ -1,4 +1,5 @@
 << "num";
+<< "res";
 
 f(x: r): r := - (* x x) 2r;
 df(x: r): r := * 2r x;
@@ -8,19 +9,22 @@ opts := .{
     max := 100n;
 };
 
---- Recover explicitly from a solver error before printing.
-bisected := ^= num.bisect &f 1r 2r opts {
-    _ : -1r;
+--- Compare only successful roots; a solver error makes the check false.
+agrees(estimate: r ^ solvererr): b := {
+    compared := res.map (\ x -> close x (^/ 2r)) estimate;
+    ^= compared {
+        _ : 0b;
+    }
 };
-newton := ^= num.newton &f &df 1r opts {
-    _ : -1r;
-};
-bad := ^= num.bisect &f 2r 3r opts {
-    badbracket : 1r;
-    _          : 0r;
+
+bisected := num.bisect &f 1r 2r opts;
+newton := num.newton &f &df 1r opts;
+--- Both endpoints of [2,3] have positive values, so it is not a sign bracket.
+rejected := ^= res.map (\ x -> 0b) (num.bisect &f 2r 3r opts) {
+    badbracket : 1b;
+    _          : 0b;
 };
 
 !^{
-    !
-        print (close bisected (^/ 2r), close newton (^/ 2r), = bad 1r);
+    ! print (agrees bisected, agrees newton, rejected);
 };

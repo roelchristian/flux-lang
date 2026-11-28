@@ -1,13 +1,11 @@
 << "./transforms.flx" : tx;
 
-!{
-    ^{
-        ^? !
-            print
-                (@ tx.identity "retained", @ tx.identity 8n, tx.twice 1.25q, tx.twice 8n);
-        ^? !
-            print
-                (tx.ordered "a" "b", @ tx.tidy "  GAMMA ", tx.clean ["  ALPHA" "BeTa  "]);
-        ()
-    }
+!^{
+    -- The same exported identity is instantiated independently at s and n.
+    !
+        print
+            (@ tx.identity "retained", @ tx.identity 8n, tx.twice 1.25q, tx.twice 8n);
+    !
+        print
+            (tx.ordered "a" "b", @ tx.tidy "  GAMMA ", tx.clean ["  ALPHA" "BeTa  "]);
 };

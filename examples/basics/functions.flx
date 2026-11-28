@@ -1,15 +1,15 @@
---- Call a declaration directly or pass its reference as a value.
+--- A named declaration establishes how many operands a direct call consumes.
 add(x, y: z): z := + x y;
 twice(x: z): z := * 2z x;
+
+-- &twice is a value. Inside apply, the parameter f needs explicit application.
+double := &twice;
 apply(f: z -> z, x: z): z := @ f x;
 
 -- Inferred once, instantiated separately at z and s.
 id(x) := x;
 
-!{
-    ^{
-        ^? ! print (add 2z 3z, @@ &add (4z, 5z), apply &twice 6z);
-        ^? ! print (id 4z, id "salve");
-        ()
-    }
+!^{
+    ! print (add 2z 3z, @@ &add (4z, 5z), apply double 6z);
+    ! print (id 4z, id "salve");
 };

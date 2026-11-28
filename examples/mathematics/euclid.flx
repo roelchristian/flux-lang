@@ -1,20 +1,14 @@
 --- Euclid's remainder recurrence, then a reduced intermediate for LCM.
-gcd(a, b: n): n :=
-?
-= b 0
-a
-gcd b % a b;
-lcm(a, b: n): n :=
-?
-|| = a 0 = b 0
-0
-*
-    // a gcd a b
-    b;
+gcd(a, b: n): n := ?{
+    = b 0 : a;
+    _     : gcd b (% a b);
+};
 
-!{
-    ^{
-        ^? ! print (gcd 1071 462, lcm 1071 462);
-        ()
-    }
+lcm(a, b: n): n := ?{
+    || (= a 0) (= b 0) : 0;
+    _ : * (// a (gcd a b)) b;
+};
+
+!^{
+    ! print (gcd 1071 462, lcm 1071 462);
 };

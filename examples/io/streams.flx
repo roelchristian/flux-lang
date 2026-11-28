@@ -1,13 +1,11 @@
 << "io";
 
-!{
-    ^{
-        first := ^? ! io.readln;
-        blank := ^? ! io.readln;
-        last := ^? ! io.readln;
-        eof := ^? ! io.readln;
-        ^? ! print (?? "missing" first, ?+ blank, # (?? "missing" blank));
-        ^? ! print (?? "missing" last, ?+ eof);
-        ()
-    }
+!^{
+    first := ^? ! io.readln;
+    blank := ^? ! io.readln;
+    last := ^? ! io.readln;
+    eof := ^? ! io.readln;
+    -- A blank line is a present empty string; EOF is absent.
+    ! print (?? "missing" first, ?+ blank, # (?? "missing" blank));
+    ! print (?? "missing" last, ?+ eof);
 };

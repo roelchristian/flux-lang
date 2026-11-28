@@ -81,7 +81,12 @@ show(x: daily) := (
             e : ^: input e;
         };
         usable := ?: &good raw;
-        report := >: &.station (>: &.date (df.agg &key &summary usable));
+        --- Sort the secondary key first, then group its order by station.
+        report := |{
+            df.agg &key &summary usable;
+            df.sort &.date $;
+            df.sort &.station $
+        };
         ^= !
             print ("accepted", # usable, "rejected", - (# raw) (# usable)) {
             e : ^: output e;

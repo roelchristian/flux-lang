@@ -1,14 +1,13 @@
 # Daily weather summaries
 
-From the repository root:
+Run [the script](main.flx) from the repository root:
 
 ```sh
-cargo build --release --locked
-target/release/flux run-hir examples/applications/meteorology/main.flx
+flux run-hir examples/applications/meteorology/main.flx
 ```
 
-Reads synthetic `examples/applications/meteorology/observations.csv` as a typed table. Blank
-measurements are allowed. The fixture's quality rules reject invalid dates,
+The script reads [synthetic observations](observations.csv) as a typed
+table. Blank measurements are allowed. The fixture's quality rules reject invalid dates,
 empty station names, present temperatures outside −90 to 60 °C, and
 negative rainfall. Malformed CSV or nonnumeric measurement text is an input
 error, not a missing observation.

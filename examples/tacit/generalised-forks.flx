@@ -22,9 +22,6 @@ reverse_sqdiff/2: z -> z -> z := &{
     }
 };
 
-!{
-    ^{
-        ^? ! print (sumsq3 2z 3z 4z, reverse_sqdiff 3z 5z);
-        ()
-    }
+!^{
+    ! print (sumsq3 2z 3z 4z, reverse_sqdiff 3z 5z);
 };

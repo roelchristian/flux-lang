@@ -5,9 +5,6 @@ clean := &{ @. str.lower str.trim };
 clean_named(x: s): s := str.lower str.trim x;
 raw := "  Flux Example  ";
 
-!{
-    ^{
-        ^? ! print (@ clean raw, clean_named raw);
-        ()
-    }
+!^{
+    ! print (@ clean raw, clean_named raw);
 };

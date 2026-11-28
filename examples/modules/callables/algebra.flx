@@ -1,5 +1,7 @@
 >> (sq, add, increment);
 
+--- A public callable declares its prefix arity and complete type.
 sq/1 : q -> q := &{ @* * . . };
 add/2 : q -> q -> q := &+;
+-- One prefix operand here; the result is a function awaiting the second.
 increment/1 : q -> q -> q := &+;

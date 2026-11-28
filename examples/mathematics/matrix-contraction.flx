@@ -1,6 +1,8 @@
 << "arr";
 
---- Prepare a contiguous right operand for the Gram matrix A A^T.
+--- A A^T is the Gram matrix of row dot products. arr.mul accepts a
+--- strided transpose directly; here we materialize the right operand
+--- to illustrate a different storage choice with the same arithmetic.
 a := : r (form [64n 64n] (.. 1z 4096z));
 transpose := |: a;
 b := form [64n 64n] (,. transpose);

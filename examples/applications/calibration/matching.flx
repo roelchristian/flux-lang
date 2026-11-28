@@ -34,7 +34,9 @@ repeated(
     m : #s.measurement,
     r : #s.reference
 ):#s.count := {
-    combined := +: (#: (@: &mark_measured m)) (#: (@: &mark_reference r));
+    combined := df.concat
+        (#: (@: &mark_measured m))
+        (#: (@: &mark_reference r));
     by_key := df.agg &.sample &count combined;
     ?: (|| (> .measured by_key 1n) (> .reference by_key 1n)) by_key
 };

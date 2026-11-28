@@ -1,12 +1,11 @@
-<< "df";
-
 reading :: {
     id    : s;
     level : z;
     note  : ?s;
 };
-has_note(x: reading): b := /= .note x ?0;
+has_note(x: reading): b := ?+ .note x;
 positive(x: reading): b := > .level x 0z;
+-- Both branches take the same row and return a Boolean for the filter.
 usable: reading -> b := &{ @* && positive has_note };
 
 rows := #[
@@ -26,9 +25,6 @@ rows := #[
         note  := ?1 "checked";
     }
 ];
-!{
-    ^{
-        ^? ! print .id (?: usable rows);
-        ()
-    }
+!^{
+    ! print .id (?: usable rows);
 };

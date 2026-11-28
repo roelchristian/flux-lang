@@ -1,4 +1,4 @@
---- Direct calls do not require explicit parameter names.
+--- /1 declares one prefix operand without giving it a parameter name.
 sq/1 := &{ @* * . . };
 cube/1 := &{ @? * sq };
 fourth/1 := &{ @. sq sq };
@@ -12,10 +12,7 @@ total/1 : tree[~a] -> ~a | num ~a := \ t -> ?= t {
     node l r : + total l total r;
 };
 
-!{
-    ^{
-        ^? ! print (sq 3, cube 3, fourth 3);
-        ^? ! print total (node (leaf 1n) (leaf 1n));
-        ()
-    }
+!^{
+    ! print (sq 3, cube 3, fourth 3);
+    ! print total (node (leaf 1n) (leaf 1n));
 };
