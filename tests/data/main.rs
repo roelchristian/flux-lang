@@ -3,6 +3,8 @@ mod support;
 
 mod array_calculus;
 mod arrays;
+mod mathematical_library;
+mod numerical_methods;
 mod numerics;
 mod relations;
 mod row_runtime;

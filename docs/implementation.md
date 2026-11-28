@@ -22,6 +22,11 @@ expanded singleton data. Numeric, JSON and array limits are in the
 [reference](specification.md); relational evaluation is ordered,
 not a columnar optimizer.
 
+Mathesis pointwise functions reuse the checked scalar, sequence and dense
+lift evidence. Exact integer and polynomial kernels take their numeric domain
+from elaboration, and numerical methods use ordinary checked callback
+application with explicit work limits.
+
 The combined `!^{ ... }` opener lowers to ordinary action/fallible HIR.
 Inference checks immediate unit action statements before elaboration
 inserts lexical propagation nodes at their original spans.

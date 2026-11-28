@@ -153,12 +153,32 @@
     "stdout": "(6765, 280571172992510140037611932413038677189525)\n"
   },
   {
+    "entry": "examples/mathematics/integration.flx",
+    "stdout": "(1b, 1b, 1b)\n"
+  },
+  {
+    "entry": "examples/mathematics/integer-functions.flx",
+    "stdout": "(2432902008176640000, 112186277816662845432, 354224848179261915075)\n(6, 420, 445)\n([2 2 3 7], [1 2 3 6 9 18], 1b)\n"
+  },
+  {
     "entry": "examples/mathematics/matrix-products.flx",
     "stdout": "([2 2], [58 64 139 154], [58 154])\n11.60\n"
   },
   {
+    "entry": "examples/mathematics/multidimensional-math.flx",
+    "stdout": "([2 2], [1b 1b 1b 1b], [1 1 120 40320])\n"
+  },
+  {
+    "entry": "examples/mathematics/numerical-roots.flx",
+    "stdout": "(1b, 1b, 1b)\n"
+  },
+  {
     "entry": "examples/mathematics/polynomial.flx",
     "stdout": "(32, 5)\n"
+  },
+  {
+    "entry": "examples/mathematics/polynomial-operations.flx",
+    "stdout": "(32, [0 -6 6], [0 1 -1 1])\n([1 0 -1], ?1 2, ?0)\n"
   },
   {
     "entry": "examples/mathematics/primes.flx",
@@ -171,6 +191,10 @@
   {
     "entry": "examples/mathematics/rounding.flx",
     "stdout": "(3.50, 2.400)\n(2.34, -2.36)\n0.3333\n"
+  },
+  {
+    "entry": "examples/mathematics/waves.flx",
+    "stdout": "([1b 1b 1b 1b], [1b 1b 1b 1b])\n"
   },
   {
     "entry": "examples/modules/callables/demo.flx",

@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for Draft 0.17. **Limited** features
+This is the normative reference for Draft 0.18. **Limited** features
 work only as stated; **Proposed** features are unavailable and do not
 reserve a design. See the [example corpus](../examples/README.md) for
 complete programs, the [implementation guide](implementation.md) for Rust
@@ -709,11 +709,9 @@ provides `ioerr`); for example a CSV recovery pattern uses
 Native library calls retain fixed prefix arity. Arguments in the
 signatures below are shown in operand order; these tables are not new
 annotation syntax. See the [registry](../src/builtins.rs) for the
-implemented member and alias inventory. The `df` namespace is covered
-under relational data; the `math` namespace provides exact
-`math.div X Y : q^numerr` and `math.quantize SCALE VALUE : d`.
-`numerr` has nullary alternatives `divzero` and `range`. The
-`stat` aliases `avg`/`mean`, `pct` and `sd` use the corresponding
+implemented member and alias inventory. For `df`, see
+[relational operations](#relational-operations). The `stat` aliases
+`avg`/`mean`, `pct` and `sd` use the corresponding
 checked numeric operations. Correlation (`cor`) is recognized but
 not implemented.
 
@@ -750,6 +748,119 @@ path, stream label or environment name), not the OS diagnostic. See
 regular-file input implementation, buffered line input, script arguments
 and an output sink; this does not virtualize filesystem writes, directory
 operations, or process metadata.
+
+### Mathematics (Mathesis)
+
+Import `<< "math";` for arithmetic functions and constants,
+`<< "poly";` for polynomial operations, and `<< "num";` for the
+numerical methods below. These namespaces do not add prelude names.
+
+#### Elementary and special functions
+
+`math.pi`, `math.e` and `math.tau` are nullary approximate constants.
+For each unary function below, X is its only operand; paired operands
+are written in call order.
+
+| `math` members | Scalar contract |
+| --- | --- |
+| `floor`, `ceil`, `trunc`, `round` | Numeric X to `z`, toward −∞, +∞, zero, or nearest with ties to even, respectively. Exact inputs round exactly. |
+| `sign`, `frac`, `recip` | Sign is −1, 0 or 1 as `z` (both real zeros give 0). Fraction is X minus truncation in X's domain, preserving decimal scale. Reciprocal is exact `q` or approximate `r`; zero is invalid. |
+| `exp`, `expm1`, `ln`, `log10`, `log1p`, `log BASE X` | Exponential and logarithms. Logs need positive X, except `log1p` needs X > −1. A log base is positive and not 1. |
+| `pow BASE EXP`, `root DEG X`, `hypot X Y` | Real power, positive natural-degree root, and Euclidean length. Negative bases in `pow` require an integral exponent; zero to a negative power is invalid and `pow 0 0` is 1. Negative radicands require odd degree. |
+| `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2 Y X` | Circular functions in radians; `asin` and `acos` require X in [−1,1]. `atan2` accounts for the quadrant and rejects the origin. |
+| `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh` | Hyperbolic functions; `acosh` needs X ≥ 1, `atanh` needs −1 < X < 1. |
+| `rad`, `deg` | Convert degrees to radians or radians to degrees, respectively. |
+| `gamma`, `lgamma`, `beta X Y`, `erf`, `erfc` | Gamma, log absolute gamma, beta, and the error function and its complement. Nonpositive integers are gamma poles. Beta requires two positive arguments. |
+
+Exponential, logarithmic, trigonometric, hyperbolic and special
+functions take and return finite `r` (except the natural degree in
+`root`). An exact variable requires explicit conversion; an unsuffixed
+literal can use real context. Invalid domains and nonfinite results
+produce diagnostics, not NaN or infinity. Underflow may round to zero.
+`math.div X Y` still returns an exact `q^numerr` (`divzero` or
+`range`); `math.quantize SCALE VALUE` still rounds an exact value to `d`.
+
+Eligible unary and binary functions lift over sequences and dense arrays,
+including through checked function references. They follow the existing
+sequence and [array broadcasting](#elementwise-operations-and-broadcasting)
+rules, not shape-based dynamic overload resolution. Constants,
+`math.div`, `math.quantize`, factorization, divisors and `modpow`
+do not lift. See [wave sampling](../examples/mathematics/waves.flx)
+and [multidimensional mathematics](../examples/mathematics/multidimensional-math.flx).
+
+#### Exact integer functions
+
+| `math` members | Scalar contract |
+| --- | --- |
+| `gcd X Y`, `lcm X Y` | Take signed integers; return nonnegative exact naturals. Both give zero for (0,0). |
+| `fact N`, `choose N K`, `perm N K` | Factorial, binomial coefficient and ordered selections on naturals. `fact 0` is 1; `choose` and `perm` are zero when K > N. |
+| `modpow BASE EXP MOD`, `isqrt N`, `fib N` | Modular power, floor square root, and Fibonacci number (F₀=0, F₁=1), all on naturals. Modulus zero is invalid. |
+| `prime N`, `factor N`, `divisors N` | Exact primality is Boolean (false for 0 and 1); factors and positive divisors are sorted sequences of naturals. Factors repeat with multiplicity. Zero is invalid for those two sequence operations; at 1 the outputs are `[]` and `[1]`. |
+
+Exact operations do not wrap at machine integer widths. If a proof,
+search or representation would exceed the implementation's work or
+size bounds, the operation reports a resource diagnostic rather than
+a probable answer. Reference bounds include 100,000 factors per
+combinatorial product, 4,000,000 weighted work units for modular
+exponentiation and factor or primality searches, and the ordinary
+1,048,576-bit exact-result limit. Factor and divisor lists obey the
+collection limit; divisor materialization also has a 64 MiB integer
+data bound. One lifted number-theory invocation shares a 4,000,000-unit
+work allowance and a 64 MiB wide-result allowance across its cells.
+See [integer functions](../examples/mathematics/integer-functions.flx).
+
+#### Polynomials
+
+A polynomial is a homogeneous numeric sequence, in ascending degree
+order: `[a b c]` represents a + bx + cx². Trailing zeros do not affect
+degree; polynomial operations normalize inputs and produced sequences by
+removing them. This also determines the decimal scale used by evaluation:
+a trailing zero coefficient does not affect the result scale. `[]` is
+the canonical zero polynomial. An operation uses one homogeneous numeric
+domain for all coefficients and the evaluation point, with the usual
+contextual literal rules. Convert differing explicit domains first.
+
+| Operation | Contract |
+| --- | --- |
+| `poly.eval CS X` | Evaluate at X by Horner's rule. |
+| `poly.add A B`, `poly.sub A B`, `poly.mul A B` | Coefficientwise addition and subtraction, or convolution for multiplication. Natural subtraction retains its usual underflow diagnostic. |
+| `poly.deriv CS`, `poly.integ CS` | Differentiate, or integrate with integration constant zero. Integration of exact inputs returns rational coefficients; real input stays real. |
+| `poly.degree CS` | Return the optional natural degree; any representation of zero has no degree. |
+
+These operations do not lift to a collection of polynomials. The
+reference limits coefficient sequences to 100,000 elements, convolution
+to 1,000,000 pairs, arithmetic to 4,000,000 weighted work units and
+retained wide output data to 64 MiB. Domain and resource failures here
+are numeric diagnostics, not solver results. See
+[polynomial operations](../examples/mathematics/polynomial-operations.flx).
+
+#### Bounded numerical methods
+
+Callbacks are pure functions `r -> r`; these methods do not lift or run
+actions. The options record has the closed structural type
+`.{ tol:r; max:n; }`. Tolerance must be positive and finite. The
+positive limit `max` (at most 100,000) counts root-finding updates or
+quadrature samples, separately from ordinary evaluation fuel. All five
+methods return `r^solvererr`.
+
+| Operation | Contract |
+| --- | --- |
+| `num.bisect F LO HI OPTS` | Find a root in an ordered sign bracket. Return an exact sampled zero or stop when half the bracket width is within tolerance. |
+| `num.newton F DF X OPTS` | Iterate from X using F and its derivative DF. Stop when the absolute residual is within tolerance; a zero derivative prevents an update. |
+| `num.integrate F LO HI OPTS` | Adaptive Simpson quadrature with an error estimate. Reversing bounds negates the result; equal bounds give zero without sampling. |
+| `num.interp XS YS X` | Linear interpolation on at least two paired real samples. XS must be strictly increasing; X must be inside the sampled interval. |
+| `num.diff F X STEP` | Central difference on the actual rounded endpoints X ± STEP. STEP must be positive and yield two distinct points around X. |
+
+`solvererr` alternatives are `badparams`, `badbracket`, `singular`,
+`nonfinite`, `noconverge` and `budget`. They distinguish invalid method
+inputs, a failed sign bracket, a singular update, nonfinite solver
+arithmetic, failure to converge and work limits. Bisection and Newton
+iteration exhaustion give `noconverge`; quadrature sample exhaustion
+or an oversized `max` gives `budget`. These estimates are not proofs
+of a root or an integration error bound. A fatal diagnostic in a
+callback is not caught and relabeled as a solver result. See
+[root finding](../examples/mathematics/numerical-roots.flx) and
+[integration and approximation](../examples/mathematics/integration.flx).
 
 ### CSV
 

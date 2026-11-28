@@ -1,0 +1,12 @@
+<< "math";
+
+--- Checked first-class and direct math calls preserve dense shapes.
+angles := form [2n 2n] (math.rad [0r 90r 180r 270r]);
+sine: array[r] -> array[r] := &math.sin;
+norms := math.hypot (@ sine angles) (math.cos angles);
+unit_radius := < | (- norms 1r) 1e-12r;
+counts := math.fact form [2n 2n] [0n 1n 5n 8n];
+
+!^{
+    ! print (dim norms, ,. unit_radius, ,. counts);
+};

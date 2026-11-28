@@ -1,0 +1,26 @@
+<< "num";
+
+f(x: r): r := - (* x x) 2r;
+df(x: r): r := * 2r x;
+close(x, y: r): b := < | (- x y) 1e-5r;
+opts := .{
+    tol := 1e-8r;
+    max := 100n;
+};
+
+--- Recover explicitly from a solver error before printing.
+bisected := ^= num.bisect &f 1r 2r opts {
+    _ : -1r;
+};
+newton := ^= num.newton &f &df 1r opts {
+    _ : -1r;
+};
+bad := ^= num.bisect &f 2r 3r opts {
+    badbracket : 1r;
+    _          : 0r;
+};
+
+!^{
+    !
+        print (close bisected (^/ 2r), close newton (^/ 2r), = bad 1r);
+};

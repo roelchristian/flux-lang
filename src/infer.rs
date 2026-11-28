@@ -1,6 +1,7 @@
 //! Rank-one inference for the Draft 0.4 checked subset.
 mod arrays;
 mod matches;
+mod mathesis;
 
 use crate::{
     parser::{
@@ -1689,9 +1690,6 @@ impl Engine<'_> {
         }
     }
     fn builtin_ref(&mut self, n: &str, want: Option<&Type>) -> R<Type> {
-        if fallible_builtin(crate::builtins::canonical(n)) {
-            self.saw_result = true;
-        }
         if n.starts_with('.') && n != ".:" && n != ".." {
             let src = self.cx.fresh();
             let out = self.cx.fresh();
@@ -1706,6 +1704,9 @@ impl Engine<'_> {
         let Some(spec) = crate::builtins::lookup(n) else {
             return Err(self.unsupported(format!("unknown builtin reference &{n}")));
         };
+        if fallible_builtin(spec) {
+            self.saw_result = true;
+        }
         if spec.op.is_none() || spec.availability != crate::builtins::Availability::Runtime {
             return Err(self.unsupported(format!(
                 "{} is recognized but not implemented",
@@ -2155,10 +2156,13 @@ impl Engine<'_> {
             }
         }
         let n = spec.map_or(n, |s| s.canonical);
-        if fallible_builtin(n) {
+        if spec.is_some_and(fallible_builtin) {
             self.saw_result = true;
         }
         let result = match n {
+            _ if spec.is_some_and(|b| b.mathesis().is_some()) => {
+                self.mathesis_call(env, spec.unwrap(), args, want, effect)?
+            }
             op if op == "form" || (op.starts_with("arr.") && spec.is_some()) => {
                 self.array_call(env, op, args, want, effect)?
             }
@@ -2610,6 +2614,9 @@ impl Engine<'_> {
             if xs.len() != arity {
                 return Err(self.err(format!("{n} expects {arity} operands")));
             }
+        }
+        if let Some(spec) = spec.filter(|spec| spec.mathesis().is_some()) {
+            return self.mathesis_types(spec, xs, want);
         }
         if spec.is_some_and(|spec| spec.shape == crate::builtins::Shape::Elementwise) {
             if let Some(ty) = self.array_elementwise(n, xs, want)? {
@@ -3539,34 +3546,36 @@ fn immediate_raise(e: &Expr) -> bool {
         _ => false,
     }
 }
-fn fallible_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "io.print"
-            | "io.println"
-            | "io.read"
-            | "io.write"
-            | "io.exists"
-            | "csv.read"
-            | "csv.write"
-            | "math.div"
-            | "io.readln"
-            | "fs.ls"
-            | "fs.mkdir"
-            | "sys.env"
-            | "rx.find"
-            | "dt.days"
-            | "dt.date"
-            | "json.encode"
-            | "json.decode"
-            | "opt.result"
-            | "res.map"
-            | "res.maperr"
-            | "res.collect"
-            | "res.partition"
-            | "res.ok"
-            | "res.optional"
-    )
+fn fallible_builtin(spec: &crate::builtins::Builtin) -> bool {
+    spec.mathesis()
+        .is_some_and(|sig| sig.output == crate::builtins::MathType::SolverResult)
+        || matches!(
+            spec.canonical,
+            "io.print"
+                | "io.println"
+                | "io.read"
+                | "io.write"
+                | "io.exists"
+                | "csv.read"
+                | "csv.write"
+                | "math.div"
+                | "io.readln"
+                | "fs.ls"
+                | "fs.mkdir"
+                | "sys.env"
+                | "rx.find"
+                | "dt.days"
+                | "dt.date"
+                | "json.encode"
+                | "json.decode"
+                | "opt.result"
+                | "res.map"
+                | "res.maperr"
+                | "res.collect"
+                | "res.partition"
+                | "res.ok"
+                | "res.optional"
+        )
 }
 fn find_entry_natural_tail(p: &Program, resolver: &Resolution) -> Option<SyntaxId> {
     let Expr::Action(_, Some(tail)) = p.entry.as_ref()? else {

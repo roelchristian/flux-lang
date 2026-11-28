@@ -33,6 +33,13 @@ Unless noted in the [manifest](manifest.json), run `flux PATH` from the root.
 [rationals](mathematics/rational.flx), [rounding](mathematics/rounding.flx),
 [approximation](mathematics/approximation.flx).
 
+[Mathesis wave sampling](mathematics/waves.flx),
+[integer functions](mathematics/integer-functions.flx),
+[polynomial operations](mathematics/polynomial-operations.flx),
+[numerical roots](mathematics/numerical-roots.flx),
+[integration and approximation](mathematics/integration.flx),
+[multidimensional mathematics](mathematics/multidimensional-math.flx).
+
 [Array calculus](mathematics/array-calculus.flx), [matrix products](mathematics/matrix-products.flx),
 [axis reductions](mathematics/axis-reduction.flx),
 [dense arrays and indexed sequences](mathematics/arrays.flx).

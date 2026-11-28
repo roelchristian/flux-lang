@@ -210,6 +210,71 @@ const DENSE_ARRAYS: &[Case] = &[
     ("arr.diag", ",. (arr.diag m)", "[1 4]"),
 ];
 
+const MATHESIS: &[Case] = &[
+    ("math.floor", "math.floor -1.25q", "-2"),
+    ("math.ceil", "math.ceil -1.25q", "-1"),
+    ("math.trunc", "math.trunc -1.25q", "-1"),
+    ("math.round", "math.round 2.5q", "2"),
+    ("math.sign", "math.sign -3z", "-1"),
+    ("math.frac", "math.frac -1.25q", "-1/4"),
+    ("math.recip", "math.recip 8z", "1/8"),
+    ("math.exp", "math.exp 0r", "1"),
+    ("math.expm1", "math.expm1 0r", "0"),
+    ("math.ln", "math.ln 1r", "0"),
+    ("math.log10", "math.log10 1r", "0"),
+    ("math.log1p", "math.log1p 0r", "0"),
+    ("math.sin", "math.sin 0r", "0"),
+    ("math.cos", "math.cos 0r", "1"),
+    ("math.tan", "math.tan 0r", "0"),
+    ("math.asin", "math.asin 0r", "0"),
+    ("math.acos", "math.acos 1r", "0"),
+    ("math.atan", "math.atan 0r", "0"),
+    ("math.sinh", "math.sinh 0r", "0"),
+    ("math.cosh", "math.cosh 0r", "1"),
+    ("math.tanh", "math.tanh 0r", "0"),
+    ("math.asinh", "math.asinh 0r", "0"),
+    ("math.acosh", "math.acosh 1r", "0"),
+    ("math.atanh", "math.atanh 0r", "0"),
+    ("math.rad", "math.rad 0r", "0"),
+    ("math.deg", "math.deg 0r", "0"),
+    ("math.gamma", "math.gamma 1r", "1"),
+    ("math.lgamma", "math.lgamma 1r", "0"),
+    ("math.erf", "math.erf 0r", "0"),
+    ("math.erfc", "math.erfc 0r", "1"),
+    ("math.log", "math.log 2r 1r", "0"),
+    ("math.pow", "math.pow 2r 3r", "8"),
+    ("math.root", "math.root 1n 6r", "6"),
+    ("math.hypot", "math.hypot 3r 4r", "5"),
+    ("math.atan2", "math.atan2 0r 1r", "0"),
+    ("math.beta", "math.beta 1r 1r", "1"),
+    ("math.pi", "math.pi", "3.141592653589793"),
+    ("math.e", "math.e", "2.718281828459045"),
+    ("math.tau", "math.tau", "6.283185307179586"),
+    ("math.gcd", "math.gcd 6z 4z", "2"),
+    ("math.lcm", "math.lcm 6z 4z", "12"),
+    ("math.fact", "math.fact 5n", "120"),
+    ("math.choose", "math.choose 5n 3n", "10"),
+    ("math.perm", "math.perm 5n 3n", "60"),
+    ("math.modpow", "math.modpow 3n 5n 7n", "5"),
+    ("math.isqrt", "math.isqrt 80n", "8"),
+    ("math.prime", "math.prime 97n", "1b"),
+    ("math.factor", "math.factor 12n", "[2 2 3]"),
+    ("math.divisors", "math.divisors 12n", "[1 2 3 4 6 12]"),
+    ("math.fib", "math.fib 10n", "55"),
+    ("poly.eval", "poly.eval [1z 2z] 2z", "5"),
+    ("poly.add", "poly.add [1z 2z] [3z 4z]", "[4 6]"),
+    ("poly.sub", "poly.sub [2z 4z] [1z 4z]", "[1]"),
+    ("poly.mul", "poly.mul [1z 2z] [3z 4z]", "[3 10 8]"),
+    ("poly.deriv", "poly.deriv [1z 2z 3z]", "[2 6]"),
+    ("poly.integ", "poly.integ [1q 2q]", "[0 1 1]"),
+    ("poly.degree", "poly.degree [1z 2z 0z]", "?1 1"),
+    ("num.bisect", "num.bisect &line 0r 2r opts", "ok 1"),
+    ("num.newton", "num.newton &line &one 1r opts", "ok 1"),
+    ("num.integrate", "num.integrate &one 0r 1r opts", "ok 1"),
+    ("num.interp", "num.interp [0r 1r] [0r 1r] 0.5r", "ok 0.5"),
+    ("num.diff", "num.diff &line 3r 0.125r", "ok 1"),
+];
+
 fn expression_source(definitions: &str, expression: &str) -> String {
     format!("{PRELUDE}\n{definitions}\n!{{ ^= ! io.print {expression} {{ _ : (); }}; }};")
 }
@@ -246,6 +311,7 @@ fn every_runtime_registry_entry_has_a_strict_fixture() {
         REDUCTIONS,
         TABLES,
         DENSE_ARRAYS,
+        MATHESIS,
     ]
     .into_iter()
     .flat_map(|cases| cases.iter().map(|case| case.0))
@@ -284,6 +350,18 @@ fn all_collection_builtins_execute_in_hir() {
 #[test]
 fn all_dense_array_builtins_execute_in_hir() {
     assert_cases_with("m := form [2n 2n] [1z 2z 3z 4z];", DENSE_ARRAYS);
+}
+
+#[test]
+fn all_registered_mathesis_builtins_execute_in_hir() {
+    assert_cases_with(
+        r#"<< "poly"; << "num";
+line(x:r):r := - x 1r;
+one(x:r):r := 1r;
+opts := .{ tol:=1e-10r; max:=1024n; };
+"#,
+        MATHESIS,
+    );
 }
 
 #[test]

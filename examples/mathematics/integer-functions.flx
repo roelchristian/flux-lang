@@ -1,0 +1,10 @@
+<< "math";
+
+--- Exact counts quickly exceed machine integer widths.
+!^{
+    ! print (math.fact 20n, math.choose 70n 35n, math.fib 100n);
+    !
+        print
+            (math.gcd -84z 30z, math.lcm -84z 30z, math.modpow 4n 13n 497n);
+    ! print (math.factor 84n, math.divisors 18n, math.prime 97n);
+};

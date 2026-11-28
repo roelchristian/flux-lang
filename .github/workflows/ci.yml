@@ -23,6 +23,9 @@ jobs:
         run: cargo +1.85.0 fmt --all -- --check
       - name: Tests
         run: cargo +1.85.0 test --locked --all-targets
+      - name: Legacy oracle public API
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo +1.85.0 test --locked --features legacy-oracle --test compiler legacy_oracle_remains_available
       - name: Clippy
         run: cargo +1.85.0 clippy --locked --all-targets -- -D warnings
       - name: Release build

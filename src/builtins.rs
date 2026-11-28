@@ -1,6 +1,9 @@
 //! Shared identities, visibility, arity and behavior classification for Flux primitives.
 //! Availability describes implemented runtime signatures, not just recognized spellings.
-use crate::hir::CoreOp;
+use crate::{
+    hir::{CoreOp, LiftMode},
+    types::{NominalId, Prim, Row, Type},
+};
 use std::sync::LazyLock;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +125,125 @@ impl BinaryDomain {
     }
 }
 
+/// Runtime family and checked scalar signature are co-located with registry identity and arity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MathFamily {
+    Elementary,
+    Transcendental,
+    NumberTheory,
+    Polynomial,
+    Numerical,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MathSignature {
+    pub family: MathFamily,
+    pub inputs: &'static [MathType],
+    pub output: MathType,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MathType {
+    N,
+    Z,
+    R,
+    B,
+    SeqN,
+    SeqR,
+    OptN,
+    FnR,
+    Options,
+    SolverResult,
+    T,
+    SeqT,
+    QuotientT,
+    SeqQuotientT,
+}
+
+impl MathType {
+    /// Instantiate the one homogeneous numeric parameter used by generic operations.
+    pub fn instantiate(self, numeric: &Type) -> Option<Type> {
+        let p = Type::Prim;
+        let seq = |ty| Type::Seq(Box::new(ty));
+        use MathType::*;
+        Some(match self {
+            N => p(Prim::N),
+            Z => p(Prim::Z),
+            R => p(Prim::R),
+            B => p(Prim::B),
+            SeqN => seq(p(Prim::N)),
+            SeqR => seq(p(Prim::R)),
+            OptN => Type::Optional(Box::new(p(Prim::N))),
+            FnR => Type::Fun(Box::new(p(Prim::R)), Box::new(p(Prim::R))),
+            Options => Type::Record(Row {
+                fields: vec![("tol".into(), p(Prim::R)), ("max".into(), p(Prim::N))],
+                tail: None,
+            }),
+            SolverResult => Type::Result(
+                Box::new(p(Prim::R)),
+                Box::new(Type::Nominal(NominalId {
+                    name: "solvererr".into(),
+                    id: crate::errors041::owner_id("solvererr").expect("standard solver error"),
+                })),
+            ),
+            T => numeric.clone(),
+            SeqT => seq(numeric.clone()),
+            QuotientT | SeqQuotientT => {
+                let domain = match numeric {
+                    Type::Prim(Prim::R) => Prim::R,
+                    Type::Prim(Prim::N | Prim::Z | Prim::D | Prim::Q) => Prim::Q,
+                    _ => return None,
+                };
+                if self == SeqQuotientT {
+                    seq(p(domain))
+                } else {
+                    p(domain)
+                }
+            }
+        })
+    }
+
+    pub const fn numeric_parameter(self) -> bool {
+        matches!(self, Self::T | Self::SeqT)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MathShape {
+    Scalar,
+    Sequence,
+    Dense,
+}
+
+impl MathShape {
+    pub fn wrap(self, ty: Type) -> Type {
+        match self {
+            Self::Scalar => ty,
+            Self::Sequence => Type::Seq(Box::new(ty)),
+            Self::Dense => Type::dense_array(ty),
+        }
+    }
+
+    pub fn inner(self, ty: &Type) -> Option<&Type> {
+        match (self, ty) {
+            (Self::Scalar, t) => Some(t),
+            (Self::Sequence, Type::Seq(elem)) => Some(elem.as_ref()),
+            (Self::Dense, t) => t.array_element(),
+            _ => None,
+        }
+    }
+
+    pub fn of(ty: &Type) -> Self {
+        if matches!(ty, Type::Seq(_)) {
+            Self::Sequence
+        } else if ty.array_element().is_some() {
+            Self::Dense
+        } else {
+            Self::Scalar
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Builtin {
     pub canonical: &'static str,
@@ -136,6 +258,35 @@ pub struct Builtin {
     pub prelude: bool,
 }
 
+impl Builtin {
+    pub(crate) fn math_operands<'a>(
+        &self,
+        inputs: &[&'a Type],
+    ) -> Result<(MathShape, Vec<&'a Type>), &'static str> {
+        if self.shape != Shape::Elementwise {
+            return Ok((MathShape::Scalar, inputs.to_vec()));
+        }
+        let shape = match LiftMode::for_operands(inputs[0], inputs.get(1).copied())? {
+            LiftMode::Scalar => MathShape::Scalar,
+            LiftMode::LeftSequence | LiftMode::RightSequence | LiftMode::Pairwise => {
+                MathShape::Sequence
+            }
+            LiftMode::LeftArray | LiftMode::RightArray | LiftMode::ArrayPair => MathShape::Dense,
+        };
+        let elems = inputs
+            .iter()
+            .map(|&ty| MathShape::of(ty).inner(ty).unwrap())
+            .collect::<Vec<_>>();
+        if elems
+            .iter()
+            .any(|ty| MathShape::of(ty) != MathShape::Scalar)
+        {
+            return Err("mathematical lifting is limited to one collection level");
+        }
+        Ok((shape, elems))
+    }
+}
+
 use Availability::{Recognized, Runtime};
 use Effect::{ConstructAction, ExecuteAction, Pure};
 use Equality::{NotRequired, Tolerance};
@@ -144,7 +295,7 @@ use Shape::{Collection, Dependent, Elementwise, Reduction, Scalar};
 // Registry defaults keep the entries focused on what distinguishes each operation.
 // Overrides are named so equalities, aliases, and unavailable forms stay visible.
 macro_rules! builtin {
-    ($prelude:literal, $op:expr, $name:literal, $arity:literal, $rule:ident, $shape:expr
+    ($prelude:literal, $op:expr, $name:literal, $arity:expr, $rule:ident, $shape:expr
         $(, $field:ident: $value:expr)* $(,)?) => {
         Builtin {
             $($field: $value,)*
@@ -179,8 +330,116 @@ macro_rules! action {
     };
 }
 
+// Preserve the public Rust Builtin struct while authoring runtime metadata and
+// arity together. The catalog produces both registry entries and the signature
+// lookup; adding an operation cannot silently omit either view.
+macro_rules! with_mathesis_catalog {
+    ($emit:ident($($prefix:tt)*)) => {
+        $emit! {
+            $($prefix)*;
+            MathFloor, "math.floor", Elementwise, Elementary, [T] -> Z;
+            MathCeil, "math.ceil", Elementwise, Elementary, [T] -> Z;
+            MathTrunc, "math.trunc", Elementwise, Elementary, [T] -> Z;
+            MathRound, "math.round", Elementwise, Elementary, [T] -> Z;
+            MathSign, "math.sign", Elementwise, Elementary, [T] -> Z;
+            MathFrac, "math.frac", Elementwise, Elementary, [T] -> T;
+            MathRecip, "math.recip", Elementwise, Elementary, [T] -> QuotientT;
+            MathExp, "math.exp", Elementwise, Transcendental, [R] -> R;
+            MathExpm1, "math.expm1", Elementwise, Transcendental, [R] -> R;
+            MathLn, "math.ln", Elementwise, Transcendental, [R] -> R;
+            MathLog10, "math.log10", Elementwise, Transcendental, [R] -> R;
+            MathLog1p, "math.log1p", Elementwise, Transcendental, [R] -> R;
+            MathSin, "math.sin", Elementwise, Transcendental, [R] -> R;
+            MathCos, "math.cos", Elementwise, Transcendental, [R] -> R;
+            MathTan, "math.tan", Elementwise, Transcendental, [R] -> R;
+            MathAsin, "math.asin", Elementwise, Transcendental, [R] -> R;
+            MathAcos, "math.acos", Elementwise, Transcendental, [R] -> R;
+            MathAtan, "math.atan", Elementwise, Transcendental, [R] -> R;
+            MathSinh, "math.sinh", Elementwise, Transcendental, [R] -> R;
+            MathCosh, "math.cosh", Elementwise, Transcendental, [R] -> R;
+            MathTanh, "math.tanh", Elementwise, Transcendental, [R] -> R;
+            MathAsinh, "math.asinh", Elementwise, Transcendental, [R] -> R;
+            MathAcosh, "math.acosh", Elementwise, Transcendental, [R] -> R;
+            MathAtanh, "math.atanh", Elementwise, Transcendental, [R] -> R;
+            MathRad, "math.rad", Elementwise, Transcendental, [R] -> R;
+            MathDeg, "math.deg", Elementwise, Transcendental, [R] -> R;
+            MathGamma, "math.gamma", Elementwise, Transcendental, [R] -> R;
+            MathLgamma, "math.lgamma", Elementwise, Transcendental, [R] -> R;
+            MathErf, "math.erf", Elementwise, Transcendental, [R] -> R;
+            MathErfc, "math.erfc", Elementwise, Transcendental, [R] -> R;
+            MathLog, "math.log", Elementwise, Transcendental, [R, R] -> R;
+            MathPow, "math.pow", Elementwise, Transcendental, [R, R] -> R;
+            MathHypot, "math.hypot", Elementwise, Transcendental, [R, R] -> R;
+            MathAtan2, "math.atan2", Elementwise, Transcendental, [R, R] -> R;
+            MathBeta, "math.beta", Elementwise, Transcendental, [R, R] -> R;
+            MathRoot, "math.root", Elementwise, Transcendental, [N, R] -> R;
+            MathPi, "math.pi", Scalar, Transcendental, [] -> R;
+            MathE, "math.e", Scalar, Transcendental, [] -> R;
+            MathTau, "math.tau", Scalar, Transcendental, [] -> R;
+            MathGcd, "math.gcd", Elementwise, NumberTheory, [Z, Z] -> N;
+            MathLcm, "math.lcm", Elementwise, NumberTheory, [Z, Z] -> N;
+            MathFact, "math.fact", Elementwise, NumberTheory, [N] -> N;
+            MathIsqrt, "math.isqrt", Elementwise, NumberTheory, [N] -> N;
+            MathFib, "math.fib", Elementwise, NumberTheory, [N] -> N;
+            MathChoose, "math.choose", Elementwise, NumberTheory, [N, N] -> N;
+            MathPerm, "math.perm", Elementwise, NumberTheory, [N, N] -> N;
+            MathModPow, "math.modpow", Scalar, NumberTheory, [N, N, N] -> N;
+            MathPrime, "math.prime", Elementwise, NumberTheory, [N] -> B;
+            MathFactor, "math.factor", Collection, NumberTheory, [N] -> SeqN;
+            MathDivisors, "math.divisors", Collection, NumberTheory, [N] -> SeqN;
+            PolyEval, "poly.eval", Collection, Polynomial, [SeqT, T] -> T;
+            PolyAdd, "poly.add", Collection, Polynomial, [SeqT, SeqT] -> SeqT;
+            PolySub, "poly.sub", Collection, Polynomial, [SeqT, SeqT] -> SeqT;
+            PolyMul, "poly.mul", Collection, Polynomial, [SeqT, SeqT] -> SeqT;
+            PolyDeriv, "poly.deriv", Collection, Polynomial, [SeqT] -> SeqT;
+            PolyInteg, "poly.integ", Collection, Polynomial, [SeqT] -> SeqQuotientT;
+            PolyDegree, "poly.degree", Collection, Polynomial, [SeqT] -> OptN;
+            NumBisect, "num.bisect", Scalar, Numerical, [FnR, R, R, Options] -> SolverResult;
+            NumNewton, "num.newton", Scalar, Numerical, [FnR, FnR, R, Options] -> SolverResult;
+            NumIntegrate, "num.integrate", Scalar, Numerical, [FnR, R, R, Options] -> SolverResult;
+            NumInterp, "num.interp", Scalar, Numerical, [SeqR, SeqR, R] -> SolverResult;
+            NumDiff, "num.diff", Scalar, Numerical, [FnR, R, R] -> SolverResult;
+        }
+    };
+}
+
+macro_rules! mathesis_registry {
+    ($($previous:expr,)*;
+     $($op:ident, $name:literal, $shape:expr, $family:ident,
+        [$($input:ident),*] -> $output:ident;)*) => {
+        &[
+            $($previous,)*
+            $({
+                const INPUTS: &[MathType] = &[$(MathType::$input),*];
+                internal!($op, $name, INPUTS.len(), Household, $shape)
+            },)*
+        ]
+    };
+}
+
+macro_rules! mathesis_metadata {
+    ($actual:expr;
+     $($op:ident, $name:literal, $shape:expr, $family:ident,
+        [$($input:ident),*] -> $output:ident;)*) => {
+        match $actual {
+            $(CoreOp::$op => Some(MathSignature {
+                family: MathFamily::$family,
+                inputs: &[$(MathType::$input),*],
+                output: MathType::$output,
+            }),)*
+            _ => None,
+        }
+    };
+}
+
+impl Builtin {
+    pub(crate) fn mathesis(&self) -> Option<MathSignature> {
+        with_mathesis_catalog!(mathesis_metadata(self.op?))
+    }
+}
+
 /// Registry of exact names; selectors such as .field are generated forms, not entries.
-pub static REGISTRY: &[Builtin] = &[
+pub static REGISTRY: &[Builtin] = with_mathesis_catalog!(mathesis_registry(
     internal!(ArrayReshape, "arr.reshape", 2, Household, Collection),
     internal!(ArrayShape, "arr.shape", 1, Household, Collection, aliases: &["dim"]),
     internal!(ArrayRavel, "arr.ravel", 1, Household, Collection),
@@ -340,7 +599,7 @@ pub static REGISTRY: &[Builtin] = &[
     internal!(DropNa, "df.dropna", 2, Table, Collection, aliases: &["table.dropna"]),
     internal!(Fill, "df.fill", 2, Table, Collection, aliases: &["table.fill"]),
     internal!(PresentOnly, "df.present", 1, Table, Collection, aliases: &["table.present"]),
-];
+));
 
 // Indexed by the operation discriminant; aliases share the same execution contract.
 static OPERATIONS: LazyLock<[Option<&'static Builtin>; 256]> = LazyLock::new(|| {
@@ -394,7 +653,6 @@ const IO: &[Member] = exports!(
     "io": "print", "println", "readln", "read",
     "write", "exists", "read_csv", "write_csv"
 );
-const MATH: &[Member] = exports!("math": "div", "quantize");
 const CSV: &[Member] = exports!("csv": "read", "write");
 const TABLE: &[Member] = exports!(
     "df": "agg", "extend", "semi", "anti", "union",
@@ -417,10 +675,16 @@ const ARR: &[Member] = exports!(
 );
 
 pub fn module_items(path: &str) -> Option<impl Iterator<Item = (&'static str, usize)>> {
-    let members = match path {
+    let math_prefix = match path {
+        "math" => Some("math."),
+        "poly" => Some("poly."),
+        "num" => Some("num."),
+        _ => None,
+    };
+    let members: &[Member] = match path {
         "io" => IO,
         "csv" => CSV,
-        "math" => MATH,
+        "math" | "poly" | "num" => &[],
         "df" | "table" => TABLE,
         "stat" | "stats" | "statistics" => STATISTICS,
         "opt" => OPT,
@@ -435,12 +699,20 @@ pub fn module_items(path: &str) -> Option<impl Iterator<Item = (&'static str, us
 
         _ => return None,
     };
-    Some(members.iter().map(|&(local, key)| {
-        (
-            local,
-            lookup(key).expect("module member has registry entry").arity,
-        )
-    }))
+    Some(
+        members
+            .iter()
+            .map(|&(local, key)| {
+                (
+                    local,
+                    lookup(key).expect("module member has registry entry").arity,
+                )
+            })
+            .chain(REGISTRY.iter().filter_map(move |spec| {
+                let local = spec.canonical.strip_prefix(math_prefix?)?;
+                Some((local, spec.arity))
+            })),
+    )
 }
 
 pub fn runtime_arity(name: &str) -> Option<usize> {
@@ -490,6 +762,8 @@ mod tests {
             "stats",
             "statistics",
             "math",
+            "poly",
+            "num",
             "stat",
             "opt",
             "res",

@@ -97,6 +97,10 @@ impl Decimal {
         Self::new(coefficient, scale)
     }
 
+    pub(super) fn storage_bits(&self) -> u64 {
+        self.coefficient.bits()
+    }
+
     pub(super) fn exact(&self) -> NumericResult<BigRational> {
         Ok(BigRational::new(
             self.coefficient.clone(),

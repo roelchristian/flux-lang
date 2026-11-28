@@ -7,7 +7,15 @@ pub struct StandardVariant {
     pub payload: &'static [&'static str],
 }
 
-pub const OWNERS: &[&str] = &["ioerr", "csverr", "numerr", "rxerr", "dterr", "jsonerr"];
+pub const OWNERS: &[&str] = &[
+    "ioerr",
+    "csverr",
+    "numerr",
+    "rxerr",
+    "dterr",
+    "jsonerr",
+    "solvererr",
+];
 
 macro_rules! variants_for {
     ($owner:literal; $($name:literal => [$($payload:literal),*]),+ $(,)?) => {
@@ -30,6 +38,11 @@ const DT: &[StandardVariant] = variants_for!("dterr"; "baddate" => ["s"]);
 const JSON: &[StandardVariant] =
     variants_for!("jsonerr"; "invalidjson" => ["s"], "jsonshape" => ["s"]);
 
+const SOLVER: &[StandardVariant] = variants_for!("solvererr";
+    "badparams" => [], "badbracket" => [], "singular" => [],
+    "nonfinite" => [], "noconverge" => [], "budget" => [],
+);
+
 pub fn variants(owner: &str) -> &'static [StandardVariant] {
     match owner {
         "ioerr" => IO,
@@ -38,6 +51,7 @@ pub fn variants(owner: &str) -> &'static [StandardVariant] {
         "rxerr" => RX,
         "dterr" => DT,
         "jsonerr" => JSON,
+        "solvererr" => SOLVER,
         _ => &[],
     }
 }
