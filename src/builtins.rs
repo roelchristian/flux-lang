@@ -880,6 +880,16 @@ pub static REGISTRY: &[Builtin] = &[
         &["table.distinct"]
     ),
     internal!(
+        Some(CoreOp::StructuralRows),
+        "df.structural",
+        1,
+        Table,
+        Collection,
+        Pure,
+        Runtime,
+        &["table.structural"]
+    ),
+    internal!(
         Some(CoreOp::TableSelect),
         "df.select",
         2,
@@ -980,6 +990,7 @@ const TABLE: &[Member] = &[
     ("union", "df.union"),
     ("distinct", "df.distinct"),
     ("select", "df.select"),
+    ("structural", "df.structural"),
     ("dropna", "df.dropna"),
     ("fill", "df.fill"),
     ("present", "df.present"),

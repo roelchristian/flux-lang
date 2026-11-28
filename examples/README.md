@@ -92,3 +92,5 @@ both the ordinary and strict HIR executors in clean temporary directories.
 The manifest records expected stdout, exit status, input, generated files and
 no-overwrite behavior. Libraries are verified through their consumers, and an
 unlisted script or an unused library fails the inventory check.
+
+[Open rows](tables/open-rows.flx) shows a schema-preserving table extension.

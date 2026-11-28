@@ -368,6 +368,16 @@ fn structure(
             let Some(&last) = segment.last() else {
                 continue;
             };
+            // An explicit open-record tail occupies its own line, but is
+            // not a field and should not interrupt alignment of the prefix.
+            if open == ".{"
+                && matches!(segment, [bar, tail] if tokens[*bar].text == "|"
+                    && tokens[*tail].text.strip_prefix('\'').is_some_and(|name|
+                        name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+                        && !name.ends_with('\'')))
+            {
+                break;
+            }
             let mut margins = segment
                 .iter()
                 .copied()

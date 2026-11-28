@@ -334,7 +334,7 @@ fn annotated(t: &TypeAnnotation) -> bool {
         Result(a, b) | Dictionary(a, b) => annotated(a) && annotated(b),
         Function(xs, out) => xs.iter().all(annotated) && annotated(out),
         PositionalTable(xs) | Tuple(xs) | NamedApply(_, xs) => xs.iter().all(annotated),
-        Record(fields) => fields.iter().all(|(_, t)| annotated(t)),
+        Record(fields) | OpenRecord(fields, _) => fields.iter().all(|(_, t)| annotated(t)),
         Primitive(_) | Named(_) | Variable(_) => true,
     }
 }
