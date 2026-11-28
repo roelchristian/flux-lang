@@ -109,6 +109,45 @@ fn layout_matches(p: &HirProgram, mut ty: &Type, witness: Option<&TableSchema>) 
     witness.is_none()
 }
 
+fn pattern_binders(
+    p: &HirProgram,
+    pattern: &ValuePattern,
+    mut binder: impl FnMut(SymbolId, Span) -> Result<(), Error>,
+) -> Result<(), Error> {
+    use ValuePatternKind::*;
+    let mut stack = vec![(pattern, 0)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth >= 256 || node.span.start > node.span.end {
+            return Err(invalid(
+                Span::at(node.span.start),
+                "invalid HIR pattern depth or span",
+            ));
+        }
+        match &node.kind {
+            Bind(symbol) => binder(*symbol, node.span)?,
+            Constructor(id, fields) => {
+                if constructor(p, *id, node.span)?.payload.len() != fields.len() {
+                    return Err(invalid(node.span, "invalid HIR match constructor arity"));
+                }
+                stack.extend(fields.iter().rev().map(|n| (n, depth + 1)));
+            }
+            Tuple(parts) => stack.extend(parts.iter().rev().map(|n| (n, depth + 1))),
+            Record(parts) => {
+                let mut names = HashSet::new();
+                for (name, field) in parts.iter().rev() {
+                    if !names.insert(&**name) {
+                        return Err(invalid(node.span, "duplicate HIR match record field"));
+                    }
+                    stack.push((field, depth + 1));
+                }
+            }
+            Optional(Some(payload)) => stack.push((payload, depth + 1)),
+            Optional(None) | Wildcard | Bool(_) | Unit => {}
+        }
+    }
+    Ok(())
+}
+
 /// Validate the arena and witnesses before executing external or newly lowered
 /// HIR. This checks structural integrity, not source typing or effect inference.
 pub fn validate(p: &HirProgram) -> Result<(), Error> {
@@ -280,6 +319,18 @@ pub fn validate(p: &HirProgram) -> Result<(), Error> {
                 child(*result)?;
                 escapes.push((*boundary, at));
             }
+            ExprKind::Match { value, arms } => {
+                child(*value)?;
+                if arms.is_empty() {
+                    return Err(invalid(at, "HIR match has no arms"));
+                }
+                for arm in arms {
+                    child(arm.body)?;
+                    pattern_binders(p, &arm.pattern, |id, span| {
+                        introduce(&mut bindings, id, span)
+                    })?;
+                }
+            }
             ExprKind::Recover { result, arms } => {
                 child(*result)?;
                 for arm in arms {
@@ -429,6 +480,16 @@ fn validate_lexical_ownership(p: &HirProgram) -> Result<(), Error> {
             }
             ExprKind::Raise { payload, .. } => child(*payload)?,
             ExprKind::Propagate { result, .. } => child(*result)?,
+            ExprKind::Match { value, arms } => {
+                child(*value)?;
+                for arm in arms {
+                    child(arm.body)?;
+                    pattern_binders(p, &arm.pattern, |id, _| {
+                        scope(id, arm.body);
+                        Ok(())
+                    })?;
+                }
+            }
             ExprKind::Recover { result, arms } => {
                 child(*result)?;
                 for arm in arms {

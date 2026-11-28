@@ -30,6 +30,8 @@ pub enum Type {
     Fun(Box<Type>, Box<Type>),
     Table(Box<Type>),
     Nominal(NominalId),
+    /// A saturated application of a parameterized nominal sum.
+    Applied(NominalId, Vec<Type>),
     Record(Row),
 }
 
@@ -165,6 +167,16 @@ impl fmt::Display for Type {
                 result_operand(t, f)
             }
             Self::Nominal(n) => f.write_str(crate::visible_symbol(&n.name)),
+            Self::Applied(n, args) => {
+                write!(f, "{}[", crate::visible_symbol(&n.name))?;
+                for (i, t) in args.iter().enumerate() {
+                    if i != 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{t}")?;
+                }
+                f.write_str("]")
+            }
             Self::Record(row) => write!(f, "{row}"),
         }
     }
@@ -229,7 +241,7 @@ fn free(t: &Type, out: &mut BTreeSet<u32>) {
             free(a, out);
             free(b, out);
         }
-        Type::Tuple(ts) => {
+        Type::Tuple(ts) | Type::Applied(_, ts) => {
             for t in ts {
                 free(t, out);
             }
@@ -275,6 +287,10 @@ fn map_type(t: &Type, var: &impl Fn(u32) -> Type, row: &impl Fn(&Row) -> Type) -
         Type::Dict(a, b) => Type::Dict(inner(a), inner(b)),
         Type::Fun(a, b) => Type::Fun(inner(a), inner(b)),
         Type::Tuple(ts) => Type::Tuple(ts.iter().map(|x| map_type(x, var, row)).collect()),
+        Type::Applied(n, ts) => Type::Applied(
+            n.clone(),
+            ts.iter().map(|x| map_type(x, var, row)).collect(),
+        ),
     }
 }
 
@@ -408,7 +424,7 @@ impl InferCtx {
                 self.register(a)?;
                 self.register(b)?;
             }
-            Type::Tuple(ts) => {
+            Type::Tuple(ts) | Type::Applied(_, ts) => {
                 for t in ts {
                     self.register(t)?;
                 }
@@ -470,9 +486,15 @@ impl InferCtx {
                 }
                 Ok(())
             }
+            (Applied(x, xs), Applied(y, ys)) if x == y && xs.len() == ys.len() => {
+                for (x, y) in xs.iter().zip(ys) {
+                    self.unify_inner(x, y)?;
+                }
+                Ok(())
+            }
             (Record(x), Record(y)) => self.unify_rows(x, y),
-            (Nominal(x), Nominal(y))
-                if a != b && crate::visible_symbol(&x.name) == crate::visible_symbol(&y.name) =>
+            (Nominal(x), Nominal(y)) | (Applied(x, _), Applied(y, _))
+                if x != y && crate::visible_symbol(&x.name) == crate::visible_symbol(&y.name) =>
             {
                 let left = crate::semantic::public_text(&x.name);
                 let right = crate::semantic::public_text(&y.name);
@@ -1062,6 +1084,33 @@ mod tests {
         assert_eq!(nominal(1).to_string(), nominal(2).to_string());
         assert!(cx.unify(&nominal(1), &nominal(2)).is_err());
         cx.unify(&nominal(1), &nominal(1)).unwrap();
+    }
+
+    #[test]
+    fn nominal_applications_preserve_identity_and_instantiate_arguments() {
+        let mut cx = InferCtx::new();
+        let nominal = |id, arg| {
+            Type::Applied(
+                NominalId {
+                    id,
+                    name: "tree".into(),
+                },
+                vec![arg],
+            )
+        };
+        let arg = cx.fresh();
+        let body = nominal(1, arg.clone());
+        let scheme = cx.generalize(&body, &[], &[]);
+        assert_eq!(scheme.vars.len(), 1);
+        assert!(cx.unify(&arg, &body).is_err());
+        let (first, _) = cx.instantiate(&scheme);
+        let (second, _) = cx.instantiate(&scheme);
+        cx.unify(&first, &nominal(1, t(Prim::N))).unwrap();
+        cx.unify(&second, &nominal(1, t(Prim::S))).unwrap();
+        assert_eq!(cx.resolve(&first).to_string(), "tree[n]");
+        assert_eq!(cx.resolve(&second).to_string(), "tree[s]");
+        assert!(cx.unify(&first, &nominal(2, t(Prim::N))).is_err());
+        assert!(cx.require(Class::Eq, &first).is_err());
     }
 
     #[test]

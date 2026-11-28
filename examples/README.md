@@ -20,6 +20,7 @@ which you apply with `@` or pass to another function. For a declared
 callable, `&name` gets its function value. `@@` supplies the elements of a
 tuple as a sequence of curried arguments; `@` supplies one value. The inferred
 identity is used at two unrelated types.
+The [tree specimen](basics/trees.flx) uses generic recursive sums and exhaustive matching.
 
 ## 3. Tacit programming
 

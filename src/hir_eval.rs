@@ -998,6 +998,13 @@ fn fit_instance(pattern: &Type, actual: &Type, vars: &mut HashMap<u32, Type>) {
             fit_instance(a, c, vars);
             fit_instance(b, d, vars);
         }
+        (Type::Applied(a, args), Type::Applied(b, actual))
+            if a == b && args.len() == actual.len() =>
+        {
+            for (arg, actual) in args.iter().zip(actual) {
+                fit_instance(arg, actual, vars);
+            }
+        }
         (Type::Tuple(a), Type::Tuple(b)) => {
             for (a, b) in a.iter().zip(b) {
                 fit_instance(a, b, vars);
@@ -1257,6 +1264,9 @@ impl Eval<'_> {
                 Type::Fun(a, b) => Type::Fun(Box::new(recur(a)), Box::new(recur(b))),
                 Type::Result(a, b) => Type::Result(Box::new(recur(a)), Box::new(recur(b))),
                 Type::Dict(a, b) => Type::Dict(Box::new(recur(a)), Box::new(recur(b))),
+                Type::Applied(owner, args) => {
+                    Type::Applied(owner.clone(), args.iter().map(recur).collect())
+                }
                 Type::Record(r) => {
                     let mut r = r.clone();
                     for (_, t) in &mut r.fields {
@@ -1613,6 +1623,19 @@ impl Eval<'_> {
                 }
                 _ => return Err(invariant(s, "checked propagation operand was not Result")),
             },
+            ExprKind::Match { value, arms } => {
+                let value = self.eval(*value, env)?;
+                for arm in arms {
+                    if let Some(bindings) = self.match_value(&arm.pattern, &value)? {
+                        let local = self.frame(env);
+                        for (id, value) in bindings {
+                            self.put(local, id, value.clone());
+                        }
+                        return self.eval(arm.body, local);
+                    }
+                }
+                return Err(invariant(s, "checked match did not cover the scrutinee"));
+            }
             ExprKind::Recover { result, arms } => match self.eval(*result, env)? {
                 V::Outcome(Ok(v)) => v.as_ref().clone(),
                 V::Outcome(Err(f)) => {
@@ -1659,6 +1682,43 @@ impl Eval<'_> {
             } => V::Action(Rc::new(Action::Block { expr: id, env })),
             ExprKind::Block { steps, tail, .. } => self.block(steps, *tail, env)?,
         })
+    }
+    fn match_value<'v>(
+        &mut self,
+        pattern: &crate::hir::ValuePattern,
+        value: &'v V,
+    ) -> R<Option<Vec<(SymbolId, &'v V)>>> {
+        use crate::hir::ValuePatternKind as P;
+        let mut bindings = Vec::new();
+        let mut stack = vec![(pattern, value)];
+        while let Some((pattern, value)) = stack.pop() {
+            self.tick(pattern.span)?;
+            match (&pattern.kind, value) {
+                (P::Wildcard, _) => {}
+                (P::Bind(id), value) => bindings.push((*id, value)),
+                (P::Constructor(id, fields), V::Variant(actual))
+                    if *id == actual.constructor && fields.len() == actual.fields.len() =>
+                {
+                    stack.extend(fields.iter().zip(actual.fields.iter()).rev());
+                }
+                (P::Tuple(parts), V::Tuple(values)) if parts.len() == values.len() => {
+                    stack.extend(parts.iter().zip(values.iter()).rev());
+                }
+                (P::Record(parts), V::Record(values)) => {
+                    for (name, part) in parts.iter().rev() {
+                        let Some((_, value)) = values.iter().find(|(key, _)| key == name) else {
+                            return Ok(None);
+                        };
+                        stack.push((part, value));
+                    }
+                }
+                (P::Optional(Some(part)), V::Optional(Some(value))) => stack.push((part, value)),
+                (P::Optional(None), V::Optional(None)) | (P::Unit, V::Unit) => {}
+                (P::Bool(expected), V::Bool(actual)) if expected == actual => {}
+                _ => return Ok(None),
+            }
+        }
+        Ok(Some(bindings))
     }
     fn block(&mut self, steps: &[Step], tail: Option<ExprId>, parent: usize) -> R<V> {
         let env = self.frame(parent);

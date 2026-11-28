@@ -53,6 +53,10 @@
     "stdout": "337965\n337965\n"
   },
   {
+    "entry": "examples/basics/trees.flx",
+    "stdout": "(3, north)\n"
+  },
+  {
     "entry": "examples/io/arguments.flx",
     "stdout": "(2, report)\n[report 2026]\n",
     "args": [

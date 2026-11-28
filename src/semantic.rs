@@ -333,7 +333,7 @@ fn annotated(t: &TypeAnnotation) -> bool {
         Optional(t) | Action(t) | Table(t) | Sequence(t) => annotated(t),
         Result(a, b) | Dictionary(a, b) => annotated(a) && annotated(b),
         Function(xs, out) => xs.iter().all(annotated) && annotated(out),
-        PositionalTable(xs) | Tuple(xs) => xs.iter().all(annotated),
+        PositionalTable(xs) | Tuple(xs) | NamedApply(_, xs) => xs.iter().all(annotated),
         Record(fields) => fields.iter().all(|(_, t)| annotated(t)),
         Primitive(_) | Named(_) | Variable(_) => true,
     }
@@ -341,7 +341,8 @@ fn annotated(t: &TypeAnnotation) -> bool {
 fn private_nominal<'a>(ty: &'a Type, private: &HashSet<&str>) -> Option<&'a NominalId> {
     use Type::*;
     match ty {
-        Nominal(id) if private.contains(id.name.as_str()) => Some(id),
+        Nominal(id) | Applied(id, _) if private.contains(id.name.as_str()) => Some(id),
+        Applied(_, args) => args.iter().find_map(|t| private_nominal(t, private)),
         Seq(t) | Optional(t) | Action(t) | Table(t) => private_nominal(t, private),
         Dict(a, b) | Fun(a, b) | Result(a, b) => {
             private_nominal(a, private).or_else(|| private_nominal(b, private))
@@ -496,7 +497,7 @@ fn checked_interfaces(
             let constructor = inferred.constructor(*symbol).cloned();
             let nominal = match m.kind {
                 MemberKind::Record | MemberKind::Sum => match &scheme.ty {
-                    Type::Nominal(n) => Some(n.clone()),
+                    Type::Nominal(n) | Type::Applied(n, _) => Some(n.clone()),
                     _ => None,
                 },
                 MemberKind::Constructor(_) => constructor.as_ref().map(|c| c.owner.clone()),

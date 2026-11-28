@@ -796,6 +796,7 @@ impl Engine {
             })),
             Expr::Block(ss, tail) => self.block(ss, tail.as_deref(), env, expected, false),
             Expr::Call(s, es) => self.call(s, es, env, expected),
+            Expr::Match(..) => Err("match expressions require typed HIR".into()),
             Expr::Fallible(..) | Expr::Raise(..) | Expr::Propagate(..) | Expr::Recover(..) => {
                 Err("typed error handling requires typed HIR".into())
             }

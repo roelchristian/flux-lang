@@ -44,6 +44,7 @@ pub enum Stmt {
     },
     Sum {
         name: String,
+        type_params: Vec<String>,
         variants: Vec<Variant>,
         start: usize,
     },
@@ -76,6 +77,29 @@ pub enum RecoveryPattern {
     Bind(String),
     Constructor(String, Vec<String>),
 }
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchCase {
+    pub pattern: MatchPattern,
+    pub body: Expr,
+    pub start: usize,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MatchPattern {
+    pub span: Range<usize>,
+    pub kind: MatchPatternKind,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MatchPatternKind {
+    Wildcard,
+    Bind(String),
+    Constructor(String, Vec<MatchPattern>),
+    Tuple(Vec<MatchPattern>),
+    Record(Vec<(String, MatchPattern)>),
+    Optional(Option<Box<MatchPattern>>),
+    Bool(bool),
+    Unit,
+}
+
 /// Postorder syntax identity, scoped to one complete Program. Independent
 /// parses and clones of the same syntax have identical IDs. Structural
 /// edits or changes to the order of linked modules may renumber them.
@@ -104,6 +128,7 @@ pub enum Expr {
     Raise(Box<Expr>),
     Propagate(Box<Expr>),
     Recover(Box<Expr>, Vec<RecoveryCase>),
+    Match(Box<Expr>, Vec<MatchCase>),
     Num(String),
     Char(char),
     NamedRecord(String, Vec<(String, Expr)>),
@@ -132,6 +157,7 @@ pub enum TypePrimitive {
 pub enum TypeAnnotationKind {
     Primitive(TypePrimitive),
     Named(String),
+    NamedApply(String, Vec<TypeAnnotation>),
     Variable(String),
     Hole,
     Optional(Box<TypeAnnotation>),
@@ -393,7 +419,19 @@ impl AnnotationParser<'_> {
                 Record(fields)
             }
             name if name.strip_prefix('\'').is_some_and(is_ident) => Variable(name.to_owned()),
-            name if is_ident(name) || is_qualified_ident(name) => Named(name.to_owned()),
+            name if is_ident(name) || is_qualified_ident(name) => {
+                if self.peek() == "[" && self.t[start].end == self.t[self.i].start {
+                    self.i += 1;
+                    let mut args = vec![self.arrow(&[",", "]"])?];
+                    while self.eat(",") {
+                        args.push(self.arrow(&[",", "]"])?);
+                    }
+                    self.expect("]")?;
+                    NamedApply(name.to_owned(), args)
+                } else {
+                    Named(name.to_owned())
+                }
+            }
             _ => {
                 self.i = start;
                 return self.err(format!("unexpected token `{token}` in type annotation"));
@@ -443,6 +481,12 @@ fn expression_signature(expr: &Expr) -> u64 {
             }
         }
 
+        Expr::Match(_, arms) => {
+            for arm in arms {
+                arm.pattern.hash(&mut hash);
+                arm.start.hash(&mut hash);
+            }
+        }
         Expr::Lambda(ps, _) => ps.hash(&mut hash),
         Expr::TypedLambda(ps, ts, _) => {
             ps.hash(&mut hash);
@@ -511,6 +555,12 @@ impl Program {
                 }
                 Expr::Raise(body) | Expr::Propagate(body) => expr(body, nodes),
                 Expr::Recover(body, arms) => {
+                    expr(body, nodes);
+                    for a in arms {
+                        expr(&a.body, nodes);
+                    }
+                }
+                Expr::Match(body, arms) => {
                     expr(body, nodes);
                     for a in arms {
                         expr(&a.body, nodes);
@@ -989,7 +1039,7 @@ impl Parser {
         fn rewrite(p: &Parser, t: &mut TypeAnnotation) -> PResult<()> {
             use TypeAnnotationKind::*;
             match &mut t.kind {
-                Named(n) => {
+                Named(n) | NamedApply(n, _) => {
                     if let Some(name) = p.type_scopes.iter().rev().find_map(|s| s.get(n)) {
                         *n = name.clone();
                     } else if is_qualified_ident(n) {
@@ -1023,6 +1073,11 @@ impl Parser {
                     rewrite(p, ret)?;
                 }
                 Primitive(_) | Variable(_) | Hole => {}
+            }
+            if let NamedApply(_, args) = &mut t.kind {
+                for arg in args {
+                    rewrite(p, arg)?;
+                }
             }
             Ok(())
         }
@@ -1067,12 +1122,23 @@ impl Parser {
         }
         None
     }
+    fn type_head(&self, i: usize) -> Option<usize> {
+        if self.at(i + 1) == "::" {
+            return Some(i + 1);
+        }
+        if self.at(i + 1) != "[" || self.toks[i].end != self.toks[i + 1].start {
+            return None;
+        }
+        let end = self.end_of_group(i + 1)?;
+        (self.at(end + 1) == "::").then_some(end + 1)
+    }
     fn def_at(&self, i: usize) -> bool {
         if !is_ident(self.at(i)) {
             return false;
         }
         match self.at(i + 1) {
             ":=" | "::" => true,
+            "[" => self.type_head(i).is_some(),
             ":" | ":#" => self.find(i + 2, &[":="], &[";"]).is_some(),
             "(" => self.end_of_group(i + 1).is_some_and(|j| {
                 self.at(j + 1) == ":="
@@ -1092,17 +1158,20 @@ impl Parser {
                 break;
             }
             if self.def_at(i) {
-                let is_type = self.at(i + 1) == "::";
-                let is_sum = is_type && self.at(i + 2) == "{" && self.at(i + 3) == "|";
+                let type_head = self.type_head(i);
+                let is_type = type_head.is_some();
+                let is_sum =
+                    type_head.is_some_and(|h| self.at(h + 1) == "{" && self.at(h + 2) == "|");
+                let head = type_head.unwrap_or(i + 1);
                 if is_type && !type_names.insert(n.clone()) {
                     return Err(Error::new(
                         self.toks[i].start,
                         format!("duplicate type `{n}`"),
                     ));
                 }
-                let b = match self.at(i + 1) {
+                let b = match self.at(head) {
                     "::" if is_sum => {
-                        let mut j = i + 3;
+                        let mut j = head + 2;
                         while self.at(j) == "|" {
                             let (v, next) = self.variant_at(j)?;
                             if !names.insert(v.name.clone()) {
@@ -1456,8 +1525,17 @@ impl Parser {
                     .end_of_group(j)
                     .map(|k| k + 1)
                     .ok_or_else(|| Error::new(start, "malformed constructor payload type"))?;
-            } else if is_ident(self.at(j)) {
+            } else if is_ident(self.at(j))
+                || is_qualified_ident(self.at(j))
+                || self.at(j).strip_prefix('\'').is_some_and(is_ident)
+            {
                 j += 1;
+                if self.at(j) == "[" && self.toks[j - 1].end == self.toks[j].start {
+                    j = self
+                        .end_of_group(j)
+                        .map(|k| k + 1)
+                        .ok_or_else(|| Error::new(start, "unclosed applied constructor type"))?;
+                }
             } else {
                 return Err(Error::new(
                     self.toks.get(j).map_or(self.eof, |t| t.start),
@@ -1481,7 +1559,28 @@ impl Parser {
         let start = self.offset();
         let surface = self.ident()?;
         let name = self.decl_link(&surface);
-        if self.eat("::") {
+        let mut type_params = Vec::new();
+        if self.eat("[") {
+            loop {
+                let param = self.next()?;
+                if !param.text.strip_prefix('\'').is_some_and(is_ident) {
+                    return Err(Error::new(
+                        param.start,
+                        "expected a sum type parameter such as `'a`",
+                    ));
+                }
+                if type_params.contains(&param.text) {
+                    return Err(Error::new(param.start, "duplicate sum type parameter"));
+                }
+                type_params.push(param.text);
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect("]")?;
+            self.expect("::")?;
+        }
+        if !type_params.is_empty() || self.eat("::") {
             self.expect("{")?;
             if self.peek() == "|" {
                 let mut variants = Vec::new();
@@ -1500,9 +1599,13 @@ impl Parser {
                 self.expect(";")?;
                 return Ok(Stmt::Sum {
                     name,
+                    type_params,
                     variants,
                     start,
                 });
+            }
+            if !type_params.is_empty() {
+                return self.err("type parameters are supported only on nominal sums");
             }
             let mut fields = Vec::new();
             let mut seen = HashSet::new();
@@ -1797,7 +1900,7 @@ impl Parser {
                 t.start,
                 "mutation with `<-` is reserved, not implemented",
             )),
-            "?=" => Err(Error::new(t.start, "pattern matching is not implemented")),
+            "?=" => self.match_expression(effect),
             "#{" => Err(Error::new(
                 t.start,
                 "dictionary literals are not implemented",
@@ -1993,6 +2096,120 @@ impl Parser {
         let (ss, last) = r?;
         Ok(Expr::Fallible(ss, last))
     }
+    fn match_expression(&mut self, effect: bool) -> PResult<Expr> {
+        let subject = Box::new(self.expr(effect)?);
+        self.expect("{")?;
+        let mut cases = Vec::new();
+        while !self.eat("}") {
+            let start = self.offset();
+            let mut binders = HashSet::new();
+            let pattern = self.match_pattern(0, &mut binders)?;
+            self.expect(":")?;
+            self.scopes.push(
+                binders
+                    .into_iter()
+                    .map(|name| (name, Binding::Value))
+                    .collect(),
+            );
+            let body = self.expr(effect);
+            self.scopes.pop();
+            let body = body?;
+            self.expect(";")?;
+            cases.push(MatchCase {
+                pattern,
+                body,
+                start,
+            });
+        }
+        if cases.is_empty() {
+            return self.err("match requires at least one case");
+        }
+        Ok(Expr::Match(subject, cases))
+    }
+
+    fn match_pattern(
+        &mut self,
+        depth: usize,
+        binders: &mut HashSet<String>,
+    ) -> PResult<MatchPattern> {
+        use MatchPatternKind::*;
+        if depth >= 128 {
+            return self.err("match pattern nesting limit exceeded");
+        }
+        let token = self.next()?;
+        let kind = match token.text.as_str() {
+            "_" => Wildcard,
+            "0b" => Bool(false),
+            "1b" => Bool(true),
+            "?0" => Optional(None),
+            "?1" => Optional(Some(Box::new(self.match_pattern(depth + 1, binders)?))),
+            "(" if self.eat(")") => Unit,
+            "(" => {
+                let first = self.match_pattern(depth + 1, binders)?;
+                if self.eat(")") {
+                    first.kind
+                } else {
+                    self.expect(",")?;
+                    let mut fields = vec![first];
+                    loop {
+                        fields.push(self.match_pattern(depth + 1, binders)?);
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                    self.expect(")")?;
+                    Tuple(fields)
+                }
+            }
+            ".{" => {
+                let mut fields = Vec::new();
+                let mut seen = HashSet::new();
+                while !self.eat("}") {
+                    let name = self.ident()?;
+                    if !seen.insert(name.clone()) {
+                        return self.err(format!("duplicate match field `{name}`"));
+                    }
+                    self.expect(":=")?;
+                    fields.push((name, self.match_pattern(depth + 1, binders)?));
+                    self.expect(";")?;
+                }
+                Record(fields)
+            }
+            name if is_ident(name) || is_qualified_ident(name) => {
+                if let Some(Binding::Constructor(arity)) = self.lookup(name) {
+                    let linked = self.canonical(name);
+                    let args = (0..arity)
+                        .map(|_| self.match_pattern(depth + 1, binders))
+                        .collect::<PResult<_>>()?;
+                    Constructor(linked, args)
+                } else if is_qualified_ident(name) {
+                    return Err(Error::new(
+                        token.start,
+                        format!("unknown or unexported match constructor `{name}`"),
+                    ));
+                } else {
+                    if !binders.insert(name.to_owned()) {
+                        return Err(Error::new(
+                            token.start,
+                            format!("duplicate match binder `{name}`"),
+                        ));
+                    }
+                    Bind(name.to_owned())
+                }
+            }
+            name => {
+                return Err(Error::new(
+                    token.start,
+                    format!("expected match pattern, found `{name}`"),
+                ))
+            }
+        };
+        Ok(MatchPattern {
+            span: token.start..self.toks[self.pos - 1].end,
+            kind,
+        })
+    }
+
     fn recover(&mut self, effect: bool) -> PResult<Expr> {
         let subject = Box::new(self.expr(effect)?);
         self.expect("{")?;
@@ -2616,5 +2833,68 @@ f(x:q^err^e):q := 0;";
             &source[app.span.clone()],
             "+ (* 2 3) -- between operands\n  :q 4"
         );
+    }
+
+    #[test]
+    fn generic_sum_headers_payloads_and_match_origins() {
+        let source = "tree['a] :: { | leaf 'a; | node tree['a] tree['a]; }; f(t:tree[q]):q := ?= t { leaf x : x; node _ _ : 0q; };";
+        let p = parse(source).unwrap();
+        let Stmt::Sum {
+            type_params,
+            variants,
+            ..
+        } = &p.defs[0]
+        else {
+            panic!("expected generic sum");
+        };
+        assert_eq!(type_params, &["'a"]);
+        assert_eq!(variants[1].payload.len(), 2);
+        assert!(matches!(&variants[1].payload[0].kind,
+            TypeAnnotationKind::NamedApply(name, args) if name == "tree" && args.len() == 1));
+        let Stmt::Def {
+            body: Expr::Match(_, arms),
+            ..
+        } = &p.defs[1]
+        else {
+            panic!("expected match");
+        };
+        assert_eq!(&source[arms[0].pattern.span.clone()], "leaf x");
+        assert!(
+            p.expression_origins()
+                .iter()
+                .any(|(body, span)| std::ptr::eq(*body, &arms[0].body)
+                    && &source[span.clone()] == "x")
+        );
+        let formatted = crate::format_source(source).unwrap();
+        assert!(formatted.contains("tree['a]"));
+        assert!(formatted.contains("tree[q]"));
+        parse(&formatted).unwrap();
+        assert_eq!(crate::format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn rejects_duplicate_pattern_binders_and_sum_parameters() {
+        for (source, fragment) in [
+            ("f(x) := ?= x { (a,a) : a; };", "duplicate match binder"),
+            (
+                "f(x) := ?= x { .{ a := _; a := _; } : (); };",
+                "duplicate match field",
+            ),
+            (
+                "f(x) := ?= x { lib.unknown : (); };",
+                "unknown or unexported match constructor",
+            ),
+            (
+                "tree['a,'a] :: { | leaf 'a; };",
+                "duplicate sum type parameter",
+            ),
+            ("tree['a] :: { field:q; };", "only on nominal sums"),
+        ] {
+            assert!(
+                parse(source).unwrap_err().message.contains(fragment),
+                "{source}"
+            );
+        }
+        assert!(parse_type_annotation("tree [q]").is_err());
     }
 }

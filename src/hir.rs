@@ -256,6 +256,31 @@ pub struct RecoveryArm {
 }
 
 #[derive(Clone, Debug)]
+pub struct ValuePattern {
+    pub span: Span,
+    pub kind: ValuePatternKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum ValuePatternKind {
+    Wildcard,
+    Bind(SymbolId),
+    Constructor(SymbolId, Vec<ValuePattern>),
+    Tuple(Vec<ValuePattern>),
+    Record(Vec<(Box<str>, ValuePattern)>),
+    Optional(Option<Box<ValuePattern>>),
+    Bool(bool),
+    Unit,
+}
+
+#[derive(Clone, Debug)]
+pub struct MatchArm {
+    pub pattern: ValuePattern,
+    pub body: ExprId,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
 pub enum ExprKind {
     Literal(Literal),
     Load(SymbolId),
@@ -285,6 +310,10 @@ pub enum ExprKind {
     Propagate {
         boundary: BoundaryId,
         result: ExprId,
+    },
+    Match {
+        value: ExprId,
+        arms: Vec<MatchArm>,
     },
     Recover {
         result: ExprId,
@@ -562,6 +591,47 @@ impl Lower<'_> {
             body: self.expr(body, span)?,
         })
     }
+    fn value_pattern(&self, p: &crate::parser::MatchPattern) -> Result<ValuePattern, Boundary> {
+        use crate::parser::MatchPatternKind as S;
+        use ValuePatternKind as V;
+        let span = Span::new(p.span.start, p.span.end);
+        let descend = |parts: &[crate::parser::MatchPattern]| {
+            parts
+                .iter()
+                .map(|p| self.value_pattern(p))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let kind = match &p.kind {
+            S::Wildcard => V::Wildcard,
+            S::Bind(_) => V::Bind(
+                self.resolution
+                    .match_binding(p)
+                    .ok_or_else(|| Boundary::missing(span, "match binder identity"))?,
+            ),
+            S::Constructor(_, fields) => V::Constructor(
+                self.resolution
+                    .match_constructor(p)
+                    .ok_or_else(|| Boundary::missing(span, "match constructor identity"))?,
+                descend(fields)?,
+            ),
+            S::Tuple(parts) => V::Tuple(descend(parts)?),
+            S::Record(parts) => V::Record(
+                parts
+                    .iter()
+                    .map(|(name, part)| Ok((name.as_str().into(), self.value_pattern(part)?)))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            S::Optional(payload) => V::Optional(
+                payload
+                    .as_deref()
+                    .map(|p| self.value_pattern(p).map(Box::new))
+                    .transpose()?,
+            ),
+            S::Bool(value) => V::Bool(*value),
+            S::Unit => V::Unit,
+        };
+        Ok(ValuePattern { span, kind })
+    }
     fn target(&self, e: &Expr, name: &str, span: Span) -> Result<Target, Boundary> {
         if let Some(id) = self.resolution.reference(e) {
             if self.inference.constructor(id).is_some() {
@@ -689,6 +759,22 @@ impl Lower<'_> {
                 boundary: self.boundary(e, span)?,
                 result: self.expr(result, span)?,
             },
+            Expr::Match(value, cases) => {
+                let value = self.expr(value, span)?;
+                let arms = cases
+                    .iter()
+                    .map(|case| {
+                        let pattern = self.value_pattern(&case.pattern)?;
+                        let span = pattern.span;
+                        Ok(MatchArm {
+                            pattern,
+                            body: self.expr(&case.body, span)?,
+                            span,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Boundary>>()?;
+                Match { value, arms }
+            }
             Expr::Recover(result, cases) => {
                 let result = self.expr(result, span)?;
                 let mut arms = Vec::new();
