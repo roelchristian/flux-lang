@@ -3,11 +3,11 @@
 --- Preserve all other columns while adding a derived measurement.
 squares(t:#.{
     value: q;
-    | 'r
+    | ~r
 }):#.{
     value   : q;
     squared : q;
-    | 'r
+    | ~r
 } :=
     df.extend .{
         squared := ^ .value t 2n;

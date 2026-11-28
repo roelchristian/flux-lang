@@ -3328,8 +3328,8 @@ second(x:z):z^z := ^{ ^? first x };
     fn runtime_result_instantiation_is_polymorphic() {
         let ir = compile(
             r#"
-            keep(x:'a):'a^z := ^{ x };
-            get(fallback:'a,wrapped:'a^z):'a := ^= wrapped { _ : fallback; };
+            keep(x:~a):~a^z := ^{ x };
+            get(fallback:~a,wrapped:~a^z):~a := ^= wrapped { _ : fallback; };
             !{ (get 1z (keep 8z), get "stale" (keep "fresh")) };
         "#,
         );

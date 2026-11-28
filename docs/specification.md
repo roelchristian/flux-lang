@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for the implemented Draft 0.12.1 language.
+This is the normative reference for the implemented Draft 0.13 language.
 Unless marked **Limited** or **Proposed**, the rules describe the behavior
 of the Rust reference interpreter. Limited features have the scope stated
 here. Proposed features are not available and do not reserve a design.
@@ -13,7 +13,7 @@ they are not complete programs.
 
 ## Source, grammar and layout
 
-Flux source is ASCII. An identifier matches `[a-z][a-z0-9_]*`; `_` is a separate wildcard. Qualified names such as `csv.read` and selectors such as `.reading` and `.1` are distinct tokens. The lexer takes the longest applicable token. Keep compound punctuation together, and use whitespace where adjacent characters would change the token: `-2z` is a literal, whereas `- 2z 1z` is a call. Double quotes enclose strings and single quotes enclose a single character; escapes include `\n`, `\t`, and `\u{HEX}` for a Unicode scalar. The Boolean literals are `0b` and `1b`. A type variable, for example `'a`, has no closing quote. Unescaped control characters are not allowed in literals. Outside literals, `--` begins a line comment; a standalone `---` line is also a documentation convention. Comments have no runtime effect.
+Flux source is ASCII. An identifier matches `[a-z][a-z0-9_]*`; `_` is a separate wildcard. Qualified names such as `csv.read` and selectors such as `.reading` and `.1` are distinct tokens. The lexer takes the longest applicable token. Keep compound punctuation together, and use whitespace where adjacent characters would change the token: `-2z` is a literal, whereas `- 2z 1z` is a call. Double quotes enclose strings and single quotes enclose a single character; escapes include `\n`, `\t`, and `\u{HEX}` for a Unicode scalar. The Boolean literals are `0b` and `1b`. A named type variable uses an adjacent tilde and identifier, such as `~a`. Neither `~ a` nor a digit-prefixed name is valid in a type. Unescaped control characters are not allowed in literals. Outside literals, `--` begins a line comment; a standalone `---` line is also a documentation convention. Comments have no runtime effect.
 
 The following grammar is schematic: `TYPE` is the type grammar below, and a direct call takes exactly the operands declared by its lexical binding. Curly braces in the grammar's quoted terminals are source characters; unquoted braces mean repetition.
 
@@ -134,6 +134,15 @@ a sequence. Parenthesize a nested result rather than chaining bare carets.
 
 ### Schemes, constraints and recursion
 
+In a type or qualifier, `~name` represents a named variable. The tilde
+and identifier must be contiguous; the same spelling in a single
+signature refers to the same variable. A row-tail occurrence establishes
+row kind; it is not a scalar variable. The placeholder `_` is unchanged.
+Apostrophe-prefixed type variables are rejected with a migration diagnostic;
+character literals such as `'a'` and `'\n'` retain single quotes.
+Expression operators beginning with `~` are unchanged.
+
+
 Flux uses rank-one polymorphism. A reference to an eligible binding
 freshens its quantified variables and their constraints. Type variables
 free in surrounding captures are not generalized. A named function can be
@@ -146,7 +155,7 @@ fallible and action blocks do not qualify. Any unresolved variables in an
 expansive binding are shared monotypes; a universal annotation on such a
 binding is rejected, although a concrete annotation is allowed.
 
-A type variable such as `'a` in a named signature is rigid when its body is
+A type variable such as `~a` in a named signature is rigid when its body is
 checked. The body cannot specialize it, equate it with another distinct
 quantified variable, or make it escape into an enclosing monomorphic
 binding. Type variables in a lambda's parameter annotations are local
@@ -155,7 +164,7 @@ generalized by an enclosing eligible binding. For an executable example,
 see [inference, annotations and function values](../examples/basics/functions.flx).
 
 Named signatures attach class constraints with a qualifier such as
-`| num 'a`. The supported classes are `num`, `eq`, `ord` and `hash`.
+`| num ~a`. The supported classes are `num`, `eq`, `ord` and `hash`.
 They require a numeric operand, semantic equality, a supported order, or
 hashable key equality, respectively. The checker enforces these constraints
 before lowering; for example, functions and actions cannot be compared
@@ -245,7 +254,7 @@ as namespace-qualified members. A separately declared sum is a distinct
 type, irrespective of its constructor spellings.
 
 Use adjacent brackets to declare and apply type parameters:
-`tree['a] :: { | leaf 'a; | node tree['a] tree['a]; };` declares one
+`tree[~a] :: { | leaf ~a; | node tree[~a] tree[~a]; };` declares one
 parameter. `tree[z]` and `tree[s]` are different applications of the
 same nominal type. Multiple parameters and arguments are comma-separated.
 Constructors infer their type arguments at each use, retaining the
@@ -313,15 +322,15 @@ literal syntax is not executable. Nested sequences remain independent from dense
 
 ### Open structural rows
 
-An annotation such as `.{ value:q; | 'r }` requires a rational field
-`value` and permits any other correctly typed fields. The suffix `'r`
+An annotation such as `.{ value:q; | ~r }` requires a rational field
+`value` and permits any other correctly typed fields. The suffix `~r`
 stands for the rest of the row, not a scalar type. A row variable can
 occur more than once in a signature; those occurrences describe the
 same remaining fields. Using the same spelling as a scalar type variable
 in that signature is an error. Open row annotations do not affect
 the syntax of record values.
 
-Use `#.{ value:q; | 'r }` for a table with that schema. A function
+Use `#.{ value:q; | ~r }` for a table with that schema. A function
 returning the same table type preserves its extra columns. Use a second
 row variable for an independent table, such as the other operand to
 a keyed join. Static checks reject missing or conflicting required
@@ -332,8 +341,8 @@ there are no rows.
 
 A transformation can name a new field in the result while keeping the
 input tail, provided that the new name is absent from the tail. For
-example, a declaration can take `#.{ value:q; | 'r }` and return
-`#.{ value:q; squared:q; | 'r }`. An input with an existing `squared`
+example, a declaration can take `#.{ value:q; | ~r }` and return
+`#.{ value:q; squared:q; | ~r }`. An input with an existing `squared`
 column is rejected; this is an addition, not a silent overwrite.
 Type evidence travels through checked calls and module interfaces, and
 empty table results use that evidence rather than inspecting a row.

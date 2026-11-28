@@ -5,6 +5,12 @@ This log summarizes material changes. Earlier text and design revisions
 are available through [the repository's commit history](https://github.com/roelchristian/flux-lang/commits/main/);
 obsolete specifications are not kept as duplicate files.
 
+## Draft 0.13
+
+- Breaking syntax change: named type variables now use adjacent tilde
+  prefixes (`~a`, `~row`) in types, row tails, generic declarations and
+  constraints. Inference, character literals and tilde operators are unchanged.
+
 ## Draft 0.12.1
 
 - Declare directly callable tacit functions, references and lambdas with

@@ -214,8 +214,8 @@ seeded := arr.scan &+ 10z (arr.reshape [2n 0n] empty);
 fn callbacks_reuse_checked_generic_evidence_and_preserve_decimal_scale() {
     array_program(
         r#"
-square(x:'a):'a | num 'a := * x x;
-map(f:'a->'b,data:array['a]):array['b] := arr.map f data;
+square(x:~a):~a | num ~a := * x x;
+map(f:~a->~b,data:array[~a]):array[~b] := arr.map f data;
 a := arr.reshape [2n] [1.20d 2.0d];
 b := arr.reshape [2n] [3n 4n];
 c := arr.zip &+ a a;
@@ -281,7 +281,7 @@ b := @ &t.keep (arr.reshape [1] ["flux"]);
     );
     fs::write(
         fixture.0.join("types.flx"),
-        ">> (keep); keep(x:array['a]):array['a] := x;",
+        ">> (keep); keep(x:array[~a]):array[~a] := x;",
     )
     .unwrap();
     fixture.accepts("([2.00], [flux])\n");

@@ -3,11 +3,11 @@ sq/1 := &{ @* * . . };
 cube/1 := &{ @? * sq };
 fourth/1 := &{ @. sq sq };
 
-tree['a] :: {
-    | leaf 'a;
-    | node tree['a] tree['a];
+tree[~a] :: {
+    | leaf ~a;
+    | node tree[~a] tree[~a];
 };
-size/1 : tree['a] -> n := \ t -> ?= t {
+size/1 : tree[~a] -> n := \ t -> ?= t {
     leaf _   : 1n;
     node l r : + size l size r;
 };

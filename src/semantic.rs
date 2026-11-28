@@ -569,7 +569,7 @@ mod tests {
             r#"
             row :: { value:z; };
             issue :: { | bad row; };
-            poly(x:'a):'a := x;
+            poly(x:~a):~a := x;
             callback:z->z := &poly;
             hidden := 7;
         "#,

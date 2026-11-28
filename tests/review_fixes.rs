@@ -134,13 +134,13 @@ bad := { rr :: { a:z; }; outer rr { a := 3; } };"#,
 #[test]
 fn explicit_variables_cannot_specialize_or_escape_into_capture() {
     rejects(
-        "outer(x) := { pretend(y:'a):'a := x; &pretend };",
+        "outer(x) := { pretend(y:~a):~a := x; &pretend };",
         &["rigid", "specializ", "escape", "general"],
     );
-    rejects("bad(x:'a):'a := 1;", &["rigid", "specializ", "general"]);
+    rejects("bad(x:~a):~a := 1;", &["rigid", "specializ", "general"]);
     accepts(
         r#"<< "io";
-outer(x) := { identity(y:'a):'a := y; (identity 7, identity "s", x) };
+outer(x) := { identity(y:~a):~a := y; (identity 7, identity "s", x) };
 !{ ^= ! io.print outer 42 { _ : (); }; };"#,
         "(7, s, 42)\n",
     );
@@ -153,7 +153,7 @@ fn unconstrained_empty_occurrences_have_no_implicit_element_type() {
     accepts(
         r#"<< "io";
 f(xs:[z]) := == xs [];
-empty(x:'a):['a] := [];
+empty(x:~a):[~a] := [];
 !{ ^= ! io.print f [] { _ : (); }; ^= ! io.print f [1] { _ : (); }; ^= ! io.print empty "x" { _ : (); }; ^= ! io.print empty 2 { _ : (); }; };"#,
         "1b\n0b\n[]\n[]\n",
     );
@@ -183,7 +183,7 @@ input:#row := #[];
 fn constrained_numeric_evidence_survives_escaping_closures() {
     accepts(
         r#"<< "io";
-sq(x:'a):'a | num 'a := * x x;
+sq(x:~a):~a | num ~a := * x x;
 factory(x) := { g(y) := sq y; &g };
 !{ ^= ! io.print @ (factory ()) 2 { _ : (); }; ^= ! io.print @ (factory ()) 0.5 { _ : (); }; };"#,
         "4\n1/4\n",
@@ -245,7 +245,7 @@ fn generic_named_calls_carry_distinct_checked_instances_in_hir() {
     use flux_lang::types::{Prim, Type};
     use flux_lang::{parser, semantic};
 
-    let program = parser::parse("sq(x:'a):'a | num 'a := * x x; z := sq 2z; q := sq 0.5;")
+    let program = parser::parse("sq(x:~a):~a | num ~a := * x x; z := sq 2z; q := sq 0.5;")
         .expect("generic numeric source");
     let prepared = semantic::prepare(
         &program,

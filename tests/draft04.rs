@@ -115,7 +115,7 @@ fn instantiates_signature_with_numeric_constraint() {
     run(
         r#"
 << "io";
-sq(x:'a):'a | num 'a := * x x;
+sq(x:~a):~a | num ~a := * x x;
 !{ ^= ! io.print sq 2 { _ : (); }; ^= ! io.print sq 0.5 { _ : (); }; };
 "#,
         "4\n1/4\n",
@@ -202,7 +202,7 @@ fn rejects_invalid_elaboration() {
         ("inconsistent recursion", "f(x) := f [x];"),
         (
             "experimental explicit open row",
-            "bad(x:.{tag:z; | 'r}, y:'r):'r := y;",
+            "bad(x:.{tag:z; | ~r}, y:~r):~r := y;",
         ),
         ("nested numeric lifting", "x := + [[1 2] [3 4]] 9;"),
         ("nested relational lifting", "x := = [[1 2] [3 4]] 1;"),
@@ -213,7 +213,7 @@ fn rejects_invalid_elaboration() {
             "non-scalar CSV field",
             r#"<< "csv"; row :: {val:[d];}; !{ ^{ x:#row := ^? ! csv.read "data.csv"; () } };"#,
         ),
-        ("undeclared nested Eq", ">> (f); f(x:['a]):b := == x x;"),
+        ("undeclared nested Eq", ">> (f); f(x:[~a]):b := == x x;"),
         (
             "nominal function equality",
             "id(x:z):z := x; r :: {f:z->z;}; a := r {f := &id;}; b := == a a;",

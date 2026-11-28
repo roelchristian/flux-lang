@@ -76,14 +76,14 @@ fn rejects(source: &str, words: &[&str]) {
 }
 
 const KEEP: &str = r#"
-keep(t:#.{ value:q; | 'r }):#.{ value:q; | 'r } := ?: (> .value t 0q) t;
+keep(t:#.{ value:q; | ~r }):#.{ value:q; | ~r } := ?: (> .value t 0q) t;
 "#;
 
 #[test]
 fn one_open_record_signature_projects_from_different_closed_rows() {
     Fixture::new(
         r#"
-score(x:.{ value:q; | 'r }):q := .value x;
+score(x:.{ value:q; | ~r }):q := .value x;
 a := .{ label:="west"; value:=1.25q; };
 b := .{ value:=2.5q; flag:=1b; code:=7n; };
 !{ ^{ ^? ! print (score a,@ &score b); () } };
@@ -202,7 +202,7 @@ b:#.{ value:q; status:b; } := #[.{value:=2q;status:=0b;}];
 
 #[test]
 fn absent_required_fields_and_conflicting_field_domains_are_rejected() {
-    let declaration = "score(x:.{ value:q; | 'r }):q := .value x;";
+    let declaration = "score(x:.{ value:q; | ~r }):q := .value x;";
     rejects(
         &format!("{declaration} y := score .{{ label:=\"missing\"; }};"),
         &["value"],
@@ -216,15 +216,15 @@ fn absent_required_fields_and_conflicting_field_domains_are_rejected() {
 #[test]
 fn duplicate_labels_mixed_row_kinds_and_dropped_rigid_tails_are_rejected() {
     rejects(
-        "duplicate(x:.{ value:q; value:q; | 'r }):q := .value x;",
+        "duplicate(x:.{ value:q; value:q; | ~r }):q := .value x;",
         &["duplicate", "value"],
     );
     rejects(
-        "bad(x:.{ value:'r; | 'r }):'r := .value x;",
+        "bad(x:.{ value:~r; | ~r }):~r := .value x;",
         &["row variable", "ordinary type"],
     );
     rejects(
-        "drop(x:.{ value:q; | 'r }):.{ value:q; | 'r } := .{ value:=.value x; };",
+        "drop(x:.{ value:q; | ~r }):.{ value:q; | ~r } := .{ value:=.value x; };",
         &["row"],
     );
 }
@@ -249,11 +249,11 @@ fn open_key_fields_suffice_for_join_and_group_over_different_row_shapes() {
     Fixture::new(
         r#"
 << "df";
-overlap(l:#.{ key:s; | 'l },r:#.{ key:s; | 'r }):n :=
+overlap(l:#.{ key:s; | ~l },r:#.{ key:s; | ~r }):n :=
     # (*= &.key &.key l r);
-count(k:s,g:#.{ key:s; | 'r }):.{ key:s; size:n; } :=
+count(k:s,g:#.{ key:s; | ~r }):.{ key:s; size:n; } :=
     .{ key:=k; size:=# g; };
-buckets(t:#.{ key:s; | 'r }):#.{ key:s; size:n; } :=
+buckets(t:#.{ key:s; | ~r }):#.{ key:s; size:n; } :=
     df.agg &.key &count t;
 left:#.{ key:s; label:s; } := #[.{key:="a";label:="present";}];
 right:#.{ active:b; key:s; extra:n; } := #[.{active:=1b;key:="a";extra:=2n;}];
@@ -271,7 +271,7 @@ empty:#.{ extra:n; key:s; } := #[];
 fn open_column_records_cannot_hide_nonsequence_fields_from_reconstruction() {
     rejects(
         r#"
-cols(x:.{ value:[q]; | 'r }):#.{ value:q; } := #: x;
+cols(x:.{ value:[q]; | ~r }):#.{ value:q; } := #: x;
 bad := cols .{ value := [1q 2q]; extra := "not a sequence"; };
 "#,
         &["closed schema"],
@@ -283,7 +283,7 @@ fn roundtrip_uses_the_selected_inputs_order_not_another_shared_row_witness() {
     let fixture = Fixture::new(
         r#"
 << "csv";
-second(a:#.{ value:q; | 'r },b:#.{ value:q; | 'r }):#.{ value:q; | 'r } := #: :# b;
+second(a:#.{ value:q; | ~r },b:#.{ value:q; | ~r }):#.{ value:q; | ~r } := #: :# b;
 l:#.{ tag:s; value:q; } := #[];
 r:#.{ value:q; tag:s; } := #[];
 !{ ^{ ^? ! csv.write "ordered.csv" (second l r); () } };

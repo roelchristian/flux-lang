@@ -1552,7 +1552,7 @@ mod tests {
 
     #[test]
     fn nested_match_binders_have_arm_local_identity() {
-        let p = parse("tree['a] :: { | leaf 'a; | node tree['a] tree['a]; }; f(t:tree[q]):q := ?= t { leaf x : x; node (leaf x) _ : x; _ : 0q; };").unwrap();
+        let p = parse("tree[~a] :: { | leaf ~a; | node tree[~a] tree[~a]; }; f(t:tree[q]):q := ?= t { leaf x : x; node (leaf x) _ : x; _ : 0q; };").unwrap();
         let res = resolve(&p).unwrap();
         let Stmt::Def {
             body: Expr::Match(_, arms),

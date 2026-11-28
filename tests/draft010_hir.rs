@@ -44,7 +44,7 @@ fn match_rejects_mutated_cross_arm_binder_before_execution() {
 #[test]
 fn constructor_pattern_witness_has_checked_arity_and_stable_identity() {
     let mut p = checked(
-        "boxx['a] :: { | item 'a; };          first(v:boxx['a]):'a := ?= v { item x : x; };          read:boxx[z]->z := &first;          !{ ^{ ^? ! print (@ read (item 41z)); () } };",
+        "boxx[~a] :: { | item ~a; };          first(v:boxx[~a]):~a := ?= v { item x : x; };          read:boxx[z]->z := &first;          !{ ^{ ^? ! print (@ read (item 41z)); () } };",
     );
     assert_eq!(hir_eval::run(&p).unwrap().stdout, "41\n");
     let arm = p
@@ -72,7 +72,7 @@ fn constructor_pattern_witness_has_checked_arity_and_stable_identity() {
 #[test]
 fn callable_instances_project_numeric_types_through_generic_sums() {
     let p = checked(
-        "boxx['a] :: { | item 'a; };          doubled(v:boxx['a]):'a | num 'a := ?= v { item x : + x x; };          !{ ^{ ^? ! print (@ &doubled (item 1.20d), @ &doubled (item 7z)); () } };",
+        "boxx[~a] :: { | item ~a; };          doubled(v:boxx[~a]):~a | num ~a := ?= v { item x : + x x; };          !{ ^{ ^? ! print (@ &doubled (item 1.20d), @ &doubled (item 7z)); () } };",
     );
     assert_eq!(hir_eval::run(&p).unwrap().stdout, "(2.40, 14)\n");
 }

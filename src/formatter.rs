@@ -123,6 +123,17 @@ fn header_edge(tokens: &[Token], i: usize) -> bool {
             .is_some_and(|head| callable_header(&tokens[head..]))
 }
 
+// Tilde variables are adjacent tokens interpreted in type contexts by
+// the parser. Preserve both spellings in expressions without re-lexing.
+fn tilde_identifier(left: &Token, right: &Token) -> bool {
+    left.text == "~"
+        && right.text.as_bytes()[0].is_ascii_lowercase()
+        && right
+            .text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 fn spacing(source: &str, tokens: &[Token], i: usize) -> usize {
     let a = &tokens[i - 1].text;
     let b = &tokens[i].text;
@@ -132,7 +143,11 @@ fn spacing(source: &str, tokens: &[Token], i: usize) -> usize {
 
     // Never fuse or separate reference/type punctuation whose parse may
     // depend on raw source adjacency, or manufacture a composite lexeme.
-    if adjacent && (matches!(first, "&" | "#" | "!" | "?" | ":#") || header_edge(tokens, i)) {
+    if adjacent
+        && (matches!(first, "&" | "#" | "!" | "?" | ":#")
+            || header_edge(tokens, i)
+            || tilde_identifier(&tokens[i - 1], &tokens[i]))
+    {
         return 0;
     }
     if matches!(second, ";" | "," | ")" | "]") || matches!(first, "(" | "[" | "#[") {
@@ -286,7 +301,8 @@ fn apply_prefix(
             if start <= head
                 || end <= start
                 || (tokens[start - 1].text == "#"
-                    || nominal_bracket(&tokens[start - 1], &tokens[start]))
+                    || nominal_bracket(&tokens[start - 1], &tokens[start])
+                    || tilde_identifier(&tokens[start - 1], &tokens[start]))
                     && tokens[start - 1].end == tokens[start].start
             {
                 continue;
@@ -393,10 +409,10 @@ fn structure(
             // An explicit open-record tail occupies its own line, but is
             // not a field and should not interrupt alignment of the prefix.
             if open == ".{"
-                && matches!(segment, [bar, tail] if tokens[*bar].text == "|"
-                    && tokens[*tail].text.strip_prefix('\'').is_some_and(|name|
-                        name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-                        && !name.ends_with('\'')))
+                && matches!(segment, [bar, tilde, name]
+                    if tokens[*bar].text == "|"
+                        && tokens[*tilde].end == tokens[*name].start
+                        && tilde_identifier(&tokens[*tilde], &tokens[*name]))
             {
                 break;
             }
@@ -530,6 +546,7 @@ pub(crate) fn format(
                     if (old[0].text == "&" && old[1].text == ".")
                         || old[0].text == "#"
                         || nominal_bracket(&old[0], &old[1])
+                        || tilde_identifier(&old[0], &old[1])
                         || header_edge(&tokens, j + 1)
                     {
                         (old[0].end == old[1].start) == (new[0].end == new[1].start)
@@ -567,5 +584,37 @@ mod callable_tests {
         let source = "f / 2 := &g;";
         let out = format(source, 0, &[]).unwrap();
         assert!(out.starts_with("f / 2"), "{out}");
+    }
+
+    #[test]
+    fn tilde_pairs_preserve_spacing_and_character_literals() {
+        let source = "i(x:~item):~item := x;
+quiet(flag:b):b := ~flag;
+loud(flag:b):b := ~ flag;
+c := '~'; -- do not fuse variables with comments
+a := ~= 1q 1q;
+";
+        let out = format(source, 0, &[]).unwrap();
+        assert!(out.contains(": ~item"), "{out}");
+        assert!(
+            out.contains(":= ~flag;") && out.contains(":= ~ flag;"),
+            "{out}"
+        );
+        assert!(
+            out.contains("'~'; -- do not fuse") && out.contains("~= 1q 1q;"),
+            "{out}"
+        );
+        assert_eq!(format(&out, 0, &[]).unwrap(), out);
+    }
+
+    #[test]
+    fn tilde_row_tail_does_not_break_field_alignment() {
+        let src = "id(x:.{ value:q; station:s; | ~r }):.{ value:q; station:s; | ~r } := x;\n";
+        let out = crate::format_source(src).unwrap();
+        assert!(
+            out.contains("value   : q;\n    station : s;\n    | ~r"),
+            "{out}"
+        );
+        assert_eq!(crate::format_source(&out).unwrap(), out);
     }
 }

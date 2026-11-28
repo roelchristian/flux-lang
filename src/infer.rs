@@ -3038,7 +3038,13 @@ impl Engine<'_> {
                     .iter()
                     .any(|q| q.class == c.class && self.cx.resolve(&q.ty) == t)
             {
-                return Err(self.err(format!("annotated signature lacks {:?} {t}", c.class)));
+                let name = sig
+                    .explicit
+                    .iter()
+                    .find_map(|(name, declared)| (declared == &t).then_some(name.as_str()))
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| t.to_string());
+                return Err(self.err(format!("annotated signature lacks {} {name}", c.class)));
             }
         }
         for id in ids {
@@ -3659,10 +3665,10 @@ mod tests {
     }
     #[test]
     fn annotated_signature_constraints_and_nominal_evidence() {
-        check("f(x:['a]):b | eq 'a := == x x; >> (f);").unwrap();
-        let e = check("f(x:['a]):b := == x x; >> (f);").unwrap_err();
+        check("f(x:[~a]):b | eq ~a := == x x; >> (f);").unwrap();
+        let e = check("f(x:[~a]):b := == x x; >> (f);").unwrap_err();
         assert_eq!(e.kind, InferErrorKind::TypeError);
-        assert!(e.message.contains("lacks"));
+        assert!(e.message.contains("lacks eq ~a"), "{e}");
         let e=check("schema :: { callback:z->z; }; id(x) := x; same(x) := == x x; data := schema { callback:=&id; }; b := same data;").unwrap_err();
         assert_eq!(e.kind, InferErrorKind::TypeError);
         assert!(e.message.contains("callback"), "{e:?}");
@@ -3681,7 +3687,7 @@ mod tests {
             .message
             .contains("ambiguous"));
         check("empty:[z] := [];").unwrap();
-        check("f(x:['a]):b | eq 'a := == x [];").unwrap();
+        check("f(x:[~a]):b | eq ~a := == x [];").unwrap();
     }
     #[test]
     fn local_functions_generalize_after_acyclic_and_recursive_groups() {
@@ -3740,15 +3746,15 @@ mod tests {
         let e = check(
             r#"
             outer(f) := {
-                pretend(x:'a):'a := @ f x;
+                pretend(x:~a):~a := @ f x;
                 pretend "s"
             };
         "#,
         )
         .unwrap_err();
         assert!(e.message.contains("escapes"), "{e:?}");
-        check(r#"id(x:'a):'a := x; i := id 7; s := id "s";"#).unwrap();
-        check("sq(x:'a):'a | num 'a := * x x; a := sq 4;").unwrap();
+        check(r#"id(x:~a):~a := x; i := id 7; s := id "s";"#).unwrap();
+        check("sq(x:~a):~a | num ~a := * x x; a := sq 4;").unwrap();
     }
     #[test]
     fn closed_default_integer_terms_preserve_context_and_evidence() {
@@ -3885,7 +3891,7 @@ mod tests {
         check(
             r#"
             << "math";
-            identity(x:'a):'a := x;
+            identity(x:~a):~a := x;
             magnitude:n := 12345678901234567890123456789012345678901234567890;
             fractional:q := 12345678901234567890123456789012345678901234567890;
             amount:d := identity 12.340d;

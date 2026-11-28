@@ -148,7 +148,7 @@ impl fmt::Display for Type {
             }
         }
         match self {
-            Self::Var(v) => write!(f, "'t{v}"),
+            Self::Var(v) => write!(f, "~t{v}"),
             Self::Prim(p) => write!(f, "{p}"),
             Self::Seq(t) => write!(f, "[{t}]"),
             Self::Tuple(ts) => {
@@ -221,7 +221,7 @@ impl fmt::Display for Row {
             if !self.fields.is_empty() {
                 f.write_str(" ")?;
             }
-            write!(f, "| 'r{id}")?;
+            write!(f, "| ~r{id}")?;
         }
         f.write_str("}")
     }
@@ -504,7 +504,7 @@ impl InferCtx {
         if self.rigid.contains(&id) {
             if let Some(label) = labels.difference(known).next() {
                 return Err(format!(
-                    "rigid row tail 'r{id} is not known to lack field {label}"
+                    "rigid row tail ~r{id} is not known to lack field {label}"
                 ));
             }
         } else {
@@ -536,12 +536,12 @@ impl InferCtx {
             }
             (Var(v), t) | (t, Var(v)) => {
                 if self.rigid.contains(v) {
-                    return Err(format!("annotated type variable 't{v} must remain distinct and general; cannot unify with {t}"));
+                    return Err(format!("annotated type variable ~t{v} must remain distinct and general; cannot unify with {t}"));
                 }
                 let mut vars = BTreeSet::new();
                 free(t, &mut vars);
                 if vars.contains(v) {
-                    return Err(format!("occurs check failed: 't{v} occurs in {t}"));
+                    return Err(format!("occurs check failed: ~t{v} occurs in {t}"));
                 }
                 self.types.insert(*v, t.clone());
                 Ok(())
@@ -592,12 +592,12 @@ impl InferCtx {
             return Ok(());
         }
         if self.rigid.contains(&id) {
-            return Err(format!("annotated row variable 'r{id} must remain distinct and general; cannot unify with {row}"));
+            return Err(format!("annotated row variable ~r{id} must remain distinct and general; cannot unify with {row}"));
         }
         let mut vars = BTreeSet::new();
         free(&Type::Record(row.clone()), &mut vars);
         if vars.contains(&id) {
-            return Err(format!("row occurs check failed: 'r{id} occurs in {row}"));
+            return Err(format!("row occurs check failed: ~r{id} occurs in {row}"));
         }
         let banned = self.lacks.get(&id).cloned().unwrap_or_default();
         if let Some((n, _)) = row.fields.iter().find(|(n, _)| banned.contains(n)) {
@@ -661,7 +661,7 @@ impl InferCtx {
                     Ok(())
                 } else {
                     Err(format!(
-                        "shared row tail 'r{x} cannot absorb different fields"
+                        "shared row tail ~r{x} cannot absorb different fields"
                     ))
                 }
             }
@@ -1137,7 +1137,10 @@ mod tests {
         let other_rigid = cx.fresh_rigid();
         let Type::Var(rid) = rigid else { panic!() };
         assert!(cx.unify(&rigid, &other_rigid).is_err());
-        assert!(cx.unify(&rigid, &t(Prim::Z)).is_err());
+        assert!(cx
+            .unify(&rigid, &t(Prim::Z))
+            .unwrap_err()
+            .contains(&format!("annotated type variable ~t{rid}")));
         assert!(cx
             .unify(&Type::Optional(Box::new(t(Prim::Z))), &rigid)
             .is_err());
@@ -1168,7 +1171,7 @@ mod tests {
         assert!(cx
             .unify(&observed, &closed)
             .unwrap_err()
-            .contains("annotated row variable"));
+            .contains(&format!("annotated row variable ~r{skolem}")));
         let extra = row(&[("new", t(Prim::Z))], Some(cx.fresh_row()));
         assert!(cx.unify(&observed, &extra).is_err());
         let strengthened = row(&[("extra", t(Prim::Z))], Some(skolem));
@@ -1283,7 +1286,7 @@ mod tests {
     #[test]
     fn formatting_is_ordered_and_parenthesizes_function_operands() {
         let fields = row(&[("z", t(Prim::R)), ("a", t(Prim::D))], Some(7));
-        assert_eq!(fields.to_string(), ".{z:r; a:d; | 'r7}");
+        assert_eq!(fields.to_string(), ".{z:r; a:d; | ~r7}");
         let fn_ty = Type::Fun(Box::new(t(Prim::N)), Box::new(t(Prim::Q)));
         assert_eq!(Type::Action(Box::new(fn_ty)).to_string(), "!(n->q)");
     }

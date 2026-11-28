@@ -100,7 +100,7 @@ fn local_module_exports_can_carry_typed_tacit_values() {
     f.write(
         "app/lib.flx",
         r#">> (id, add_cents);
-id(x:'a):'a := @ &. x;
+id(x:~a):~a := @ &. x;
 levy(x:d):d := + x 0.005d;
 tenfold(x:d):d := * x 10d;
 add_cents:d->d := &{ @. levy tenfold };"#,
