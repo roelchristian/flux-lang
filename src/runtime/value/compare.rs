@@ -64,10 +64,10 @@ pub(in crate::hir_eval) fn equal(a: &V, b: &V) -> bool {
                 && a.iter()
                     .all(|(k, v)| b.iter().any(|(l, w)| k == l && equal(v, w)))
         }
-        (V::Table(a, ta), V::Table(b, tb)) => {
-            same_table_layout(ta, tb)
+        (V::Table(a), V::Table(b)) => {
+            same_table_layout(a.schema(), b.schema())
                 && a.len() == b.len()
-                && a.iter().zip(b.iter()).all(|(a, b)| equal(a, b))
+                && a.iter().zip(b.iter()).all(|(a, b)| equal(&a, &b))
         }
         (V::Dict(a), V::Dict(b)) => {
             a.len() == b.len()

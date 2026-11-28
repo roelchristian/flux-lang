@@ -1,7 +1,7 @@
 //! Typed set, row projection and explicit missing-value transformations.
 use super::{
     as_seq, equal, error, invariant, key_with_budget, layout, resources, wrap, CoreOp, Eval, Rc,
-    Span, TableSchema, Type, R, V,
+    Span, Table, TableSchema, Type, R, V,
 };
 use std::{
     collections::HashMap,
@@ -10,9 +10,9 @@ use std::{
 
 const UNHASHABLE_COMPARISON_LIMIT: usize = 8_000_000;
 
-fn table(value: &V, span: Span) -> R<(&[V], &Rc<TableSchema>)> {
+fn table(value: &V, span: Span) -> R<&Table> {
     match value {
-        V::Table(rows, schema) => Ok((rows, schema)),
+        V::Table(table) => Ok(table),
         _ => Err(invariant(span, "expected a checked table")),
     }
 }
@@ -92,23 +92,23 @@ fn fingerprint(
     Ok(true)
 }
 
-fn stable_set<'a>(rows: impl IntoIterator<Item = &'a V>, span: Span) -> R<Vec<V>> {
+fn stable_set(rows: impl IntoIterator<Item = V>, span: Span) -> R<Vec<V>> {
     let mut out = Vec::new();
-    let mut keys = HashMap::<u64, Vec<&V>>::new();
+    let mut keys = HashMap::<u64, Vec<usize>>::new();
     // Hash support is structural: two equal rows are both hashable or
     // both unhashable, so neither branch can miss an equal row in the other.
-    let mut complex = Vec::<&V>::new();
+    let mut complex = Vec::<usize>::new();
     let mut comparisons = 0usize;
     let mut hash_budget = 256 * 1024 * 1024;
     for row in rows {
         let mut hash = DefaultHasher::new();
-        let bucket = if fingerprint(row, &mut hash, &mut hash_budget, 0, span)? {
+        let bucket = if fingerprint(&row, &mut hash, &mut hash_budget, 0, span)? {
             keys.entry(hash.finish()).or_default()
         } else {
             &mut complex
         };
         let mut found = false;
-        for old in bucket.iter() {
+        for &old in bucket.iter() {
             comparisons += 1;
             if comparisons > UNHASHABLE_COMPARISON_LIMIT {
                 return Err(error(
@@ -116,7 +116,7 @@ fn stable_set<'a>(rows: impl IntoIterator<Item = &'a V>, span: Span) -> R<Vec<V>
                     "structural row distinct comparison limit exceeded",
                 ));
             }
-            if equal(old, row) {
+            if equal(&out[old], &row) {
                 found = true;
                 break;
             }
@@ -125,8 +125,8 @@ fn stable_set<'a>(rows: impl IntoIterator<Item = &'a V>, span: Span) -> R<Vec<V>
             if out.len() >= resources::limits().max_elements {
                 return Err(error(span, "table set result exceeds the row limit"));
             }
-            bucket.push(row);
-            out.push(row.clone());
+            bucket.push(out.len());
+            out.push(row);
         }
     }
     Ok(out)
@@ -173,15 +173,21 @@ fn transform(
     eval: &mut Eval<'_>,
     span: Span,
 ) -> R<V> {
-    let (rows, original) = table(input, span)?;
+    let rows = table(input, span)?;
+    let original = rows.schema();
     let (row_type, output_type) = checked_callback(types, span)?;
     let target = if select {
         layout(schema, span)?
     } else {
         original.clone()
     };
+    if select {
+        if let Some(result) = super::relational::project(eval, callback, rows, &target, span) {
+            return result;
+        }
+    }
     let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
+    for row in rows.iter() {
         let value = eval.apply_unary(
             callback.clone(),
             row.clone(),
@@ -199,7 +205,7 @@ fn transform(
             out.push(value);
         } else {
             match value {
-                V::Optional(Some(_)) => out.push(row.clone()),
+                V::Optional(Some(_)) => out.push(row),
                 V::Optional(None) => {}
                 _ => {
                     return Err(invariant(
@@ -249,8 +255,10 @@ pub(super) fn apply(
     use CoreOp::*;
     match (op, args) {
         (TableUnion, [left, right]) => {
-            let (left, left_schema) = table(left, span)?;
-            let (right, right_schema) = table(right, span)?;
+            let left = table(left, span)?;
+            let left_schema = left.schema();
+            let right = table(right, span)?;
+            let right_schema = right.schema();
             // The checker establishes type/nominal equality. Anonymous
             // fields may have appeared in different lexical order.
             if !same_shape(left_schema, right_schema) {
@@ -260,13 +268,14 @@ pub(super) fn apply(
                 ));
             }
             Ok(wrap(
-                stable_set(left.iter().chain(right), span)?,
+                stable_set(left.iter().chain(right.iter()), span)?,
                 Some(left_schema.clone()),
             ))
         }
         (TableDistinct, [input]) => {
-            let (rows, original) = table(input, span)?;
-            Ok(wrap(stable_set(rows, span)?, Some(original.clone())))
+            let rows = table(input, span)?;
+            let original = rows.schema();
+            Ok(wrap(stable_set(rows.iter(), span)?, Some(original.clone())))
         }
         (TableSelect | DropNa, [callback, input]) => transform(
             op == TableSelect,
@@ -303,7 +312,7 @@ mod tests {
             V::Record(fields.into())
         };
         let rows = [row(short, false), row(long, true)];
-        let dedup = stable_set(&rows, Span::default()).unwrap_or_else(|_| panic!("valid rows"));
+        let dedup = stable_set(rows, Span::default()).unwrap_or_else(|_| panic!("valid rows"));
         assert_eq!(dedup.len(), 1);
         let V::Record(fields) = &dedup[0] else {
             panic!("expected record");
@@ -319,7 +328,7 @@ mod tests {
             succeeded(exact_i128(3, Domain::Rational)),
             succeeded(exact_i128(9, Domain::Integer)),
         ];
-        let stable = stable_set(&rows, Span::default()).unwrap_or_else(|_| panic!("valid rows"));
+        let stable = stable_set(rows, Span::default()).unwrap_or_else(|_| panic!("valid rows"));
         assert_eq!(
             stable.iter().map(repr).collect::<Vec<_>>(),
             ["ok 3", "ok 9"]

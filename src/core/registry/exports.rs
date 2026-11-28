@@ -17,7 +17,8 @@ const IO: &[Member] = exports!(
 const CSV: &[Member] = exports!("csv": "read", "write");
 const TABLE: &[Member] = exports!(
     "df": "agg", "extend", "semi", "anti", "union",
-    "distinct", "select", "structural", "dropna", "fill", "present"
+    "distinct", "select", "structural", "dropna", "fill", "present",
+    "sort", "concat", "take", "drop"
 );
 const STATISTICS: &[Member] = exports!("stat": "avg", "mean", "pct", "sd", "cor");
 

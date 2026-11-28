@@ -1,8 +1,8 @@
 //! Effect construction and typed recoverable failures in the standard library.
 use super::{
     error, exact_binary, exact_i128, invariant, read_cell, repr, succeeded, wide, write_cell,
-    Action, CoreOp, Domain, Eval, Failure, HirProgram, ResourcePolicy, Span, TableSchema, Type,
-    VariantValue, DIV_BY_ZERO, R, V,
+    Action, CoreOp, Domain, Eval, Failure, HirProgram, ResourcePolicy, Span, Table, TableSchema,
+    Type, VariantValue, DIV_BY_ZERO, R, V,
 };
 use crate::{
     csv::{self, CsvFault, CsvFaultKind, RuntimeInput},
@@ -157,58 +157,76 @@ fn csv_read(
         ));
     };
     let header: Vec<_> = names.iter().map(|(name, _)| name.clone()).collect();
-    let cells = csv::typed_rows041(&data, &header).map_err(CsvFailure::Format)?;
-    let rows = cells
-        .into_iter()
-        .enumerate()
-        .map(|(i, cells)| {
+    let grid = csv::checked_typed_grid(&data, &header).map_err(CsvFailure::Format)?;
+    let decode = |row, slot: usize| {
+        let (name, ty) = &names[slot];
+        let raw = grid.cell(row, slot);
+        read_cell(raw, ty).map_err(|detail| CsvFailure::Cell {
+            row: row + 2,
+            column: name.clone(),
+            raw: raw.to_owned(),
+            detail: detail.to_owned(),
+        })
+    };
+    if let Some(result) = Table::from_checked_cells(schema.clone(), grid.len(), decode) {
+        return result;
+    }
+    // Physical layout admission may fail (or a wide exact value may need
+    // more storage). Decode from the already validated input without
+    // reopening it, preserving the original row-backed observable behavior.
+    let rows = (0..grid.len())
+        .map(|i| {
             let row = names
                 .iter()
-                .zip(cells)
-                .map(|((name, ty), cell)| {
-                    let v = read_cell(&cell, ty).map_err(|detail| CsvFailure::Cell {
-                        row: i + 2,
-                        column: name.clone(),
-                        raw: cell,
-                        detail: detail.to_owned(),
-                    })?;
-                    Ok((name.as_str().into(), v))
-                })
+                .enumerate()
+                .map(|(slot, (name, _))| Ok((name.as_str().into(), decode(i, slot)?)))
                 .collect::<Result<Vec<_>, CsvFailure>>()?;
             Ok(V::Record(row.into()))
         })
         .collect::<Result<Vec<_>, CsvFailure>>()?;
-    Ok(V::Table(rows.into(), schema.clone()))
+    Ok(Table::from_rows(rows.into(), schema.clone()))
 }
 
 fn csv_write(path: &str, value: &V) -> Result<V, CsvFailure> {
-    let V::Table(rows, schema) = value else {
+    let V::Table(table) = value else {
         return Err(CsvFailure::Shape("CSV write expects a table"));
     };
-    let TableSchema::Named(fields) = schema.as_ref() else {
+    let TableSchema::Named(fields) = table.schema().as_ref() else {
         return Err(CsvFailure::Shape(
             "CSV write requires a table with named columns",
         ));
     };
-    let mut cells = Vec::with_capacity(rows.len() + 1);
+    let mut cells = Vec::with_capacity(table.len() + 1);
     cells.push(fields.iter().map(|(name, _)| name.clone()).collect());
-    for (i, row) in rows.iter().enumerate() {
-        let V::Record(row) = row else {
-            return Err(CsvFailure::Shape("CSV write requires record rows"));
+    for i in 0..table.len() {
+        let row = if table.columnar() {
+            None
+        } else {
+            match table.get(i) {
+                Some(V::Record(row)) => Some(row),
+                _ => return Err(CsvFailure::Shape("CSV write requires record rows")),
+            }
         };
         let cells_in_row = fields
             .iter()
-            .map(|(name, _)| {
-                let cell = row
-                    .iter()
-                    .find(|(key, _)| key.as_ref() == name)
-                    .map(|(_, v)| v)
-                    .ok_or_else(|| CsvFailure::Cell {
-                        row: i + 2,
-                        column: name.clone(),
-                        raw: String::new(),
-                        detail: "record does not contain the schema field".to_owned(),
-                    })?;
+            .enumerate()
+            .map(|(slot, (name, _))| {
+                let missing = || CsvFailure::Cell {
+                    row: i + 2,
+                    column: name.clone(),
+                    raw: String::new(),
+                    detail: "record does not contain the schema field".to_owned(),
+                };
+                let projected;
+                let cell = if let Some(row) = &row {
+                    row.iter()
+                        .find(|(key, _)| key.as_ref() == name)
+                        .map(|(_, v)| v)
+                        .ok_or_else(missing)?
+                } else {
+                    projected = table.cell(i, slot).ok_or_else(missing)?;
+                    &projected
+                };
                 write_cell(cell).map_err(|detail| CsvFailure::Cell {
                     row: i + 2,
                     column: name.clone(),
@@ -324,4 +342,132 @@ pub(super) fn apply_core(
         ) => Err(invariant(span, "invalid operands for checked operation")),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        hir_eval::{resources, OpenedInput, RuntimeOptions},
+        types::Prim,
+    };
+
+    struct Fixture<'a>(&'a str, usize);
+
+    impl RuntimeInput for Fixture<'_> {
+        fn open(&mut self, path: &str) -> std::io::Result<OpenedInput> {
+            assert_eq!(path, "fixture.csv");
+            self.1 += 1;
+            Ok(OpenedInput {
+                reader: Box::new(std::io::Cursor::new(self.0.as_bytes().to_vec())),
+                byte_len: Some(self.0.len() as u64),
+            })
+        }
+    }
+
+    fn schema(fields: &[(&str, Type)]) -> Rc<TableSchema> {
+        Rc::new(TableSchema::Named(
+            fields
+                .iter()
+                .map(|(name, ty)| ((*name).into(), ty.clone()))
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn typed_csv_builds_columns_directly_with_the_same_exact_values() {
+        let input = concat!(
+            "\u{feff}wide,enabled,offset,station,temp\r\n",
+            "0,0b,1.20,\"North, Annex\",-0\r\n",
+            "1361129467683753853853498429727072845824,,0.00,ridge,0\r\n",
+        );
+        let schema = schema(&[
+            ("station", Type::Prim(Prim::S)),
+            ("offset", Type::Prim(Prim::D)),
+            ("temp", Type::Prim(Prim::R)),
+            ("enabled", Type::Optional(Box::new(Type::Prim(Prim::B)))),
+            ("wide", Type::Prim(Prim::Z)),
+        ]);
+        for optimize in [true, false] {
+            let _scope = resources::enter(RuntimeOptions {
+                optimize,
+                ..Default::default()
+            })
+            .unwrap();
+            let mut fixture = Fixture(input, 0);
+            let Ok(V::Table(table)) = csv_read(&mut fixture, "fixture.csv", Some(&schema)) else {
+                panic!("typed CSV must decode");
+            };
+            assert_eq!(fixture.1, 1);
+            assert_eq!(table.columnar(), optimize);
+            for (row, slot, expected) in [
+                (0, 0, "North, Annex"),
+                (0, 1, "1.20"),
+                (1, 1, "0.00"),
+                (0, 2, "-0"),
+                (1, 2, "0"),
+                (0, 3, "?1 0b"),
+                (1, 3, "?0"),
+                (1, 4, "1361129467683753853853498429727072845824"),
+            ] {
+                assert_eq!(repr(&table.cell(row, slot).unwrap()), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn typed_csv_finishes_structural_validation_before_any_scalar_decoding() {
+        let schema = schema(&[
+            ("name", Type::Prim(Prim::C)),
+            ("value", Type::Prim(Prim::Z)),
+        ]);
+        for optimize in [true, false] {
+            let _scope = resources::enter(RuntimeOptions {
+                optimize,
+                ..Default::default()
+            })
+            .unwrap();
+            let mut fixture = Fixture("value,name\nbad,too-long\nmissing\n", 0);
+            assert!(matches!(
+                csv_read(&mut fixture, "fixture.csv", Some(&schema)),
+                Err(CsvFailure::Format(CsvFault {
+                    kind: CsvFaultKind::Row(3),
+                    ..
+                }))
+            ));
+            assert_eq!(fixture.1, 1);
+
+            let mut fixture = Fixture("value,name\nbad,too-long\n", 0);
+            assert!(matches!(
+                csv_read(&mut fixture, "fixture.csv", Some(&schema)),
+                Err(CsvFailure::Cell { row: 2, column, raw, .. })
+                    if column == "name" && raw == "too-long"
+            ));
+            assert_eq!(fixture.1, 1);
+        }
+    }
+
+    #[test]
+    fn widening_under_a_tight_layout_budget_does_not_reopen_or_change_cell_fault() {
+        let _scope = resources::enter(RuntimeOptions {
+            resources: ResourcePolicy {
+                max_memory: 80,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        let ty = Type::Prim(Prim::Z);
+        let schema = schema(&[("a", ty.clone()), ("b", ty)]);
+        // Compact admission fits, but the temporary overlap required to
+        // widen column a cannot fit; the row-backed decoder still sees b.
+        let mut fixture = Fixture("a,b\n1,2\n9223372036854775808,nope\n", 0);
+        assert!(matches!(
+            csv_read(&mut fixture, "fixture.csv", Some(&schema)),
+            Err(CsvFailure::Cell { row: 3, column, raw, .. })
+                if column == "b" && raw == "nope"
+        ));
+        assert_eq!(fixture.1, 1);
+        assert_eq!(resources::available_memory(), 80);
+    }
 }

@@ -60,6 +60,7 @@ Unless noted in the [manifest](manifest.json), run `flux PATH` from the root.
 [joins](tables/joins.flx), [missing values](tables/missing.flx),
 [deduplication and union](tables/duplicates.flx), [projection](tables/projection.flx),
 [aggregation](tables/aggregation.flx), [catalogue](tables/catalogue.flx),
+[column selection](tables/column-selection.flx),
 [open rows](tables/open-rows.flx).
 
 ## 6. Libraries, typed failure and I/O

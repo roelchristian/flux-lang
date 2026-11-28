@@ -257,6 +257,10 @@
     "stdout": "(5, 4, 3, ?1 #[{star := Vega; constellation := Lyra; magnitude := ?1 0.03; parallax_mas := ?1 130.23}])\n"
   },
   {
+    "entry": "examples/tables/column-selection.flx",
+    "stdout": "(3, 2, [fen ridge], [?1 0.00 ?1 2.00])\n"
+  },
+  {
     "entry": "examples/tables/duplicates.flx",
     "stdout": "(4, 1, 2)\n[0.50 1.25]\n"
   },

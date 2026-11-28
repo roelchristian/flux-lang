@@ -18,9 +18,9 @@ Evaluation is eager and resource-bounded. Dense-array HIR selects the
 same numeric operation for direct or first-class application and carries
 the specific lift for scalar or pairwise broadcasting. The runtime
 checks dynamic shapes and walks row-major offsets rather than copying
-expanded singleton data. Numeric, JSON and array limits are in the
-[reference](specification.md); relational evaluation is ordered,
-not a columnar optimizer.
+expanded singleton data. Relational evaluation stays eager and ordered
+even when table storage is columnar. See the [reference](specification.md)
+for operation and resource limits.
 
 Mathesis pointwise functions reuse the checked scalar, sequence and dense
 lift evidence. Exact integer and polynomial kernels take their numeric domain
@@ -44,6 +44,7 @@ the existing Rust module paths are retained by the crate façade.
 | `core` | Primitive identities, lifting and numeric contracts, builtin catalogue, and standard error constructors. |
 | `runtime/engine`, `runtime/value` | Checked evaluation and host entry points; runtime values, comparison and structural keys. |
 | `runtime/array`, `runtime/numeric` | Dense storage and views, packed kernels, exact representations and numerical plans. |
+| `runtime/table`, `runtime/relational` | Typed column storage, ordered views and checked relational execution shortcuts. |
 | `stdlib` | Implementations by domain. The evaluator owns dispatch and passes runtime values, callable services or narrow host I/O capabilities. |
 | `diagnostics`, `api`, `cli`, `tooling` | Source mapping and diagnostics, Rust entry points, command-line and REPL logic, and token-preserving tooling. |
 | `legacy` | Test/feature-gated historical oracle only; it is not an execution fallback. |
@@ -112,6 +113,45 @@ mathematical failures use `linerr`; work, memory, iteration and exact-bit
 exhaustion remain fatal. Complex products and quotients use bounded exact
 binary64 intermediates and round each component once.
 
+## Tabula execution
+
+The checked schema, field order and height are independent of table
+storage. Eligible tables use shared column buffers. Booleans, compact
+integers, binary64, characters and text references can use typed
+payloads. A separate validity bitmap represents absence in supported
+optional columns, leaving false, signed zero and empty text as values.
+Wide exact values, decimals and nested optionals retain their tagged
+values. Rows with observable field-order differences, unsupported
+layouts and generic execution retain the row-backed path.
+
+On column storage, ranges and reversals can reuse the backing columns;
+a mask gathers backing row indices in logical order. Contiguous groups
+can use ranges and other groups use ordered indices. The checked
+grouping shortcut accepts a bare field projection as key; arbitrary
+keys and summarizers retain ordinary callback execution. Join order,
+duplicate multiplicity and optional-key matching do not depend on layout.
+
+When a checked `df.select` body constructs a closed named row entirely
+from direct field projections of its own row parameter, it can reuse
+the corresponding column payloads under the checked output labels and
+order. This covers renaming, selecting, reordering and repeating columns.
+The shortcut checks original work and depth admission before using
+a view. Plain `.field t` still returns a sequence; it can share an
+unchanged sequence-backed column or materialize a logical projection.
+General functions and row extraction can materialize rows.
+
+Typed CSV first validates the complete textual grid and header. A schema
+index accesses retained cells in the checked order, without reordering
+their strings. Eligible cells build columns directly without typed
+intermediate rows; fallback uses the same buffered text, without
+reopening the input. Structure failures still precede typed cell
+failures, and the first failed conversion keeps its record, field and
+source text. This is not streaming or CSV projection pushdown.
+
+There is no general query planner, filter or projection pushdown across
+operations, or `df.explain` / `df.describe` interface. The shortcuts
+consume admitted HIR and do not move callbacks across eager operations.
+
 ## Runtime policy
 
 Rust hosts configure `ResourcePolicy` and `RuntimeOptions { resources,
@@ -126,8 +166,8 @@ The CLI accepts these decimal environment settings for execution:
 | Environment variable | Default | Budget |
 | --- | ---: | --- |
 | `FLUX_MAX_RANK` | 16 | Maximum array rank, from 1 through 16 (rank-zero values remain supported) |
-| `FLUX_MAX_ELEMENTS` | 100,000 | Logical array dimensions and element counts; also used for checked range materialization |
-| `FLUX_MAX_MEMORY` | 268,435,456 | Bytes of tracked live dense payload and instrumented scratch storage |
+| `FLUX_MAX_ELEMENTS` | 100,000 | Logical array dimensions and element counts, checked range materialization, and bounded table operations |
+| `FLUX_MAX_MEMORY` | 268,435,456 | Bytes of tracked dense and column payloads, view indices and instrumented scratch storage |
 | `FLUX_MAX_WORK` | 1,000,000 | Evaluator work, including charged logical kernel work |
 | `FLUX_MAX_EXACT_BITS` | 1,048,576 | Size of exact numeric results in bits |
 | `FLUX_MAX_NUMERIC_ITERATIONS` | 100,000 | Work ceiling for instrumented numerical iterations |
@@ -138,19 +178,19 @@ algorithm, source and I/O bounds may still apply. Method-specific
 failure can be a typed solver result; exhaustion of a tighter host
 iteration budget is fatal. Memory accounting is
 not a process RSS cap: shared views charge a payload once. Completed
-ordinary sequences, noninstrumented allocations, allocator overhead,
-frames and operating-system I/O are not globally tracked, even
-where a construction scratch buffer has a lease. Set budgets
+ordinary sequences and row-backed payloads, noninstrumented
+allocations, allocator overhead, frames and operating-system I/O are
+not globally tracked, even where construction scratch has a lease. Set budgets
 conservatively rather than assuming an arbitrarily large setting is
 safe for the host.
 
 `FLUX_OPTIMIZE=0` selects generic typed execution instead of the
 specialized paths. The default, also selected by `FLUX_OPTIMIZE=1`, is
 optimized execution. This switch does not select the legacy interpreter
-or bypass resource checks. Generic mode keeps the shared view
-architecture; it is not a copy-only emulation of Draft 0.18.
-Physical buffers can have different sizes,
-so a tight tracked-memory policy need not admit both layouts. For a
+or bypass resource checks. Generic mode keeps dense-array views and
+uses row-backed tables. Logical size and work limits apply in either
+mode. Layouts differ in tracked payload and scratch sizes, so a tight
+memory budget can admit one layout and reject another. For a
 same-binary comparison:
 
 ```sh
@@ -188,6 +228,7 @@ and mode. Retain the old binary for paired comparisons.
 | [phases.py](../benchmarks/phases.py) | Parse, resolve, infer, elaborate and evaluate separately |
 | [tacit.py](../benchmarks/tacit.py), [relational.py](../benchmarks/relational.py) | Composition and relational workloads |
 | [machina.py](../benchmarks/machina.py) | Checked paired wall time and Linux peak RSS for shared workloads, dense kernels and contractions |
+| [tabula.py](../benchmarks/tabula.py) | Checked table construction, column projection and stable grouping |
 
 ```sh
 python3 benchmarks/machina.py FLUX_018 FLUX_019 --reference FLUX_017 \
@@ -261,6 +302,43 @@ overrides. The optional generic arm uses comparable logical budgets.
 Large-array output checks sample verified coordinates; the differential gate
 covers complete outputs on smaller inputs. Phase samples come from separate
 verified invocations. A limit or timeout is not a successful timing.
+
+### Tabula comparison
+
+Compare locked pre-Tabula and Tabula release binaries. The optional
+generic arm uses the Tabula binary with `FLUX_OPTIMIZE=0`. The harness
+checks results before taking wall samples, reports Linux peak RSS when
+available, and records binary hashes and applied limits. Wall time
+includes startup, checking, table setup and checked output; the phase
+evaluation measurement includes setup and output as well.
+
+```sh
+python3 benchmarks/tabula.py FLUX_022 FLUX_023 --rows 8192 --runs 5 --generic --phases
+```
+
+A separate one-million-row run measures construction and checked
+projection, not grouping past its smaller algorithmic limit. Opt into
+the higher limits on a machine with enough memory for both paths:
+
+```sh
+python3 benchmarks/tabula.py FLUX_022 FLUX_023 --rows 1000000 --large --runs 3 \
+  --match '^(wide-setup|project-rename)-' \
+  --max-elements 1000000 --max-work 30000000 --max-memory 1500000000
+```
+
+Pinned Linux x86-64, locked Rust 1.85 releases, with verified output:
+
+| Workload | Samples per arm | 0.22 wall ms | 0.23 wall ms | 0.22 → 0.23 peak RSS, KiB |
+| --- | ---: | ---: | ---: | ---: |
+| Build 1M rows from three shared input columns | 3 | 1,177 | 74 | 517,984 → 98,068 |
+| Build and project/rename 1M rows | 3 | 3,880 | 73 | 1,197,636 → 98,212 |
+| Grouped count and sum, 8,192 rows | 5 | 11.01 | 5.12 | both near the process startup floor |
+
+The compatible row-backed arm took 10.73 ms for the grouped workload.
+The projected workload includes input, same-schema proof and checked output;
+the small difference between its two Tabula medians is noise, not negative
+projection time. This three-column data shares the same input sequence for
+each column and is not a general table memory or throughput guarantee.
 
 ### Draft 0.19 paired sample
 

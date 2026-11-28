@@ -368,6 +368,8 @@ Tables are ordered collections of same-type record or tuple rows.
 or a nonempty record of equal-length columns, and `:#` extracts its rows.
 Empty values need context when ambiguous. Tables retain their schema,
 including field order for interchange such as CSV, even with zero rows.
+Row and column storage are implementation details. A table of
+zero-field rows still has its original row count.
 
 `?:` filters sequences or tables with a predicate or an equal-length
 Boolean mask, preserving input order. `+:` concatenates compatible
@@ -598,13 +600,26 @@ left schema. See [joins, duplicate matches and absent keys](../examples/tables/j
 summarizer accepting that key followed by the group's table. First key
 appearance determines group order; rows retain their input order inside a
 group. Empty output uses a checked schema without evaluating a sample
-summarizer. See [compound-key aggregation](../examples/tables/aggregation.flx).
+summarizer. The current implementation limits grouping inputs to 8,192
+rows. See [compound-key aggregation](../examples/tables/aggregation.flx).
+
+| Qualified alias | Equivalent form |
+| --- | --- |
+| `df.sort KEY T` | `>: KEY T`: sort ascending, retaining order among equal keys |
+| `df.concat L R` | `+: L R`: concatenate matching schemas, retaining duplicates |
+| `df.take N T` | `[: N T`: take up to N leading rows |
+| `df.drop N T` | `:] N T`: discard up to N leading rows |
+
+The `table` namespace exports the same aliases. These names use the
+operators' existing arities and type rules.
 
 `df.distinct` retains the first occurrence of each comparable full row.
 `df.union` is a stable set union: visit left rows and then right rows,
 retaining only first occurrences and preserving the left schema's field
 order. It is not concatenation. `df.select` constructs a new table from
-a checked function that produces a closed row for each input row.
+a checked function that produces a closed row for each input row. For
+example, `df.select (\r -> .{ sample := .id r; reading := .value r; }) t`
+selects, orders and renames two columns with statically known labels.
 `df.extend` appends nonconflicting named columns of the table's height.
 `df.dropna` retains rows whose chosen optional value is present;
 `df.fill` substitutes a supplied default in an optional sequence; and

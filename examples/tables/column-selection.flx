@@ -1,0 +1,22 @@
+<< "df";
+
+reading(row) := .{
+    site        := .site row;
+    millimetres := .amount row;
+};
+
+measurements := #:
+    .{
+        site   := ["ridge" "dune" "fen"];
+        amount := [?1 2.00d ?0 ?1 0.00d];
+        keep   := [1b 0b 1b];
+    };
+
+!^{
+    retained := ?: .keep measurements measurements;
+    projected := df.select &reading retained;
+    ordered := df.sort &.site projected;
+    !
+        print
+            (# measurements, # ordered, .site ordered, .millimetres ordered);
+};

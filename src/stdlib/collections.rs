@@ -45,8 +45,10 @@ fn fold_scan(eval: &mut Eval<'_>, args: &[V], scan: bool, span: Span) -> R<V> {
 }
 
 fn concat(args: &[V], span: Span) -> R<V> {
-    let (left, a) = collection(args[0].clone(), span)?;
-    let (right, b) = collection(args[1].clone(), span)?;
+    let left = collection(args[0].clone(), span)?;
+    let a = left.schema().cloned();
+    let right = collection(args[1].clone(), span)?;
+    let b = right.schema().cloned();
     if a != b {
         return Err(error(
             span,
@@ -54,8 +56,8 @@ fn concat(args: &[V], span: Span) -> R<V> {
         ));
     }
     let mut rows = Vec::with_capacity(left.len().saturating_add(right.len()));
-    rows.extend(left.iter().cloned());
-    rows.extend(right.iter().cloned());
+    rows.extend(left.iter());
+    rows.extend(right.iter());
     Ok(wrap(rows, a))
 }
 
@@ -64,8 +66,10 @@ fn pair(a: &V, b: &V) -> V {
 }
 
 fn combinations(op: CoreOp, args: &[V], schema: Option<&Rc<TableSchema>>, span: Span) -> R<V> {
-    let (left, a) = collection(args[0].clone(), span)?;
-    let (right, b) = collection(args[1].clone(), span)?;
+    let left = collection(args[0].clone(), span)?;
+    let a = left.schema().cloned();
+    let right = collection(args[1].clone(), span)?;
+    let b = right.schema().cloned();
     if op == CoreOp::Zip {
         if a.is_some() || b.is_some() {
             return Err(error(span, "zip requires two sequences"));
@@ -76,7 +80,7 @@ fn combinations(op: CoreOp, args: &[V], schema: Option<&Rc<TableSchema>>, span: 
         return Ok(wrap(
             left.iter()
                 .zip(right.iter())
-                .map(|(x, y)| pair(x, y))
+                .map(|(x, y)| pair(&x, &y))
                 .collect(),
             None,
         ));
@@ -92,7 +96,7 @@ fn combinations(op: CoreOp, args: &[V], schema: Option<&Rc<TableSchema>>, span: 
     }
     let mut out = Vec::with_capacity(count);
     for left in left.iter() {
-        out.extend(right.iter().map(|right| pair(left, right)));
+        out.extend(right.iter().map(|right| pair(&left, &right)));
     }
     Ok(wrap(out, output_schema))
 }
@@ -130,10 +134,8 @@ fn lookup(args: &[V], span: Span) -> R<V> {
             .find(|(k, _)| equal(k, key))
             .map(|(_, v)| v.clone()),
         v => {
-            let (xs, _) = collection(v.clone(), span)?;
-            index(key, span)?
-                .checked_sub(1)
-                .and_then(|i| xs.get(i).cloned())
+            let xs = collection(v.clone(), span)?;
+            index(key, span)?.checked_sub(1).and_then(|i| xs.get(i))
         }
     };
     Ok(found.map_or(V::Optional(None), some))
@@ -167,17 +169,27 @@ fn window(op: CoreOp, args: &[V], span: Span) -> R<V> {
             s.chars().skip(a).take(b - a).collect::<String>(),
         )));
     }
-    let (rows, schema) = collection(input.clone(), span)?;
+    if let V::Table(table) = input {
+        let (start, end) = limits(table.len())?;
+        return Ok(table.sliced(start, end));
+    }
+    let rows = collection(input.clone(), span)?;
     let (a, b) = limits(rows.len())?;
-    Ok(wrap(rows[a..b].to_vec(), schema))
+    Ok(wrap(
+        rows.iter().skip(a).take(b - a).collect(),
+        rows.schema().cloned(),
+    ))
 }
 
 fn reverse(v: &V, span: Span) -> R<V> {
     if let V::String(s) = v {
         return Ok(V::String(Rc::from(s.chars().rev().collect::<String>())));
     }
-    let (items, schema) = collection(v.clone(), span)?;
-    Ok(wrap(items.iter().rev().cloned().collect(), schema))
+    if let V::Table(table) = v {
+        return Ok(table.reversed());
+    }
+    let items = collection(v.clone(), span)?;
+    Ok(wrap(items.iter().rev().collect(), items.schema().cloned()))
 }
 
 fn matrix(op: CoreOp, v: &V, span: Span) -> R<V> {
@@ -350,7 +362,7 @@ pub(super) fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir_eval::{repr, Exact};
+    use crate::hir_eval::{repr, Exact, Table};
     use crate::types::Prim;
 
     fn nums(xs: &[i128]) -> V {
@@ -385,14 +397,16 @@ mod tests {
             Type::Tuple(vec![Type::Prim(Prim::Z)]),
             Type::Tuple(vec![Type::Prim(Prim::Z)]),
         ]));
-        let input = V::Table(Rc::from([]), shape);
+        let input = Table::from_rows(Rc::from([]), shape);
         let result = combinations(
             CoreOp::Cartesian,
             &[input.clone(), input],
             Some(&layout),
             span,
         );
-        assert!(matches!(result, Ok(V::Table(xs, s)) if xs.is_empty() && Rc::ptr_eq(&s, &layout)));
+        assert!(
+            matches!(result, Ok(V::Table(t)) if t.len() == 0 && Rc::ptr_eq(t.schema(), &layout))
+        );
     }
 
     #[test]
