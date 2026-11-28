@@ -1,11 +1,9 @@
---- Convert to a finite real deliberately; converting back reveals its value.
+--- One tenth is exact as q; binary64 stores the nearest representable value.
 qv := / 1q 10q;
 rv := : r qv;
+-- Converting rv back to q exposes the stored fraction. Square root returns r.
 root := ^/ 2q;
 
-!{
-    ^{
-        ^? ! print (qv, rv,: q rv, root);
-        ()
-    }
+!^{
+    ! print (qv, rv,: q rv, root);
 };

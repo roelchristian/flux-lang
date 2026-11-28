@@ -2,9 +2,10 @@
 xs := [10 20 30 40];
 a := [: 2 xs;
 b := :] 2 xs;
+-- On strings, a position counts characters (Unicode scalar values), not bytes.
 section := sect 2 2 "a\u{03bb}bc";
 
---- Ravel one level or transpose a rectangular sequence of rows.
+--- Flatten one sequence level or transpose a rectangular sequence of rows.
 flat_rows := ,. [[1 2] [3]];
 columns := |: [[1 2] [3 4]];
 
@@ -13,11 +14,8 @@ empty: [z] := [];
 difference := @/ &- [10 3 2];
 missing := @/ &- empty;
 
-!{
-    ^{
-        ^? ! print (a, b, section);
-        ^? ! print (flat_rows, columns);
-        ^? ! print (difference, missing);
-        ()
-    }
+!^{
+    ! print (a, b, section);
+    ! print (flat_rows, columns);
+    ! print (difference, missing);
 };

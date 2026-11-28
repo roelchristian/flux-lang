@@ -70,5 +70,5 @@ audit(m:#s.measurement, r:#s.reference):#s.finding := {
                         (+: (@: &missing absent) (@: &deviation changed))
                 )
         );
-    >: &.sample (#: rows)
+    df.sort &.sample (#: rows)
 };

@@ -4,27 +4,16 @@ sample :: {
     site   : s;
     length : q;
 };
+reading(site: s, length: q): sample := sample {
+    site   := site;
+    length := length;
+};
 xs:#sample := #[
-    sample {
-        site   := "fen";
-        length := 8;
-    }
-    sample {
-        site   := "dune";
-        length := 7;
-    }
-    sample {
-        site   := "fen";
-        length := 10;
-    }
-    sample {
-        site   := "dune";
-        length := 11;
-    }
-    sample {
-        site   := "fen";
-        length := 12;
-    }
+    reading "fen" 8
+    reading "dune" 7
+    reading "fen" 10
+    reading "dune" 11
+    reading "fen" 12
 ];
 summarize(site: s, rows:#sample) := .{
     name    := site;
@@ -32,9 +21,6 @@ summarize(site: s, rows:#sample) := .{
 };
 summary := df.agg &.site &summarize xs;
 
-!{
-    ^{
-        ^? ! print (.name summary, .average summary);
-        ()
-    }
+!^{
+    ! print (.name summary, .average summary);
 };

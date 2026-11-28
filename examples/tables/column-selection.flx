@@ -1,6 +1,11 @@
 << "df";
 
-reading(row) := .{
+--- Select and rename columns without computing any new values.
+reading(row: .{
+    site   : s;
+    amount : ?d;
+    keep   : b;
+}) := .{
     site        := .site row;
     millimetres := .amount row;
 };
@@ -13,10 +18,14 @@ measurements := #:
     };
 
 !^{
-    retained := ?: .keep measurements measurements;
-    projected := df.select &reading retained;
-    ordered := df.sort &.site projected;
+    ordered := |{
+        measurements;
+        ?: .keep $ $;
+        df.select &reading $;
+        df.sort &.site $
+    };
+    preview := df.take 2 ordered;
     !
         print
-            (# measurements, # ordered, .site ordered, .millimetres ordered);
+            (# measurements, # ordered, .site preview, .millimetres preview);
 };

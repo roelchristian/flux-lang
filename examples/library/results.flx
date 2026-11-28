@@ -11,6 +11,7 @@ checked(x: z): z ^ missing := ^{
 };
 bump(x: z): z := + x 1z;
 all := [checked 4z checked -1z checked 8z];
+-- Partition retains both kinds of result; collect reports the first failure.
 partition := res.partition all;
 first_error := ^= res.collect all {
     unfound _ : [-1z];
@@ -18,10 +19,7 @@ first_error := ^= res.collect all {
 mapped := ^= res.map &bump (checked 7z) {
     unfound _ : 0z;
 };
-!{
-    ^{
-        ^? ! print (.1 partition, # .2 partition, mapped);
-        ^? ! print first_error;
-        ()
-    }
+!^{
+    ! print (.1 partition, # .2 partition, mapped);
+    ! print first_error;
 };

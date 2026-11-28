@@ -1,10 +1,8 @@
 << "./algebra.flx" : alg;
 
-!{
-    ^{
-        plus_two := alg.increment 2q;
-        ^? ! print (alg.sq 5q, alg.add 2q 3q, @ plus_two 10q);
-        ^? ! print (@: &alg.sq [1q 2q 3q]);
-        ()
-    }
+!^{
+    -- The import exposes increment's one-operand arity before parsing this call.
+    plus_two := alg.increment 2q;
+    ! print (alg.sq 5q, alg.add 2q 3q, @ plus_two 10q);
+    ! print (@: &alg.sq [1q 2q 3q]);
 };

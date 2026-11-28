@@ -6,7 +6,9 @@ close(a, b: array[r]): b := &&/ @: &near_zero (,. (- a b));
 
 --- Sample y at x = 0, 1, 2. Each row of the design is (1, x).
 design := form [3 2] [1r 0r 1r 1r 1r 2r];
+-- The residuals are orthogonal to both columns. The fit is y = 1 + 2x.
 observed := form [3] [1.125r 2.75r 5.125r];
+-- Repeating a column makes the coefficients non-unique.
 repeated_column := form [3 2] [1r 1r 1r 1r 1r 1r];
 
 fit := ^{

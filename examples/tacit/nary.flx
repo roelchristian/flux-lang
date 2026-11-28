@@ -1,4 +1,5 @@
---- A projection can leave an argument entirely unconstrained.
+--- The tacit block's 2: header enables $1 and $2 for its two inputs.
+--- An unused input can remain unconstrained. /2 also makes first a direct callable.
 first/2: ~a -> ~b -> ~a := &{ 2: $1 };
 
 --- Multiply the first two arguments, then add the third.
@@ -10,10 +11,7 @@ sqdiff/2: z -> z -> z := &{ 2: @. sq (@* - $1 $2) };
 --- A bare callable in branch position is applied to all inputs.
 difference: z -> z -> z := &{ 2: - };
 
-!{
-    ^{
-        ^? ! print (first "flux" 7z, affine 3z 4z 2z);
-        ^? ! print (sqdiff 3z 8z, @@ difference (11z, 4z));
-        ()
-    }
+!^{
+    ! print (first "flux" 7z, affine 3z 4z 2z);
+    ! print (sqdiff 3z 8z, @@ difference (11z, 4z));
 };

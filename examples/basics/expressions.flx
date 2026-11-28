@@ -1,14 +1,12 @@
---- Prefix operators take their operands from left to right.
+--- Prefix operators come before their operands. Arity, not indentation, groups them.
+--- Bare integers default to z when nothing requires a different type.
 weighted :=
     +
-        * 3z 5z
-        2z;
-exact_share := / 7z 12z;
+        * 3 5
+        2;
+exact_share := / 7 12;
 change := - 12.50d 10.25d;
 
-!{
-    ^{
-        ^? ! print (weighted, exact_share, change);
-        ()
-    }
+!^{
+    ! print (weighted, exact_share, change);
 };

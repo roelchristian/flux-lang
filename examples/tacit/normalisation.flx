@@ -1,11 +1,8 @@
 << "str";
 
---- Compose normalization once, then explicitly map over the inputs.
+--- Compose a normalisation function, then explicitly map it over the inputs.
 code: s -> s := &{ @. str.upper str.trim };
 codes := @: code [" ca  " " Ny " " tx"];
-!{
-    ^{
-        ^? ! print codes;
-        ()
-    }
+!^{
+    ! print codes;
 };

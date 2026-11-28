@@ -6,13 +6,11 @@ absent: ?z := ?0;
 present := opt.map &bump (?1 7z);
 kept := opt.bind &only_positive present;
 dropped := opt.bind &only_positive (?1 -1z);
+-- opt.result turns ordinary absence into a typed failure.
 converted := ^= opt.result "missing reading" absent {
     _ : -1z;
 };
-!{
-    ^{
-        ^? ! print (?? 0z kept, ?+ dropped, ?+ (opt.map &bump absent));
-        ^? ! print converted;
-        ()
-    }
+!^{
+    ! print (?? 0z kept, ?+ dropped, ?+ (opt.map &bump absent));
+    ! print converted;
 };

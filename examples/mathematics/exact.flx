@@ -1,4 +1,4 @@
---- Cross the former signed 128-bit boundary without changing domains.
+--- Cross the signed 128-bit limit using exact naturals and rationals.
 a := ^ 2n 127n;
 b := + a 1n;
 qv := / b a;
@@ -9,10 +9,7 @@ x := +
     0.0000000000000000000000000000000000000001d;
 y := * 1.20d 3.0d;
 
-!{
-    ^{
-        ^? ! print (b, qv);
-        ^? ! print (x, y);
-        ()
-    }
+!^{
+    ! print (b, qv);
+    ! print (x, y);
 };

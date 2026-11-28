@@ -6,33 +6,25 @@ reading :: {
     tag      : ?s;
 };
 decode(x: s): reading ^ jsonerr := json.decode x;
+placeholder(id: z): reading := reading {
+    id       := id;
+    pressure := 0.00d;
+    tag      := ?0;
+};
+-- The target type preserves the wide integer and decimal scale; null is absent.
 sample := ^= decode
     "{\"tag\":null,\"pressure\":101.2300,\"id\":170141183460469231731687303715884105728}" {
-    _ : reading {
-        id       := 0z;
-        pressure := 0.00d;
-        tag      := ?0;
-    };
+    _ : placeholder 0z;
 };
 encoded := ^= json.encode sample {
     _ : "could not encode";
 };
+-- A duplicate field is a shape error, distinct from invalid JSON syntax.
 reject := ^= decode "{\"id\":1,\"id\":2,\"pressure\":0,\"tag\":null}" {
-    jsonshape _   : reading {
-        id       := -1z;
-        pressure := 0.00d;
-        tag      := ?0;
-    };
-    invalidjson _ : reading {
-        id       := -2z;
-        pressure := 0.00d;
-        tag      := ?0;
-    };
+    jsonshape _   : placeholder -1z;
+    invalidjson _ : placeholder -2z;
 };
-!{
-    ^{
-        ^? ! print encoded;
-        ^? ! print (.id reject, ?+ .tag sample);
-        ()
-    }
+!^{
+    ! print encoded;
+    ! print (.id reject, ?+ .tag sample);
 };

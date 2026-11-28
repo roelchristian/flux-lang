@@ -1,15 +1,14 @@
 # Concordance
 
-From the repository root:
+Run [the script](main.flx) from the repository root:
 
 ```sh
-cargo build --release --locked
-target/release/flux run-hir examples/applications/concordance/main.flx
+flux run-hir examples/applications/concordance/main.flx
 ```
 
-Reads the synthetic text in `examples/data/corpus.txt`, lowercases it, treats
-the listed punctuation and whitespace as word separators, and groups tokens
-by spelling. This is an explicit tokenizer for the sample, not Unicode word
+The script lowercases the [synthetic corpus](../../data/corpus.txt),
+splits on the listed punctuation and whitespace, and groups tokens by
+spelling. This is an explicit tokenizer for the sample, not Unicode word
 segmentation. The ranking sorts by count descending, keeping alphabetical
 order on ties.
 

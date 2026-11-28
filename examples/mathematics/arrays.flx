@@ -1,18 +1,18 @@
 << "arr";
 
---- A matrix of three readings from each location.
-readings: array[q] := arr.reshape [2n 3n] [1q 2q 3q 4q 5q 6q];
-offsets := arr.reshape [3n] [10q 20q 30q];
+--- Two locations, each with three readings. Zip over broadcast pairs.
+readings: array[q] := form [2 3] [1 2 3 4 5 6];
+offsets: array[q] := form [3] [10 20 30];
 corrected := arr.zip &+ readings offsets;
-totals := arr.rankmap 1n (\ row -> +/ arr.ravel row) corrected;
+-- A rank-one cell is a row here. Flatten before summing to return a scalar.
+totals := arr.rankmap 1 (\ row -> +/ ,. row) corrected;
 cumulative := arr.scan &+ 0q readings;
-labeled := ["north" "east" "west"];
-alphabetic := arr.permute (arr.grade &. labeled) labeled;
 
-!{
-    ^{
-        ^? ! print (arr.shape corrected, arr.ravel totals);
-        ^? ! print (arr.ravel cumulative, alphabetic);
-        ()
-    }
+-- Grade supplies the permutation; the original labels remain unchanged.
+labels := ["north" "east" "west"];
+alphabetic := arr.permute (arr.grade &. labels) labels;
+
+!^{
+    ! print (dim corrected, ,. totals);
+    ! print (,. cumulative, alphabetic);
 };

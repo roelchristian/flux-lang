@@ -1,11 +1,9 @@
 << "str" : text;
 
 line := text.trim "  Stra\u{df}e,FlUx,,end  ";
+-- The empty field between adjacent commas is retained.
 words := text.split "," line;
-!{
-    ^{
-        ^? ! print (text.upper "Stra\u{df}e", text.lower "FlUx");
-        ^? ! print (# words, text.join "|" words);
-        ()
-    }
+!^{
+    ! print (text.upper "Stra\u{df}e", text.lower "FlUx");
+    ! print (# words, text.join "|" words);
 };

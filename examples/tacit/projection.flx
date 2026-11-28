@@ -20,9 +20,6 @@ line := segment {
         }
     );
 };
-!{
-    ^{
-        ^? ! print (@ start_x line, @ end_y line);
-        ()
-    }
+!^{
+    ! print (@ start_x line, @ end_y line);
 };

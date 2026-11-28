@@ -9,6 +9,7 @@ system := ^{
     determinant := ^? lin.det a;
     solution := ^? lin.solve a b;
     inverse := ^? lin.inv a;
+    -- Matrix multiplication takes a column matrix, not a vector.
     product := arr.mul a (form [2 1] solution);
     (determinant, solution, inverse, == form [2] product b)
 };

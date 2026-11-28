@@ -6,9 +6,6 @@ apperr :: {
     | input ioerr;
     | output ioerr;
 };
-wordrow :: {
-    word: s;
-};
 entry :: {
     word        : s;
     occurrences : n;
@@ -17,10 +14,9 @@ entry :: {
 separate(text: s, delimiter: s): s := str.join " " (str.split delimiter text);
 normalize: s -> s := &{ @. str.trim str.lower };
 not_blank(word: s): b := /= word "";
-row(word: s): wordrow := wordrow {
-    word := word;
-};
-count(word: s, rows:#wordrow): entry := entry {
+count(word: s, rows:#.{
+    word: s;
+}): entry := entry {
     word        := word;
     occurrences := # rows;
 };
@@ -36,7 +32,14 @@ show(x: entry): (s, n) := (.word x, .occurrences x);
             (@ normalize text)
             ["\n" "\r" "\t" "," "." ";" ":" "!" "?"];
         words := ?: &not_blank (str.split " " clean);
-        alphabet := >: &.word (df.agg &.word &count (#: (@: &row words)));
+        alphabet := |{
+            #: .{
+                word := words;
+            };
+            df.agg &.word &count $;
+            df.sort &.word $
+        };
+        --- The stable descending sort leaves ties alphabetical.
         ranked := <: &.occurrences alphabet;
         ^= ! print "alphabetical (word, frequency)" {
             e : ^: output e;

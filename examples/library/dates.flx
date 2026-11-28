@@ -1,5 +1,6 @@
 << "dt";
 
+-- Days are signed offsets from 1970-01-01.
 leap := ^= dt.days "2024-02-29" {
     baddate _ : 0z;
 };
@@ -12,9 +13,6 @@ before := ^= dt.days "1969-12-31" {
 invalid := ^= dt.days "2023-02-29" {
     baddate _ : -999z;
 };
-!{
-    ^{
-        ^? ! print (leap, tomorrow, before, invalid);
-        ()
-    }
+!^{
+    ! print (leap, tomorrow, before, invalid);
 };

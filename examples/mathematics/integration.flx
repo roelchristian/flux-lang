@@ -1,4 +1,5 @@
 << "num";
+<< "res";
 
 square(x: r): r := * x x;
 close(x, y: r): b := < | (- x y) 1e-6r;
@@ -7,17 +8,20 @@ opts := .{
     max := 100n;
 };
 
-area := ^= num.integrate &square 0r 1r opts {
-    _ : -1r;
+--- Report whether a successful estimate agrees with the known answer.
+agrees(expected: r, estimate: r ^ solvererr): b := {
+    compared := res.map (\ x -> close x expected) estimate;
+    ^= compared {
+        _ : 0b;
+    }
 };
-slope := ^= num.diff &square 3r 0.001r {
-    _ : -1r;
-};
-midpoint := ^= num.interp [0r 1r 2r] [0r 2r 6r] 1.5r {
-    _ : -1r;
-};
+
+area := num.integrate &square 0r 1r opts;
+slope := num.diff &square 3r 0.001r;
+midpoint := num.interp [0r 1r 2r] [0r 2r 6r] 1.5r;
 
 !^{
     !
-        print (close area (/ 1r 3r), close slope 6r, close midpoint 4r);
+        print
+            (agrees (/ 1r 3r) area, agrees 6r slope, agrees 4r midpoint);
 };

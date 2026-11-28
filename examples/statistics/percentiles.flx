@@ -1,10 +1,8 @@
---- Interpolated percentiles are exact; endpoints retain the extremes.
+--- Interpolate in sorted order at position (count - 1) * p / 100.
+--- Rational input keeps interpolation exact; 0 and 100 give the extremes.
 xs := [14q 2q 8q 20q];
 at(p: q): ?q := pct p xs;
 
-!{
-    ^{
-        ^? ! print (at 0, at 25, at 50, at 75, at 100);
-        ()
-    }
+!^{
+    ! print (at 0, at 25, at 50, at 75, at 100);
 };

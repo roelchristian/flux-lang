@@ -5,26 +5,25 @@ a := form [2n 3n] [1z 2z 3z 4z 5z 6z];
 differences := arr.red 1n &- a;
 running := arr.scana 1n &+ 0z a;
 
---- A nonempty frame of empty cells still produces reductions and seeds.
+--- Shape [2 0] has two empty rows. Each gives zero for +/ and absence for @/.
+-- A seeded scan instead emits its seed for each row.
 empty: [z] := [];
 no_columns := form [2n 0n] empty;
 totals := +/ no_columns;
 without_seed := @/ &+ no_columns;
 with_seed := \: &+ 7z no_columns;
 
---- A zero frame has no cell results; a rank-zero array has one element.
+--- Shape [0 2] has no rows to reduce.
 no_rows := form [0n 2n] empty;
 no_totals := +/ no_rows;
+-- Shape [] has rank zero but contains one element at the empty index [].
 scalar := form [] [42z];
 
-!{
-    ^{
-        ^? ! print (dim differences, ,. differences);
-        ^? ! print (dim running, ,. running);
-        ^? ! print (dim totals, ,. totals, ,. without_seed);
-        ^? ! print (dim with_seed, ,. with_seed);
-        ^? ! print (dim no_totals, ,. no_totals);
-        ^? ! print (dim scalar, # scalar, .: [] scalar);
-        ()
-    }
+!^{
+    ! print (dim differences, ,. differences);
+    ! print (dim running, ,. running);
+    ! print (dim totals, ,. totals, ,. without_seed);
+    ! print (dim with_seed, ,. with_seed);
+    ! print (dim no_totals, ,. no_totals);
+    ! print (dim scalar, # scalar, .: [] scalar);
 };

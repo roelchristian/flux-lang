@@ -5,9 +5,6 @@ band(n: z): s := ?{
     _      : "positive";
 };
 
-!{
-    ^{
-        ^? ! print (@: &band [-3z 0z 7z]);
-        ()
-    }
+!^{
+    ! print (@: &band [-3z 0z 7z]);
 };

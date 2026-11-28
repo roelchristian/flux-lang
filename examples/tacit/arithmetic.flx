@@ -1,12 +1,10 @@
 --- Bare dot supplies the input; the hook also keeps it as the left operand.
+--- These bindings are function values: call them with @, or map with @:.
 square := &{ @* * . . };
 cube := &{ @? * square };
 poly := &{ @? + square };
 
-!{
-    ^{
-        ^? ! print (@ square 4z, @ cube 4z, @ poly 4z);
-        ^? ! print (@: poly (.. 1z 4z));
-        ()
-    }
+!^{
+    ! print (@ square 4z, @ cube 4z, @ poly 4z);
+    ! print (@: poly (.. 1z 4z));
 };

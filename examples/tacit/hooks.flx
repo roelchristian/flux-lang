@@ -3,9 +3,6 @@ scale(x: z): z := * 3z x;
 add_scaled: z -> z := &{ @? + scale };
 subtract_scaled: z -> z := &{ @? - scale };
 
-!{
-    ^{
-        ^? ! print (@ add_scaled 4z, @ subtract_scaled 4z);
-        ()
-    }
+!^{
+    ! print (@ add_scaled 4z, @ subtract_scaled 4z);
 };

@@ -1,10 +1,8 @@
 << "sys";
 
-!{
-    ^{
-        xs := ! sys.args;
-        ^? ! print (# xs, ?? "no arguments" (.: 1n xs));
-        ^? ! print xs;
-        ()
-    }
+!^{
+    xs := ! sys.args;
+    -- Lookup is one-based and returns absence when no argument was supplied.
+    ! print (# xs, ?? "no arguments" (.: 1n xs));
+    ! print xs;
 };

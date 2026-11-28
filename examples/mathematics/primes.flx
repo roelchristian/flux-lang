@@ -7,9 +7,6 @@ trial(n, d: n): b :=
     };
 prime(n: n): b := ? < n 2 0b trial n 2;
 
-!{
-    ^{
-        ^? ! print ?: &prime .. 2n 30n;
-        ()
-    }
+!^{
+    ! print ?: &prime .. 2n 30n;
 };

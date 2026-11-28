@@ -59,8 +59,18 @@ fn verify_files(dir: &Path, expected: &BTreeMap<PathBuf, Vec<u8>>, context: &str
     );
 }
 
-fn run(dir: &Path, spec: &Value, mode: &str) -> Output {
+fn run(dir: &Path, spec: &Value, mode: &str, optimize: bool) -> Output {
     let mut cmd = flux();
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("FLUX_")
+        {
+            cmd.env_remove(key);
+        }
+    }
+    cmd.env("FLUX_OPTIMIZE", if optimize { "1" } else { "0" });
     cmd.current_dir(dir.join(relative(spec["cwd"].as_str().unwrap_or("."))));
     if !mode.is_empty() {
         cmd.arg(mode);
@@ -156,22 +166,34 @@ fn every_public_example_checks_and_runs_with_its_manifest_contract() {
                 .map(|f| f.path.canonicalize().unwrap()),
         );
 
-        for mode in ["", "run-hir"] {
+        for (mode, optimize) in [
+            ("", true),
+            ("run-hir", true),
+            ("", false),
+            ("run-hir", false),
+        ] {
             let dir = TempDir::new("corpus");
             for (name, contents) in &example_files {
                 let file = dir.join("examples").join(name);
                 fs::create_dir_all(file.parent().unwrap()).unwrap();
                 fs::write(file, contents).unwrap();
             }
-            let context = format!("{entry:?} [{mode}]");
+            let context = format!(
+                "{entry:?} [{}, optimized={optimize}]",
+                if mode.is_empty() {
+                    "ordinary CLI"
+                } else {
+                    mode
+                },
+            );
             let initial = snapshot(dir.path());
             verify(
-                &run(dir.path(), &spec, "check"),
+                &run(dir.path(), &spec, "check", optimize),
                 &serde_json::json!({"stdout": ""}),
                 &context,
             );
             verify_files(dir.path(), &initial, &context);
-            verify(&run(dir.path(), &spec, mode), &spec, &context);
+            verify(&run(dir.path(), &spec, mode, optimize), &spec, &context);
             let mut expected_files = initial;
             if let Some(files) = spec["files"].as_object() {
                 let cwd = relative(spec["cwd"].as_str().unwrap_or("."));
@@ -199,7 +221,7 @@ fn every_public_example_checks_and_runs_with_its_manifest_contract() {
             }
             verify_files(dir.path(), &expected_files, &context);
             if let Some(rerun) = spec.get("rerun") {
-                verify(&run(dir.path(), &spec, mode), rerun, &context);
+                verify(&run(dir.path(), &spec, mode, optimize), rerun, &context);
                 verify_files(dir.path(), &expected_files, &context);
             }
         }

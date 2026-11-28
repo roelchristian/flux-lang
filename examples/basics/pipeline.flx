@@ -1,4 +1,4 @@
---- Each $ is the preceding stage's value.
+--- A pipeline transforms a value. Every $ in a stage is the previous result.
 piped := |{
     .. 1z 100z;
     ^ $ 2n;
@@ -6,7 +6,7 @@ piped := |{
     +/ $
 };
 
---- The same transformation as a first-class tacit function.
+--- Tacit composition constructs the same transformation as a reusable function.
 square: [z] -> [z] := &{ @* * . . };
 large(xs: [z]): [z] := ?: > xs 100z xs;
 sum_large_squares: [z] -> z := &{
@@ -15,10 +15,7 @@ sum_large_squares: [z] -> z := &{
         @. large square
 };
 
-!{
-    ^{
-        ^? ! print piped;
-        ^? ! print @ sum_large_squares .. 1z 100z;
-        ()
-    }
+!^{
+    ! print piped;
+    ! print @ sum_large_squares .. 1z 100z;
 };

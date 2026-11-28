@@ -15,6 +15,7 @@ factors := ^{
     lu := ^? lin.lu a;
     qr := ^? lin.qr tall;
     low := ^? lin.cholesky positive;
+    -- Check the identities, not the signs or last bits of individual factors.
     reconstructed := close (arr.mul .q qr .r qr) tall;
     orthogonal := close (arr.mul (|: .q qr) .q qr) (: r (lin.eye 2));
     (
