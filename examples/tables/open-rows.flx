@@ -1,0 +1,37 @@
+<< "df";
+
+--- Preserve all other columns while adding a derived measurement.
+squares(t:#.{
+    value: q;
+    | 'r
+}):#.{
+    value   : q;
+    squared : q;
+    | 'r
+} :=
+    df.extend .{
+        squared := ^ .value t 2n;
+    } t;
+
+reading :: {
+    station : s;
+    value   : q;
+};
+measurements:#reading :=
+    #[reading {
+        station := "north";
+        value   := 3q;
+    }];
+empty:#.{
+    sample : n;
+    value  : q;
+} := #[];
+
+!{
+    ^{
+        measured := squares (df.structural measurements);
+        blank := squares empty;
+        ^? ! print (.station measured, .squared measured, # blank);
+        ()
+    }
+};

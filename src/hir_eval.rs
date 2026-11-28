@@ -576,6 +576,7 @@ enum Function {
         body: ExprId,
         env: usize,
         declared: Type,
+        open_rows: bool,
     },
     Core(CoreOp, Type, Option<Rc<TableSchema>>),
     Constructor(SymbolId, usize),
@@ -606,6 +607,15 @@ struct Frame {
     ready: HashMap<SymbolId, V>,
     type_scope: Option<usize>,
     substs: HashMap<u32, Type>,
+    row_substs: Option<Box<RowInstances>>,
+}
+type RowInstances = HashMap<u32, RowInstance>;
+struct RowInstance {
+    /// Only tail-owned fields may supply field types to the output occurrence.
+    residual: crate::types::Row,
+    /// Preserve the checked input's interleaving of required and extra fields.
+    order: Vec<String>,
+    fixed: Vec<String>,
 }
 struct Eval<'a> {
     p: &'a HirProgram,
@@ -983,7 +993,36 @@ fn finite(v: f64) -> NumericResult<V> {
         Err("nonfinite real result")
     }
 }
-fn fit_instance(pattern: &Type, actual: &Type, vars: &mut HashMap<u32, Type>) {
+fn contains_open_row(ty: &Type) -> bool {
+    match ty {
+        Type::Record(row) => {
+            row.tail.is_some() || row.fields.iter().any(|(_, ty)| contains_open_row(ty))
+        }
+        Type::Seq(t) | Type::Table(t) | Type::Optional(t) | Type::Action(t) => contains_open_row(t),
+        Type::Dict(a, b) | Type::Fun(a, b) | Type::Result(a, b) => {
+            contains_open_row(a) || contains_open_row(b)
+        }
+        Type::Tuple(ts) | Type::Applied(_, ts) => ts.iter().any(contains_open_row),
+        _ => false,
+    }
+}
+fn dynamic_schema_operation(op: CoreOp) -> bool {
+    matches!(
+        op,
+        CoreOp::TableFrom
+            | CoreOp::TableRows
+            | CoreOp::Aggregate
+            | CoreOp::Extend
+            | CoreOp::Cartesian
+            | CoreOp::CsvRead
+    )
+}
+fn fit_instance(
+    pattern: &Type,
+    actual: &Type,
+    vars: &mut HashMap<u32, Type>,
+    rows: &mut RowInstances,
+) {
     match (pattern, actual) {
         (Type::Var(i), t) if !matches!(t, Type::Var(_)) => {
             vars.entry(*i).or_insert_with(|| t.clone());
@@ -991,29 +1030,64 @@ fn fit_instance(pattern: &Type, actual: &Type, vars: &mut HashMap<u32, Type>) {
         (Type::Seq(a), Type::Seq(b))
         | (Type::Table(a), Type::Table(b))
         | (Type::Optional(a), Type::Optional(b))
-        | (Type::Action(a), Type::Action(b)) => fit_instance(a, b, vars),
+        | (Type::Action(a), Type::Action(b)) => fit_instance(a, b, vars, rows),
         (Type::Dict(a, b), Type::Dict(c, d))
         | (Type::Fun(a, b), Type::Fun(c, d))
         | (Type::Result(a, b), Type::Result(c, d)) => {
-            fit_instance(a, c, vars);
-            fit_instance(b, d, vars);
+            fit_instance(a, c, vars, rows);
+            fit_instance(b, d, vars, rows);
         }
         (Type::Applied(a, args), Type::Applied(b, actual))
             if a == b && args.len() == actual.len() =>
         {
             for (arg, actual) in args.iter().zip(actual) {
-                fit_instance(arg, actual, vars);
+                fit_instance(arg, actual, vars, rows);
             }
         }
         (Type::Tuple(a), Type::Tuple(b)) => {
             for (a, b) in a.iter().zip(b) {
-                fit_instance(a, b, vars);
+                fit_instance(a, b, vars, rows);
             }
         }
         (Type::Record(a), Type::Record(b)) => {
+            if let Some(tail) = a.tail {
+                // An identical unresolved tail is not additional evidence.
+                if b.tail != Some(tail)
+                    || b.fields
+                        .iter()
+                        .any(|(name, _)| !a.fields.iter().any(|(fixed, _)| fixed == name))
+                {
+                    let capture = || RowInstance {
+                        residual: crate::types::Row {
+                            fields: b
+                                .fields
+                                .iter()
+                                .filter(|(name, _)| {
+                                    !a.fields.iter().any(|(fixed, _)| fixed == name)
+                                })
+                                .cloned()
+                                .collect(),
+                            tail: b.tail,
+                        },
+                        order: b.fields.iter().map(|(name, _)| name.clone()).collect(),
+                        fixed: a.fields.iter().map(|(name, _)| name.clone()).collect(),
+                    };
+                    match rows.entry(tail) {
+                        std::collections::hash_map::Entry::Vacant(slot) => {
+                            slot.insert(capture());
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut slot)
+                            if slot.get().residual.tail.is_some() && b.tail.is_none() =>
+                        {
+                            slot.insert(capture());
+                        }
+                        _ => {}
+                    }
+                }
+            }
             for (n, a) in &a.fields {
                 if let Some((_, b)) = b.fields.iter().find(|(m, _)| n == m) {
-                    fit_instance(a, b, vars);
+                    fit_instance(a, b, vars, rows);
                 }
             }
         }
@@ -1230,6 +1304,7 @@ impl Eval<'_> {
             ready: HashMap::new(),
             type_scope: self.frames[parent].type_scope,
             substs: HashMap::new(),
+            row_substs: None,
         });
         id
     }
@@ -1272,6 +1347,42 @@ impl Eval<'_> {
                     for (_, t) in &mut r.fields {
                         *t = recur(t);
                     }
+                    let mut cursor = scope;
+                    let mut steps = fuel;
+                    while let (Some(tail), Some(i)) = (r.tail, cursor) {
+                        if steps == 0 {
+                            break;
+                        }
+                        steps -= 1;
+                        let frame = &e.frames[i];
+                        cursor = frame.parent.and_then(|p| e.frames[p].type_scope);
+                        let Some(witness) =
+                            frame.row_substs.as_ref().and_then(|rows| rows.get(&tail))
+                        else {
+                            continue;
+                        };
+                        let preserve_interleaving = witness
+                            .fixed
+                            .iter()
+                            .all(|fixed| r.fields.iter().any(|(name, _)| fixed == name));
+                        for (name, t) in &witness.residual.fields {
+                            if !r.fields.iter().any(|(existing, _)| existing == name) {
+                                r.fields.push((name.clone(), subst(e, t, cursor, steps)));
+                            }
+                        }
+                        if preserve_interleaving {
+                            // Existing columns retain their checked input order; fields
+                            // introduced by this expression follow in declaration order.
+                            r.fields.sort_by_key(|(name, _)| {
+                                witness
+                                    .order
+                                    .iter()
+                                    .position(|original| original == name)
+                                    .unwrap_or(usize::MAX)
+                            });
+                        }
+                        r.tail = witness.residual.tail;
+                    }
                     Type::Record(r)
                 }
                 _ => ty.clone(),
@@ -1313,6 +1424,7 @@ impl Eval<'_> {
             body: d.body,
             env,
             declared: d.scheme.ty.clone(),
+            open_rows: contains_open_row(&d.scheme.ty),
         };
         self.put(
             env,
@@ -1431,6 +1543,24 @@ impl Eval<'_> {
                 bound_types: Vec::new(),
                 instance: None,
             })),
+            ExprKind::Call(Target::Builtin(CoreOp::TableFrom), args)
+                if n.table_schema.is_none()
+                    && matches!(
+                        &p.node(args[0]).kind,
+                        ExprKind::Call(Target::Builtin(CoreOp::Rows), _)
+                    ) =>
+            {
+                // The direct round trip preserves its actual input layout.
+                // Two arguments can share an open row type while differing
+                // in column order; the other argument is not its witness.
+                let ExprKind::Call(_, source) = &p.node(args[0]).kind else {
+                    unreachable!("checked row round trip")
+                };
+                match self.eval(source[0], env)? {
+                    table @ V::Table(_, _) => table,
+                    _ => return Err(invariant(s, "checked row round trip needs a table")),
+                }
+            }
             ExprKind::Call(Target::Builtin(CoreOp::Default), args) => {
                 let [fallback, stored] = args.as_slice() else {
                     return Err(error(s, "invalid fallback operands"));
@@ -1502,7 +1632,21 @@ impl Eval<'_> {
                                 .collect::<Vec<_>>();
                             combinators05::apply(*op, args, &types, &ty, self, s)?
                         } else {
-                            self.core(*op, args, &ty, n.table_schema.as_ref(), n.lift_mode, s)?
+                            let layout = if dynamic_schema_operation(*op)
+                                && self.frames[env].type_scope.is_some()
+                            {
+                                self.p.instance_schema(&ty)
+                            } else {
+                                None
+                            };
+                            self.core(
+                                *op,
+                                args,
+                                &ty,
+                                layout.as_ref().or(n.table_schema.as_ref()),
+                                n.lift_mode,
+                                s,
+                            )?
                         }
                     }
                     Target::Constructor(id) => self.make_variant(*id, args, s)?,
@@ -1515,7 +1659,17 @@ impl Eval<'_> {
                     Target::Symbol(_) => {
                         if let Some(sig) = n.callee_type.as_ref() {
                             let f = self.specialize_fun(f.expect("callee loaded"), sig, env);
-                            self.apply(f, args, s)?
+                            if matches!(&f, V::Fun(f) if matches!(f.code, Function::User { open_rows: true, .. }))
+                            {
+                                let input = ids
+                                    .iter()
+                                    .map(|id| self.type_at(&p.node(*id).ty, env))
+                                    .collect();
+                                let output = self.type_at(&n.ty, env);
+                                self.apply_checked(f, args, Some(input), Some(output), s)?
+                            } else {
+                                self.apply(f, args, s)?
+                            }
                         } else {
                             let types = ids
                                 .iter()
@@ -1569,6 +1723,7 @@ impl Eval<'_> {
                     body: *body,
                     env,
                     declared: n.ty.clone(),
+                    open_rows: contains_open_row(&n.ty),
                 },
                 bound: Vec::new(),
                 bound_types: Vec::new(),
@@ -1806,19 +1961,28 @@ impl Eval<'_> {
                 body,
                 env,
                 declared,
+                ..
             } => {
                 let mut substs = HashMap::new();
+                let mut row_substs = HashMap::new();
                 for (i, arg) in f.bound_types.iter().enumerate() {
                     if let Some(p) = fun_arg(&declared, i) {
-                        fit_instance(p, arg, &mut substs);
+                        fit_instance(p, arg, &mut substs, &mut row_substs);
                     }
                 }
                 if let Some(out) = out.as_ref() {
-                    fit_instance(result_type(&declared, arity), out, &mut substs);
+                    fit_instance(
+                        result_type(&declared, arity),
+                        out,
+                        &mut substs,
+                        &mut row_substs,
+                    );
                 }
                 let scope = self.frame(env);
-                if !substs.is_empty() {
+                if !substs.is_empty() || !row_substs.is_empty() {
                     self.frames[scope].substs = substs;
+                    self.frames[scope].row_substs =
+                        (!row_substs.is_empty()).then(|| Box::new(row_substs));
                     self.frames[scope].type_scope = Some(scope);
                 }
                 for (s, v) in formals.iter().zip(f.bound) {
@@ -1997,6 +2161,10 @@ impl Eval<'_> {
                     "checked collection operation has no implementation",
                 ))
             }
+            StructuralRows => match a() {
+                value @ V::Table(_, _) => return Ok(value),
+                _ => return Err(invariant(span, "checked structural view expects a table")),
+            },
             InnerJoin | LeftJoin | SemiJoin | AntiJoin | TableUnion | TableDistinct
             | TableSelect | DropNa | Fill | PresentOnly => {
                 return Err(invariant(
@@ -2170,7 +2338,34 @@ impl Eval<'_> {
             Extend => {
                 let (new, source) = (a(), a());
                 let schema = layout(schema, span)?;
-                let (rows, _) = collection(source, span)?;
+                let (rows, input) = collection(source, span)?;
+                let (Some(TableSchema::Named(source_fields)), TableSchema::Named(output_fields)) =
+                    (input.as_deref(), schema.as_ref())
+                else {
+                    return Err(invariant(
+                        span,
+                        "df.extend needs checked named table layouts",
+                    ));
+                };
+                let schema = if source_fields
+                    .iter()
+                    .zip(output_fields)
+                    .all(|(a, b)| a.0 == b.0)
+                {
+                    schema
+                } else {
+                    // Column type evidence remains the checked output layout.
+                    // Existing labels follow the checked source table's order.
+                    let position = source_fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (name, _))| (name, i))
+                        .collect::<HashMap<_, _>>();
+                    let mut fields = output_fields.clone();
+                    fields
+                        .sort_by_key(|(name, _)| position.get(name).copied().unwrap_or(usize::MAX));
+                    Rc::new(TableSchema::Named(fields))
+                };
                 let extra = column_rows(&new, span)?;
                 if extra.len() != rows.len() {
                     return Err(error(

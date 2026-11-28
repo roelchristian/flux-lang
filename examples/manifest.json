@@ -205,6 +205,10 @@
     "stdout": "2\n?1 15\n"
   },
   {
+    "entry": "examples/tables/open-rows.flx",
+    "stdout": "([north], [9], 0)\n"
+  },
+  {
     "entry": "examples/tables/projection.flx",
     "stdout": "#[{station := ridge; kelvin := 268.65} {station := marsh; kelvin := 289.90}]\n"
   },

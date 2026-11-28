@@ -168,6 +168,7 @@ pub enum TypeAnnotationKind {
     Tuple(Vec<TypeAnnotation>),
     Dictionary(Box<TypeAnnotation>, Box<TypeAnnotation>),
     Record(Vec<(String, TypeAnnotation)>),
+    OpenRecord(Vec<(String, TypeAnnotation)>, String),
     Result(Box<TypeAnnotation>, Box<TypeAnnotation>),
     Function(Vec<TypeAnnotation>, Box<TypeAnnotation>),
 }
@@ -397,11 +398,20 @@ impl AnnotationParser<'_> {
             ".{" => {
                 let mut fields = Vec::new();
                 let mut seen = HashSet::new();
-                while !self.eat("}") {
-                    let name = self.peek().to_owned();
-                    if matches!(name.as_str(), "|" | "..") {
-                        return self.err("explicit open-row annotations are not supported; infer the row from field use");
+                loop {
+                    if self.eat("}") {
+                        break Record(fields);
                     }
+                    if self.eat("|") {
+                        let row = self.peek().to_owned();
+                        if !row.strip_prefix('\'').is_some_and(is_ident) {
+                            return self.err("expected a row type variable after `|`");
+                        }
+                        self.i += 1;
+                        self.expect("}")?;
+                        break OpenRecord(fields, row);
+                    }
+                    let name = self.peek().to_owned();
                     if !is_ident(&name) {
                         return self.err("expected field name in structural record type");
                     }
@@ -410,13 +420,12 @@ impl AnnotationParser<'_> {
                     }
                     self.i += 1;
                     self.expect(":")?;
-                    let value = self.arrow(&[";", "}", "|", ".."])?;
+                    let value = self.arrow(&[";", "}", "|"])?;
                     fields.push((name, value));
-                    if !self.eat(";") && !matches!(self.peek(), "}" | "|" | "..") {
-                        return self.err("expected ; or } in record type");
+                    if !self.eat(";") && self.peek() != "}" {
+                        return self.err("expected `;` or `}` after a structural record field");
                     }
                 }
-                Record(fields)
             }
             name if name.strip_prefix('\'').is_some_and(is_ident) => Variable(name.to_owned()),
             name if is_ident(name) || is_qualified_ident(name) => {
@@ -1061,7 +1070,7 @@ impl Parser {
                     rewrite(p, k)?;
                     rewrite(p, v)?;
                 }
-                Record(fields) => {
+                Record(fields) | OpenRecord(fields, _) => {
                     for (_, t) in fields {
                         rewrite(p, t)?;
                     }
@@ -2896,5 +2905,88 @@ f(x:q^err^e):q := 0;";
             );
         }
         assert!(parse_type_annotation("tree [q]").is_err());
+    }
+
+    #[test]
+    fn explicit_open_row_annotation_parses_without_changing_closed_records() {
+        use TypeAnnotationKind::*;
+        let p = parse("keep(t:#.{ field:q; | 'r }):#.{ | 'r } := t;").unwrap();
+        let Stmt::Def {
+            param_types,
+            result_type,
+            ..
+        } = &p.defs[0]
+        else {
+            panic!("expected function declaration");
+        };
+        let Table(t) = &param_types[0].as_ref().unwrap().kind else {
+            panic!("expected table")
+        };
+        let OpenRecord(fields, row) = &t.kind else {
+            panic!("expected open record")
+        };
+        assert_eq!(fields[0].0, "field");
+        assert!(matches!(fields[0].1.kind, Primitive(TypePrimitive::Q)));
+        assert_eq!(row, "'r");
+        let Table(t) = &result_type.as_ref().unwrap().kind else {
+            panic!("expected table")
+        };
+        assert!(matches!(&t.kind, OpenRecord(fields, row) if fields.is_empty() && row == "'r"));
+        assert!(
+            matches!(parse_type_annotation(".{ value:q }").unwrap().kind, Record(fields) if fields.len() == 1)
+        );
+
+        let input = "keep(t:#.{ field:q; x:n; | 'r }):#.{ | 'r } := t;";
+        let formatted = crate::format_source(input).unwrap();
+        let reparsed = parse(&formatted).unwrap();
+        assert_eq!(p.defs.len(), reparsed.defs.len());
+        assert!(formatted.contains("| 'r"));
+        assert!(formatted.contains("field : q;"));
+        assert!(formatted.contains("x     : n;"));
+        assert_eq!(crate::format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn rejects_malformed_open_row_syntax() {
+        for input in [
+            ".{ | }",
+            ".{ | r }",
+            ".{ x:q | 'r }",
+            ".{ x:q; | 'r; }",
+            ".{ | 'r | 't }",
+            ".{ | 'r x:q; }",
+            ".{ x:q; x:s; | 'r }",
+            ".{ x:q; .. 'r }",
+        ] {
+            assert!(parse_type_annotation(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn type_links_rewrite_open_row_fields_without_rewriting_the_tail() {
+        use TypeAnnotationKind::*;
+        let lib = parse_module(">> (item); item :: { v:q; };", 0, Some("dep"), &[]).unwrap();
+        let members = lib.module_members();
+        let linked = members[0].linked.clone();
+        let imports = [ImportedModule {
+            path: "./dep.flx".into(),
+            members,
+        }];
+        let src =
+            r#"<< "./dep.flx" : d; keep(x:.{ value:d.item; | 'r }):.{ value:d.item; | 'r } := x;"#;
+        let program = parse_module(src, 200, Some("main"), &imports).unwrap();
+        let Stmt::Def {
+            result_type: Some(ty),
+            ..
+        } = &program.defs[0]
+        else {
+            panic!("expected annotated definition");
+        };
+        let OpenRecord(fields, row) = &ty.kind else {
+            panic!("expected open record")
+        };
+        assert!(matches!(&fields[0].1.kind, Named(name) if name == &linked));
+        assert_eq!(row, "'r");
+        assert!(ty.span.start >= 200);
     }
 }

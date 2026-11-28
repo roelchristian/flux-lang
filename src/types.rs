@@ -67,6 +67,8 @@ pub struct Scheme {
     pub vars: Vec<u32>,
     pub ty: Type,
     pub constraints: Vec<Constraint>,
+    /// Quantified row IDs, with the field labels excluded from each tail.
+    pub row_lacks: BTreeMap<u32, BTreeSet<String>>,
 }
 
 impl Scheme {
@@ -75,6 +77,7 @@ impl Scheme {
             vars: vec![],
             ty,
             constraints: vec![],
+            row_lacks: BTreeMap::new(),
         }
     }
 }
@@ -223,6 +226,8 @@ impl fmt::Display for Scheme {
 pub struct InferCtx {
     next: u32,
     types: BTreeMap<u32, Type>,
+    type_ids: BTreeSet<u32>,
+    row_ids: BTreeSet<u32>,
     rigid: BTreeSet<u32>,
     rows: BTreeMap<u32, Row>,
     lacks: BTreeMap<u32, BTreeSet<String>>,
@@ -257,6 +262,32 @@ fn free(t: &Type, out: &mut BTreeSet<u32>) {
         Type::Prim(_) | Type::Nominal(_) | Type::Never => {}
     }
 }
+fn row_labels(t: &Type, out: &mut BTreeMap<u32, BTreeSet<String>>) {
+    match t {
+        Type::Record(row) => {
+            if let Some(id) = row.tail {
+                out.entry(id)
+                    .or_default()
+                    .extend(row.fields.iter().map(|(n, _)| n.clone()));
+            }
+            for (_, t) in &row.fields {
+                row_labels(t, out);
+            }
+        }
+        Type::Seq(x) | Type::Optional(x) | Type::Action(x) | Type::Table(x) => row_labels(x, out),
+        Type::Dict(a, b) | Type::Fun(a, b) | Type::Result(a, b) => {
+            row_labels(a, out);
+            row_labels(b, out);
+        }
+        Type::Tuple(xs) | Type::Applied(_, xs) => {
+            for x in xs {
+                row_labels(x, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn remap(t: &Type, ids: &BTreeMap<u32, u32>) -> Type {
     map_type(
         t,
@@ -299,11 +330,15 @@ impl InferCtx {
         Self::default()
     }
     pub fn fresh(&mut self) -> Type {
-        Type::Var(self.fresh_id())
+        let id = self.fresh_id();
+        self.type_ids.insert(id);
+        Type::Var(id)
     }
     /// Abstract variable from an explicitly quantified signature.
     pub fn fresh_rigid(&mut self) -> Type {
-        let id = self.fresh_id();
+        let Type::Var(id) = self.fresh() else {
+            unreachable!()
+        };
         self.mark_rigid(id);
         Type::Var(id)
     }
@@ -340,7 +375,9 @@ impl InferCtx {
     }
 
     pub fn fresh_row(&mut self) -> u32 {
-        self.fresh_id()
+        let id = self.fresh_id();
+        self.row_ids.insert(id);
+        id
     }
     fn fresh_id(&mut self) -> u32 {
         let id = self.next;
@@ -391,32 +428,26 @@ impl InferCtx {
         self.check_pending()
     }
 
-    fn register(&mut self, t: &Type) -> R<()> {
+    fn register_kind(&mut self, id: u32, row: bool) -> R<()> {
+        let (same, other) = if row {
+            (&mut self.row_ids, &self.type_ids)
+        } else {
+            (&mut self.type_ids, &self.row_ids)
+        };
+        if other.contains(&id) {
+            return Err(format!("variable {id} cannot have both type and row kind"));
+        }
+        self.next = self.next.max(
+            id.checked_add(1)
+                .ok_or("type variable identifier space exhausted")?,
+        );
+        same.insert(id);
+        Ok(())
+    }
+
+    pub(crate) fn register(&mut self, t: &Type) -> R<()> {
         match t {
-            Type::Prim(_) | Type::Nominal(_) | Type::Never => return Ok(()),
-            Type::Var(id) if !self.types.contains_key(id) => {
-                // Public callers may construct Var IDs without calling fresh.
-                if *id >= self.next {
-                    self.next = id
-                        .checked_add(1)
-                        .ok_or("type variable identifier space exhausted")?;
-                }
-                return Ok(());
-            }
-            _ => {}
-        }
-        let mut vars = BTreeSet::new();
-        free(t, &mut vars);
-        if let Some(max) = vars.last() {
-            self.next = self.next.max(
-                max.checked_add(1)
-                    .ok_or("type variable identifier space exhausted")?,
-            );
-        }
-        if let Type::Record(row) = self.resolve(t) {
-            self.register_row(&row)?;
-        }
-        match t {
+            Type::Var(id) => self.register_kind(*id, false)?,
             Type::Seq(x) | Type::Optional(x) | Type::Action(x) | Type::Table(x) => {
                 self.register(x)?
             }
@@ -429,12 +460,31 @@ impl InferCtx {
                     self.register(t)?;
                 }
             }
-            Type::Record(r) => {
-                for (_, t) in &r.fields {
+            Type::Record(row) => {
+                if let Some(id) = row.tail {
+                    self.register_kind(id, true)?;
+                }
+                let resolved = self.resolve_row(row);
+                self.register_row(&resolved)?;
+                for (_, t) in &row.fields {
                     self.register(t)?;
                 }
             }
-            _ => {}
+            Type::Prim(_) | Type::Nominal(_) | Type::Never => {}
+        }
+        Ok(())
+    }
+    fn add_lacks(&mut self, id: u32, labels: BTreeSet<String>) -> R<()> {
+        self.register_kind(id, true)?;
+        let known = self.lacks.entry(id).or_default();
+        if self.rigid.contains(&id) {
+            if let Some(label) = labels.difference(known).next() {
+                return Err(format!(
+                    "rigid row tail 'r{id} is not known to lack field {label}"
+                ));
+            }
+        } else {
+            known.extend(labels);
         }
         Ok(())
     }
@@ -446,7 +496,7 @@ impl InferCtx {
             }
         }
         if let Some(id) = row.tail {
-            self.lacks.entry(id).or_default().extend(names);
+            self.add_lacks(id, names)?;
         }
         Ok(())
     }
@@ -531,7 +581,7 @@ impl InferCtx {
         }
         self.register_row(&row)?;
         if let Some(t) = row.tail {
-            self.lacks.entry(t).or_default().extend(banned);
+            self.add_lacks(t, banned)?;
         }
         self.rows.insert(id, row);
         Ok(())
@@ -771,10 +821,22 @@ impl InferCtx {
             .collect::<Vec<_>>();
         constraints.sort();
         constraints.dedup();
+        let mut row_lacks = BTreeMap::new();
+        row_labels(&ty, &mut row_lacks);
+        for c in &constraints {
+            row_labels(&c.ty, &mut row_lacks);
+        }
+        row_lacks.retain(|id, labels| {
+            if let Some(known) = self.lacks.get(id) {
+                labels.extend(known.iter().cloned());
+            }
+            vars.contains(id)
+        });
         Scheme {
             vars: vars.into_iter().collect(),
             ty,
             constraints,
+            row_lacks,
         }
     }
     /// Return a freshly renamed type and constraints for the caller to enforce.
@@ -791,10 +853,24 @@ impl InferCtx {
                     .expect("type variable identifier space exhausted"),
             );
         }
+        let mut rows = scheme.row_lacks.clone();
+        row_labels(&scheme.ty, &mut rows);
+        for c in &scheme.constraints {
+            row_labels(&c.ty, &mut rows);
+        }
         let ids = scheme
             .vars
             .iter()
-            .map(|&v| (v, self.fresh_id()))
+            .map(|&v| {
+                let id = self.fresh_id();
+                if let Some(labels) = rows.remove(&v) {
+                    self.row_ids.insert(id);
+                    self.lacks.insert(id, labels);
+                } else {
+                    self.type_ids.insert(id);
+                }
+                (v, id)
+            })
             .collect::<BTreeMap<_, _>>();
         let ty = remap(&scheme.ty, &ids);
         let constraints = scheme
@@ -1057,8 +1133,9 @@ mod tests {
     fn rigid_row_tails_can_be_used_but_not_closed_or_strengthened() {
         let mut cx = InferCtx::new();
         let skolem = cx.fresh_row();
-        cx.mark_rigid(skolem);
         let observed = row(&[("k", t(Prim::S)), ("v", t(Prim::Z))], Some(skolem));
+        cx.register(&observed).unwrap();
+        cx.mark_rigid(skolem);
         let flex = cx.fresh_row();
         let wanted = row(&[("k", t(Prim::S))], Some(flex));
         cx.unify(&observed, &wanted).unwrap();
@@ -1070,6 +1147,55 @@ mod tests {
             .contains("annotated row variable"));
         let extra = row(&[("new", t(Prim::Z))], Some(cx.fresh_row()));
         assert!(cx.unify(&observed, &extra).is_err());
+        let strengthened = row(&[("extra", t(Prim::Z))], Some(skolem));
+        assert!(cx
+            .register(&strengthened)
+            .unwrap_err()
+            .contains("not known to lack field extra"));
+    }
+
+    #[test]
+    fn rows_and_value_variables_cannot_reuse_an_identifier() {
+        for row_first in [false, true] {
+            let mut cx = InferCtx::new();
+            let ordinary = Type::Var(32);
+            let record = row(&[], Some(32));
+            let (first, other) = if row_first {
+                (&record, &ordinary)
+            } else {
+                (&ordinary, &record)
+            };
+            cx.register(first).unwrap();
+            assert!(cx
+                .register(other)
+                .unwrap_err()
+                .contains("both type and row kind"));
+        }
+    }
+
+    #[test]
+    fn a_scheme_replays_hidden_lacks_in_a_different_context() {
+        let mut declaration = InferCtx::new();
+        let id = declaration.fresh_row();
+        let hidden_requirement = row(&[("reserved", t(Prim::B))], Some(id));
+        declaration.register(&hidden_requirement).unwrap();
+        let visible = row(&[("value", t(Prim::Q))], Some(id));
+        let scheme = declaration.generalize(&visible, &[], &[]);
+        assert_eq!(
+            scheme.row_lacks[&id],
+            BTreeSet::from(["reserved".into(), "value".into()])
+        );
+
+        let mut uses = InferCtx::new();
+        let (bad, _) = uses.instantiate(&scheme);
+        let forbidden = row(&[("value", t(Prim::Q)), ("reserved", t(Prim::B))], None);
+        assert!(uses
+            .unify(&bad, &forbidden)
+            .unwrap_err()
+            .contains("duplicate row field reserved"));
+        let (good, _) = uses.instantiate(&scheme);
+        let allowed = row(&[("value", t(Prim::Q)), ("label", t(Prim::S))], None);
+        uses.unify(&good, &allowed).unwrap();
     }
 
     #[test]

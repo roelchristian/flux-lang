@@ -132,6 +132,7 @@ pub enum CoreOp {
     DropNa,
     Fill,
     PresentOnly,
+    StructuralRows,
 }
 
 /// Static shape execution plan for direct pointwise operations. Pairwise
@@ -829,6 +830,10 @@ impl Lower<'_> {
             .cloned()
             .ok_or_else(|| Boundary::missing(span, "inferred expression type"))?;
         let table_schema = self.table_schema(&ty);
+        // A checked structural result can defer its ordered layout until
+        // callable instantiation. An unknown row shape is still inadmissible.
+        let deferred = matches!(&ty, Type::Table(row)
+            if matches!(row.as_ref(), Type::Record(fields) if fields.tail.is_some()));
         if matches!(
             &kind,
             Call(
@@ -844,6 +849,7 @@ impl Lower<'_> {
                 _
             )
         ) && table_schema.is_none()
+            && !deferred
         {
             return Err(Boundary::unsupported(
                 span,

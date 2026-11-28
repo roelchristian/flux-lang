@@ -5,7 +5,7 @@ transformation and scripting. It uses strict prefix notation: `+ 2 3` means
 “add 2 and 3”. Formulas compose as functions, while file and terminal operations
 run only when explicitly requested.
 
-This repository contains the **Draft 0.10** reference interpreter in Rust.
+This repository contains the **Draft 0.11** reference interpreter in Rust.
 The language is still experimental.
 
 ## Quickstart
@@ -54,7 +54,7 @@ failure.
 | [Table joins](examples/tables/joins.flx) and [calibration audit](examples/applications/calibration/README.md) | Checked rows, missing measurements and exact comparisons |
 | [Source modules](examples/modules/transformations/demo.flx) and [typed results](examples/library/results.flx) | Reusable libraries and recoverable failures |
 
-The [example tour](examples/README.md) lists all 53 runnable examples, including
+The [example tour](examples/README.md) lists all 54 runnable examples, including
 concordance, meteorology, astronomy and demography. Start there for application
 commands, sample inputs and expected outputs.
 

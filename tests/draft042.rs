@@ -156,6 +156,7 @@ const TABLES: &[Case] = &[
         "[{k := 1; value := 2} {k := 1; value := 3}]",
     ),
     ("df.agg", ".count df.agg &.k &summ rows", "[2]"),
+    ("df.structural", ".value df.structural rows", "[2 3]"),
     ("df.extend", ".b df.extend .{ b := [8z 9z]; } rows", "[8 9]"),
 ];
 

@@ -1,6 +1,6 @@
 # Flux language reference
 
-This is the normative reference for the implemented Draft 0.10 language.
+This is the normative reference for the implemented Draft 0.11 language.
 Unless marked **Limited** or **Proposed**, the rules describe the behavior
 of the Rust reference interpreter. Limited features have the scope stated
 here. Proposed features are not available and do not reserve a design.
@@ -256,9 +256,7 @@ sequence.
 Projection can infer a structural requirement instead of fixing all
 fields: a function that projects `.value` can be used with structural
 records containing appropriately typed `value` fields and other fields.
-**Current limitation:** explicit open-row source annotations, general
-row-polymorphic table transformations, and replacing nominal type identity
-with structural compatibility are not provided. See the
+See the
 [tacit projection example](../examples/tacit/projection.flx).
 
 Tables are ordered homogeneous collections of record or tuple rows.
@@ -284,6 +282,40 @@ a separate multidimensional array type, rank and general broadcasting
 are proposed rather than implemented. See
 [functional collections](../examples/basics/collections.flx) and
 [descriptive statistics](../examples/statistics/descriptive.flx).
+
+### Open structural rows
+
+An annotation such as `.{ value:q; | 'r }` requires a rational field
+`value` and permits any other correctly typed fields. The suffix `'r`
+stands for the rest of the row, not a scalar type. A row variable can
+occur more than once in a signature; those occurrences describe the
+same remaining fields. Using the same spelling as a scalar type variable
+in that signature is an error. Open row annotations do not affect
+the syntax of record values.
+
+Use `#.{ value:q; | 'r }` for a table with that schema. A function
+returning the same table type preserves its extra columns. Use a second
+row variable for an independent table, such as the other operand to
+a keyed join. Static checks reject missing or conflicting required
+fields and do not automatically convert a nominal row into a structural
+row. Use `df.structural T` to explicitly view a named table as structural;
+the field names, order, types and values remain unchanged, even when
+there are no rows.
+
+A transformation can name a new field in the result while keeping the
+input tail, provided that the new name is absent from the tail. For
+example, a declaration can take `#.{ value:q; | 'r }` and return
+`#.{ value:q; squared:q; | 'r }`. An input with an existing `squared`
+column is rejected; this is an addition, not a silent overwrite.
+Type evidence travels through checked calls and module interfaces, and
+empty table results use that evidence rather than inspecting a row.
+
+Column-record reconstruction (`#: COLUMNS`) and the new-columns
+argument of `df.extend` require a closed schema: every column type must
+be known to be a sequence. Reconstruction from a checked sequence of
+rows can instead preserve an open row tail. Applying `df.structural`
+to an already structural named-field table is an identity.
+See the [open-row table specimen](../examples/tables/open-rows.flx).
 
 ### Sequence operators and reductions
 
@@ -578,5 +610,5 @@ digits or scale, then recovers explicitly from a duplicate `id` field.
 
 ## Proposed and unimplemented
 
-Explicit row constraints, distinct ranked arrays, a package registry,
+Distinct ranked arrays, a package registry,
 a columnar engine and native compilation are not provided.

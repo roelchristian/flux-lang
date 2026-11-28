@@ -119,10 +119,18 @@ fn function(args: impl DoubleEndedIterator<Item = Type>, out: Type) -> Type {
     args.rev().fold(out, |out, arg| f(arg, out))
 }
 fn mono(ty: Type) -> Scheme {
-    Scheme {
-        vars: vec![],
-        ty,
-        constraints: vec![],
+    Scheme::mono(ty)
+}
+// The empty open-record marker is used only in the annotation variable
+// map. Row variables never inhabit ordinary Type::Var positions.
+fn explicit_variable_id(t: &Type) -> Option<u32> {
+    match t {
+        Type::Var(id) => Some(*id),
+        Type::Record(Row {
+            fields,
+            tail: Some(id),
+        }) if fields.is_empty() => Some(*id),
+        _ => None,
     }
 }
 fn syntactic_value(e: &Expr) -> bool {
@@ -505,10 +513,41 @@ impl Engine<'_> {
                         .collect::<R<_>>()?,
                 )
             }
-            K::Variable(name) => vars
-                .entry(name.clone())
-                .or_insert_with(|| self.cx.fresh())
-                .clone(),
+            K::Variable(name) => {
+                let t = vars
+                    .entry(name.clone())
+                    .or_insert_with(|| self.cx.fresh())
+                    .clone();
+                if !matches!(t, Type::Var(_)) {
+                    return Err(self.err(format!("{name} is a row variable, not an ordinary type")));
+                }
+                t
+            }
+            K::OpenRecord(fs, name) => {
+                let marker = vars
+                    .entry(name.clone())
+                    .or_insert_with(|| {
+                        Type::Record(Row {
+                            fields: vec![],
+                            tail: Some(self.cx.fresh_row()),
+                        })
+                    })
+                    .clone();
+                let Type::Record(Row { tail: Some(id), .. }) = marker else {
+                    return Err(self.err(format!(
+                        "{name} is an ordinary type variable, not a row variable"
+                    )));
+                };
+                let ty = Type::Record(Row {
+                    fields: fs
+                        .iter()
+                        .map(|(n, t)| Ok((n.clone(), self.annotation(t, vars)?)))
+                        .collect::<R<_>>()?,
+                    tail: Some(id),
+                });
+                self.cx.register(&ty).map_err(|msg| self.err(msg))?;
+                ty
+            }
             K::Hole => self.cx.fresh(),
             K::Optional(t) => o(self.annotation(t, vars)?),
             K::Action(t) => a(self.annotation(t, vars)?),
@@ -1820,10 +1859,10 @@ impl Engine<'_> {
     fn selectable_row(&self, t: &Type) -> R<()> {
         match self.cx.resolve(t) {
             Type::Tuple(_) => Ok(()),
-            Type::Record(row) if row.tail.is_none() => Ok(()),
+            Type::Record(_) => Ok(()),
             Type::Nominal(id) if self.schemas.contains_key(&id) => Ok(()),
             x => Err(self.err(format!(
-                "df.select callback must return a closed record or tuple row, found {x}"
+                "df.select callback must return a record or tuple row, found {x}"
             ))),
         }
     }
@@ -2155,6 +2194,9 @@ impl Engine<'_> {
                 let mut out = self.row(&row)?;
                 let columns = self.expr(env, &args[0], None, effect)?;
                 let columns = self.row(&columns)?;
+                if columns.tail.is_some() {
+                    return Err(self.err("df.extend requires a closed record of new columns"));
+                }
                 if columns.fields.is_empty() {
                     return Err(self.err("df.extend requires at least one new column"));
                 }
@@ -2166,7 +2208,9 @@ impl Engine<'_> {
                     }
                     out.fields.push((n, self.seq_element(&t)?));
                 }
-                Type::Table(b(Type::Record(out)))
+                let ty = Type::Table(b(Type::Record(out)));
+                self.cx.register(&ty).map_err(|msg| self.err(msg))?;
+                ty
             }
             "#[" => {
                 let Expr::Array(rows) = &args[0] else {
@@ -2214,6 +2258,9 @@ impl Engine<'_> {
                     },
                     Type::Nominal(_) | Type::Record(_) => {
                         let cols = self.row(&src)?;
+                        if cols.tail.is_some() {
+                            return Err(self.err("#: column records must have a closed schema; use a sequence of rows for an open row"));
+                        }
                         if cols.fields.is_empty() {
                             return Err(self.err("#: requires at least one column"));
                         }
@@ -2440,6 +2487,12 @@ impl Engine<'_> {
         Ok(match n {
             "*=" | "*?" | "df.semi" | "df.anti" | "df.union" | "df.distinct" | "df.select"
             | "df.dropna" | "df.fill" | "df.present" => self.relational_types(n, xs, want)?,
+            "df.structural" => {
+                let Type::Table(row) = self.cx.resolve(&xs[0]) else {
+                    return Err(self.err("df.structural expects a table of named rows"));
+                };
+                Type::Table(b(Type::Record(self.row(&row)?)))
+            }
 
             "opt.map" | "opt.bind" => {
                 let (a0, b0) = (self.cx.fresh(), self.cx.fresh());
@@ -2770,6 +2823,9 @@ impl Engine<'_> {
                 };
                 let mut out = self.row(&row)?;
                 let columns = self.row(&xs[0])?;
+                if columns.tail.is_some() {
+                    return Err(self.err("df.extend requires a closed record of new columns"));
+                }
                 if columns.fields.is_empty() {
                     return Err(self.err("df.extend requires at least one new column"));
                 }
@@ -2781,7 +2837,9 @@ impl Engine<'_> {
                     }
                     out.fields.push((name, self.seq_element(&t)?));
                 }
-                Type::Table(b(Type::Record(out)))
+                let ty = Type::Table(b(Type::Record(out)));
+                self.cx.register(&ty).map_err(|msg| self.err(msg))?;
+                ty
             }
             "io.print" | "io.println" => a(result(p(Unit), Self::standard_type("ioerr"))),
             "io.read" | "io.exists" | "io.write" => {
@@ -2839,32 +2897,36 @@ impl Engine<'_> {
             }
             "#:" => {
                 let source = self.cx.resolve(&xs[0]);
-                let row =
-                    match source {
-                        Type::Seq(row)
-                            if matches!(
-                                row.as_ref(),
-                                Type::Record(_) | Type::Nominal(_) | Type::Tuple(_)
-                            ) =>
-                        {
-                            *row
+                let row = match source {
+                    Type::Seq(row)
+                        if matches!(
+                            row.as_ref(),
+                            Type::Record(_) | Type::Nominal(_) | Type::Tuple(_)
+                        ) =>
+                    {
+                        *row
+                    }
+                    Type::Record(_) | Type::Nominal(_) => {
+                        let cols = self.row(&source)?;
+                        if cols.tail.is_some() {
+                            return Err(self.err("#: column records must have a closed schema; use a sequence of rows for an open row"));
                         }
-                        Type::Record(_) | Type::Nominal(_) => {
-                            let cols = self.row(&source)?;
-                            if cols.fields.is_empty() {
-                                return Err(self.err("#: requires at least one column"));
-                            }
-                            let fields = cols
-                                .fields
-                                .into_iter()
-                                .map(|(name, t)| Ok((name, self.seq_element(&t)?)))
-                                .collect::<crate::infer::R<_>>()?;
-                            Type::Record(Row { fields, tail: None })
+                        if cols.fields.is_empty() {
+                            return Err(self.err("#: requires at least one column"));
                         }
-                        _ => return Err(self.err(
+                        let fields = cols
+                            .fields
+                            .into_iter()
+                            .map(|(name, t)| Ok((name, self.seq_element(&t)?)))
+                            .collect::<crate::infer::R<_>>()?;
+                        Type::Record(Row { fields, tail: None })
+                    }
+                    _ => {
+                        return Err(self.err(
                             "#: reference needs a known sequence of rows or record-of-columns type",
-                        )),
-                    };
+                        ))
+                    }
+                };
                 Type::Table(b(row))
             }
             ":#" => {
@@ -2943,13 +3005,7 @@ impl Engine<'_> {
         let ids = sig
             .explicit
             .values()
-            .filter_map(|t| {
-                if let Type::Var(id) = t {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
+            .filter_map(explicit_variable_id)
             .collect::<Vec<_>>();
         let outer_types = outer.values().cloned().collect::<Vec<_>>();
         if self.cx.rigid_escapes(&ids, &outer_types) {
@@ -3010,14 +3066,17 @@ impl Engine<'_> {
                         self.err(format!("constraint variable {v} is not in the signature"))
                     })?
                     .clone();
+                if !matches!(ty, Type::Var(_)) {
+                    return Err(self.err(format!(
+                        "class qualifier {c} expects an ordinary type variable; {v} has row kind"
+                    )));
+                }
                 sig.qualifiers.push(Constraint { class, ty });
             }
         }
-        for t in sig.explicit.values() {
-            if let Type::Var(id) = t {
-                self.cx.mark_rigid(*id);
-                self.explicit_variables.insert(*id);
-            }
+        for id in sig.explicit.values().filter_map(explicit_variable_id) {
+            self.cx.mark_rigid(id);
+            self.explicit_variables.insert(id);
         }
         for c in &sig.qualifiers {
             self.req(c.class, &c.ty)?;
