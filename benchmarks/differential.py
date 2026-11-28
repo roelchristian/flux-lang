@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run shared specimens against a Draft 0.3/0.4 oracle and the Draft 0.4.1 binary."""
+"""Compare shared specimens against either a legacy or a modern typed oracle."""
 import argparse
 from pathlib import Path
 import shutil
@@ -60,10 +60,22 @@ def main():
     cli.add_argument("oracle", type=Path)
     cli.add_argument("candidate", type=Path)
     cli.add_argument("--oracle-tree", type=Path, help="checkout with pre-0.4.1 examples")
+    cli.add_argument(
+        "--typed-oracle",
+        action="store_true",
+        help="run current fallible-I/O specimens through the oracle's typed backend",
+    )
     args = cli.parse_args()
+    if args.typed_oracle and args.oracle_tree is not None:
+        cli.error("--oracle-tree applies only to a legacy oracle")
     oracle, candidate = (p.resolve(strict=True) for p in (args.oracle, args.candidate))
     for name, source in [*((n, None) for n in EXAMPLES), *SPECIMENS.items()]:
-        expected = invoke(oracle, name, source, legacy=True, oracle_tree=args.oracle_tree)
+        expected = invoke(
+            oracle, name, source,
+            typed=args.typed_oracle,
+            legacy=not args.typed_oracle,
+            oracle_tree=args.oracle_tree,
+        )
         actual = invoke(candidate, name, source, typed=True)
         if expected != actual:
             print(f"{name}: oracle={expected!r}, candidate={actual!r}", file=sys.stderr)

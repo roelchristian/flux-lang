@@ -2425,6 +2425,17 @@ pub fn run_with_host(
     args: &[String],
     sink: &mut dyn Write,
 ) -> Result<Output, Error> {
+    crate::hir::validate(program)?;
+    run_with_host_prevalidated(program, input, stdin, args, sink)
+}
+
+pub(crate) fn run_with_host_prevalidated(
+    program: &HirProgram,
+    input: &mut dyn RuntimeInput,
+    stdin: &mut dyn BufRead,
+    args: &[String],
+    sink: &mut dyn Write,
+) -> Result<Output, Error> {
     let mut value = evaluate(program, input, stdin, args, sink).map_err(Control::into_error)?;
     let span = program
         .entry
@@ -2460,8 +2471,14 @@ pub fn run_with_output(program: &HirProgram, sink: &mut dyn Write) -> Result<Out
 }
 
 pub fn run(program: &HirProgram) -> Result<Output, Error> {
+    crate::hir::validate(program)?;
+    run_prevalidated(program)
+}
+
+pub(crate) fn run_prevalidated(program: &HirProgram) -> Result<Output, Error> {
     let mut sink = Vec::new();
-    let mut out = run_with_output(program, &mut sink)?;
+    let mut out =
+        run_with_host_prevalidated(program, &mut FsInput, &mut std::io::empty(), &[], &mut sink)?;
     out.stdout = String::from_utf8(sink)
         .map_err(|_| invariant(Span::default(), "output sink was not UTF-8").into_error())?;
     Ok(out)
@@ -2559,6 +2576,17 @@ pub fn view_with_host(
     args: &[String],
     sink: &mut dyn Write,
 ) -> Result<crate::eval::ReplOutput, Error> {
+    crate::hir::validate(program)?;
+    view_with_host_prevalidated(program, input, stdin, args, sink)
+}
+
+pub(crate) fn view_with_host_prevalidated(
+    program: &HirProgram,
+    input: &mut dyn RuntimeInput,
+    stdin: &mut dyn BufRead,
+    args: &[String],
+    sink: &mut dyn Write,
+) -> Result<crate::eval::ReplOutput, Error> {
     let value = evaluate(program, input, stdin, args, sink).map_err(Control::into_error)?;
     fn inspect(v: &V) -> String {
         match v {
@@ -2616,8 +2644,16 @@ pub fn view_with_output(
 }
 
 pub fn view_entry(program: &HirProgram) -> Result<crate::eval::ReplOutput, Error> {
+    crate::hir::validate(program)?;
+    view_entry_prevalidated(program)
+}
+
+pub(crate) fn view_entry_prevalidated(
+    program: &HirProgram,
+) -> Result<crate::eval::ReplOutput, Error> {
     let mut sink = Vec::new();
-    let mut out = view_with_output(program, &mut sink)?;
+    let mut out =
+        view_with_host_prevalidated(program, &mut FsInput, &mut std::io::empty(), &[], &mut sink)?;
     out.stdout = String::from_utf8(sink)
         .map_err(|_| invariant(Span::default(), "output sink was not UTF-8").into_error())?;
     Ok(out)

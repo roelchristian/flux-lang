@@ -1,4 +1,7 @@
-//! Typed, owned execution IR. Surface AST addresses are used only during lowering.
+//! Typed, owned execution IR retaining stable source syntax IDs.
+mod validate09;
+pub use validate09::validate;
+
 use crate::{
     infer::{InferResult, Operation},
     parser::{Expr, Program, RecoveryPattern as SyntaxPattern, Stmt},
@@ -179,6 +182,9 @@ pub enum TableSchema {
 }
 #[derive(Clone, Debug)]
 pub struct ExprNode {
+    /// Stable position in the source Program syntax index, independent of
+    /// the HIR arena's allocation or traversal.
+    pub source_id: crate::parser::SyntaxId,
     pub span: Span,
     pub ty: Type,
     pub table_schema: Option<Rc<TableSchema>>,
@@ -386,10 +392,32 @@ struct Lower<'a> {
     inference: &'a InferResult,
     resolution: &'a Resolution,
     arena: Vec<ExprNode>,
-    boundaries: HashMap<usize, BoundaryId>,
+    boundaries: HashMap<crate::parser::SyntaxId, BoundaryId>,
 }
 
 pub fn lower(
+    program: &Program,
+    inference: &InferResult,
+    resolution: &Resolution,
+) -> Result<HirProgram, Boundary> {
+    let incompatible =
+        || Boundary::missing(Span::at(0), "metadata belongs to a different syntax tree");
+    let compatible = resolution.for_program(program).ok_or_else(incompatible)?;
+    let resolution = compatible.as_ref();
+    let shape = inference.program_shape.as_ref().ok_or_else(incompatible)?;
+    if !resolution
+        .program_shape
+        .as_ref()
+        .is_some_and(|resolved| std::sync::Arc::ptr_eq(resolved, shape))
+        && !shape.matches(program)
+    {
+        return Err(incompatible());
+    }
+    lower_live(program, inference, resolution)
+}
+
+/// Used only by the compiler pipeline while holding the original AST borrow.
+pub(crate) fn lower_live(
     program: &Program,
     inference: &InferResult,
     resolution: &Resolution,
@@ -462,7 +490,11 @@ impl Lower<'_> {
     fn boundary(&mut self, e: &Expr, span: Span) -> Result<BoundaryId, Boundary> {
         let checked = self
             .inference
-            .boundary_of(e)
+            .boundary_at(
+                self.resolution
+                    .syntax_id(e)
+                    .ok_or_else(|| Boundary::missing(span, "syntax identity"))?,
+            )
             .ok_or_else(|| Boundary::missing(span, "checked caret boundary"))?;
         let next = BoundaryId(self.boundaries.len());
         Ok(*self.boundaries.entry(checked).or_insert(next))
@@ -701,9 +733,13 @@ impl Lower<'_> {
                     .collect::<Result<_, _>>()?,
             ),
         };
+        let source_id = self
+            .resolution
+            .syntax_id(e)
+            .ok_or_else(|| Boundary::missing(span, "syntax identity"))?;
         let ty = self
             .inference
-            .type_of(e)
+            .type_at(source_id)
             .cloned()
             .ok_or_else(|| Boundary::missing(span, "inferred expression type"))?;
         let table_schema = self.table_schema(&ty);
@@ -755,14 +791,15 @@ impl Lower<'_> {
         } else {
             None
         };
-        let evidence = self.inference.operation_of(e).cloned();
+        let evidence = self.inference.operation_at(source_id).cloned();
         let id = ExprId(self.arena.len());
         self.arena.push(ExprNode {
+            source_id,
             span,
             ty,
             table_schema,
             lift_mode,
-            callee_type: self.inference.callee_type(e).cloned(),
+            callee_type: self.inference.callee_type_at(source_id).cloned(),
             evidence,
             kind,
         });
