@@ -31,6 +31,28 @@ The combined `!^{ ... }` opener lowers to ordinary action/fallible HIR.
 Inference checks immediate unit action statements before elaboration
 inserts lexical propagation nodes at their original spans.
 
+## Source architecture
+
+Flux stays a single crate. The source directories describe ownership;
+the existing Rust module paths are retained by the crate façade.
+
+| Directory | Ownership |
+| --- | --- |
+| `compiler/syntax` | Tokens, AST and source identity, arity discovery, and parsing. |
+| `compiler/resolve`, `compiler/types`, `compiler/infer` | Lexical identities and dependency order; canonical types, schemes and unification; expression and declaration inference. |
+| `compiler/hir` | Public typed representation, source lowering, and admission checks. |
+| `core` | Primitive identities, lifting and numeric contracts, builtin catalogue, and standard error constructors. |
+| `runtime/engine`, `runtime/value` | Checked evaluation and host entry points; runtime values, comparison and structural keys. |
+| `runtime/array`, `runtime/numeric` | Dense storage and views, packed kernels, exact representations and numerical plans. |
+| `stdlib` | Implementations by domain. The evaluator owns dispatch and passes runtime values, callable services or narrow host I/O capabilities. |
+| `diagnostics`, `api`, `cli`, `tooling` | Source mapping and diagnostics, Rust entry points, command-line and REPL logic, and token-preserving tooling. |
+| `legacy` | Test/feature-gated historical oracle only; it is not an execution fallback. |
+
+The registry and checked-operation contracts do not depend on HIR lowering.
+The compiler supplies HIR evidence; the evaluator consumes it rather than
+inspecting source syntax. Array planner and kernel changes must preserve the
+same resource charges, evaluation order and diagnostics as generic execution.
+
 ## Machina execution
 
 Dense arrays use immutable shared buffers with logical shape, strides

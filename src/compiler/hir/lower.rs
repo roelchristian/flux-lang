@@ -1,0 +1,549 @@
+//! Lower resolved and inferred source into owned, typed HIR.
+use super::{
+    program::table_schema, BoundaryId, ConstructorDef, CoreOp, Definition, ExprId, ExprKind,
+    ExprNode, HirProgram, Literal, MatchArm, Pattern, PipelineStage, RecoveryArm, Span, Step,
+    TableSchema, Target, ValuePattern, ValuePatternKind,
+};
+use crate::{
+    infer::InferResult,
+    parser::{Expr, Program, RecoveryPattern as SyntaxPattern, Stmt},
+    resolve::Resolution,
+    types::Type,
+};
+use std::{collections::HashMap, fmt, rc::Rc};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BoundaryKind {
+    /// This language feature still runs outside the typed execution backend.
+    Unsupported,
+    /// The resolver/typechecker omitted evidence for AST the backend does cover.
+    MissingMetadata,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Boundary {
+    pub kind: BoundaryKind,
+    pub span: Span,
+    pub message: String,
+}
+impl fmt::Display for Boundary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            BoundaryKind::Unsupported => {
+                write!(f, "typed HIR migration boundary: {}", self.message)
+            }
+            BoundaryKind::MissingMetadata => {
+                write!(f, "typed HIR metadata error: {}", self.message)
+            }
+        }
+    }
+}
+impl std::error::Error for Boundary {}
+impl Boundary {
+    fn unsupported(span: Span, message: impl Into<String>) -> Self {
+        Self {
+            kind: BoundaryKind::Unsupported,
+            span,
+            message: message.into(),
+        }
+    }
+    fn missing(span: Span, message: impl Into<String>) -> Self {
+        Self {
+            kind: BoundaryKind::MissingMetadata,
+            span,
+            message: message.into(),
+        }
+    }
+    pub fn is_migration(&self) -> bool {
+        self.kind == BoundaryKind::Unsupported
+    }
+}
+
+fn csv_returns_table(ty: &Type) -> bool {
+    match ty {
+        Type::Fun(_, out) | Type::Action(out) | Type::Result(out, _) => csv_returns_table(out),
+        Type::Table(_) => true,
+        _ => false,
+    }
+}
+struct Lower<'a> {
+    inference: &'a InferResult,
+    resolution: &'a Resolution,
+    arena: Vec<ExprNode>,
+    boundaries: HashMap<crate::parser::SyntaxId, BoundaryId>,
+}
+
+pub fn lower(
+    program: &Program,
+    inference: &InferResult,
+    resolution: &Resolution,
+) -> Result<HirProgram, Boundary> {
+    let incompatible =
+        || Boundary::missing(Span::at(0), "metadata belongs to a different syntax tree");
+    let compatible = resolution.for_program(program).ok_or_else(incompatible)?;
+    let resolution = compatible.as_ref();
+    let shape = inference.program_shape.as_ref().ok_or_else(incompatible)?;
+    if !resolution
+        .program_shape
+        .as_ref()
+        .is_some_and(|resolved| std::sync::Arc::ptr_eq(resolved, shape))
+        && !shape.matches(program)
+    {
+        return Err(incompatible());
+    }
+    lower_live(program, inference, resolution)
+}
+
+/// Used only by the compiler pipeline while holding the original AST borrow.
+pub(crate) fn lower_live(
+    program: &Program,
+    inference: &InferResult,
+    resolution: &Resolution,
+) -> Result<HirProgram, Boundary> {
+    let mut lower = Lower {
+        inference,
+        resolution,
+        arena: Vec::new(),
+        boundaries: HashMap::new(),
+    };
+    let mut groups = Vec::new();
+    for group in &resolution.groups {
+        let mut definitions = Vec::new();
+        for &i in group {
+            let d = program.defs.get(i).ok_or_else(|| {
+                Boundary::missing(Span::at(0), "invalid top-level declaration index")
+            })?;
+            match d {
+                Stmt::Def { .. } => definitions.push(lower.definition(d)?),
+                Stmt::Schema { .. } | Stmt::Sum { .. } => {}
+                Stmt::Effect { start, .. } => {
+                    return Err(Boundary::unsupported(
+                        Span::at(*start),
+                        "top-level effect statement",
+                    ))
+                }
+            }
+        }
+        groups.push(definitions);
+    }
+    let entry = program
+        .entry
+        .as_ref()
+        .map(|e| lower.expr(e, Span::at(program.entry_start.unwrap_or(0))))
+        .transpose()?;
+    let constructors = inference
+        .constructors
+        .iter()
+        .map(|(&id, c)| {
+            let name = crate::visible_symbol(&resolution.symbol(id).name);
+            (
+                id,
+                ConstructorDef {
+                    owner: c.owner.clone(),
+                    id: c.id,
+                    name: Rc::from(name),
+                    payload: c.payload.clone(),
+                },
+            )
+        })
+        .collect();
+    Ok(HirProgram {
+        arena: lower.arena,
+        constructors,
+        nominal_schemas: inference
+            .schemas
+            .iter()
+            .map(|(id, row)| (id.clone(), Rc::new(TableSchema::Named(row.fields.clone()))))
+            .collect(),
+        standard_constructors: resolution
+            .standard_constructors()
+            .map(|(owner, name, id)| ((owner.to_owned(), name.to_owned()), id))
+            .collect(),
+        groups,
+        entry,
+    })
+}
+
+impl Lower<'_> {
+    fn boundary(&mut self, e: &Expr, span: Span) -> Result<BoundaryId, Boundary> {
+        let checked = self
+            .inference
+            .boundary_at(
+                self.resolution
+                    .syntax_id(e)
+                    .ok_or_else(|| Boundary::missing(span, "syntax identity"))?,
+            )
+            .ok_or_else(|| Boundary::missing(span, "checked caret boundary"))?;
+        let next = BoundaryId(self.boundaries.len());
+        Ok(*self.boundaries.entry(checked).or_insert(next))
+    }
+    fn steps(&mut self, stmts: &[Stmt]) -> Result<Vec<Step>, Boundary> {
+        let mut steps = Vec::new();
+        for s in stmts {
+            match s {
+                Stmt::Def { .. } => steps.push(Step::Define(self.definition(s)?)),
+                Stmt::Effect { name, body, start } => {
+                    let span = Span::at(*start);
+                    let binding = if name.is_some() {
+                        Some(
+                            self.resolution
+                                .declaration(s)
+                                .ok_or_else(|| Boundary::missing(span, "effect binding symbol"))?,
+                        )
+                    } else {
+                        None
+                    };
+                    steps.push(Step::Evaluate {
+                        binding,
+                        body: self.expr(body, span)?,
+                    });
+                }
+                Stmt::Schema { .. } | Stmt::Sum { .. } => {}
+            }
+        }
+        Ok(steps)
+    }
+    fn table_schema(&self, ty: &Type) -> Option<Rc<TableSchema>> {
+        table_schema(ty, |id| {
+            let row = self.inference.nominal_schema(id)?;
+            Some(Rc::new(TableSchema::Named(row.fields.clone())))
+        })
+    }
+    fn definition(&mut self, d: &Stmt) -> Result<Definition, Boundary> {
+        let Stmt::Def { body, start, .. } = d else {
+            unreachable!()
+        };
+        let span = Span::at(*start);
+        let symbol = self
+            .resolution
+            .declaration(d)
+            .ok_or_else(|| Boundary::missing(span, "definition symbol"))?;
+        let scheme = self
+            .inference
+            .binding_type(symbol)
+            .cloned()
+            .ok_or_else(|| Boundary::missing(span, "definition type scheme"))?;
+        let formals = self.resolution.parameters(d).to_vec();
+        Ok(Definition {
+            symbol,
+            span,
+            scheme,
+            formals,
+            body: self.expr(body, span)?,
+        })
+    }
+    fn value_pattern(&self, p: &crate::parser::MatchPattern) -> Result<ValuePattern, Boundary> {
+        use crate::parser::MatchPatternKind as S;
+        use ValuePatternKind as V;
+        let span = Span::new(p.span.start, p.span.end);
+        let descend = |parts: &[crate::parser::MatchPattern]| {
+            parts
+                .iter()
+                .map(|p| self.value_pattern(p))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let kind = match &p.kind {
+            S::Wildcard => V::Wildcard,
+            S::Bind(_) => V::Bind(
+                self.resolution
+                    .match_binding(p)
+                    .ok_or_else(|| Boundary::missing(span, "match binder identity"))?,
+            ),
+            S::Constructor(_, fields) => V::Constructor(
+                self.resolution
+                    .match_constructor(p)
+                    .ok_or_else(|| Boundary::missing(span, "match constructor identity"))?,
+                descend(fields)?,
+            ),
+            S::Tuple(parts) => V::Tuple(descend(parts)?),
+            S::Record(parts) => V::Record(
+                parts
+                    .iter()
+                    .map(|(name, part)| Ok((name.as_str().into(), self.value_pattern(part)?)))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            S::Optional(payload) => V::Optional(
+                payload
+                    .as_deref()
+                    .map(|p| self.value_pattern(p).map(Box::new))
+                    .transpose()?,
+            ),
+            S::Bool(value) => V::Bool(*value),
+            S::Unit => V::Unit,
+        };
+        Ok(ValuePattern { span, kind })
+    }
+    fn target(&self, e: &Expr, name: &str, span: Span) -> Result<Target, Boundary> {
+        if let Some(id) = self.resolution.reference(e) {
+            if self.inference.constructor(id).is_some() {
+                return Ok(Target::Constructor(id));
+            }
+            if !matches!(
+                self.resolution.symbol(id).kind,
+                crate::resolve::SymbolKind::External
+            ) {
+                return Ok(Target::Symbol(id));
+            }
+        }
+        if let Some(field) = name
+            .strip_prefix('.')
+            .filter(|f| !f.is_empty() && *f != ":" && *f != ".")
+        {
+            return Ok(Target::Projection(field.into()));
+        }
+        crate::builtins::lookup(name)
+            .and_then(|builtin| builtin.op)
+            .map(Target::Builtin)
+            .ok_or_else(|| {
+                Boundary::unsupported(span, format!("builtin or library operation `{name}`"))
+            })
+    }
+    fn list(&mut self, es: &[Expr], span: Span) -> Result<Vec<ExprId>, Boundary> {
+        es.iter().map(|e| self.expr(e, span)).collect()
+    }
+    fn expr(&mut self, e: &Expr, span: Span) -> Result<ExprId, Boundary> {
+        let span = self
+            .resolution
+            .span(e)
+            .map(|r| Span::new(r.start, r.end))
+            .or_else(|| self.resolution.offset(e).map(Span::at))
+            .unwrap_or(span);
+        use ExprKind::*;
+        let kind = match e {
+            Expr::Int(n) => Literal(self::Literal::Integer(*n)),
+            Expr::Num(n) => Literal(self::Literal::Numeric(n.as_str().into())),
+            Expr::Bool(b) => Literal(self::Literal::Bool(*b)),
+            Expr::Str(s) => Literal(self::Literal::String(s.as_str().into())),
+            Expr::Char(c) => Literal(self::Literal::Char(*c)),
+            Expr::Unit => Literal(self::Literal::Unit),
+            Expr::Name(s) if s == "?0" => Call(Target::Builtin(CoreOp::Absent), Vec::new()),
+            Expr::Name(_) => {
+                let id = self
+                    .resolution
+                    .reference(e)
+                    .ok_or_else(|| Boundary::missing(span, "value reference"))?;
+                if self.inference.constructor(id).is_some() {
+                    Call(Target::Constructor(id), Vec::new())
+                } else {
+                    Load(id)
+                }
+            }
+            Expr::Ref(s) => {
+                let target = self.target(e, s, span)?;
+                if matches!(
+                    target,
+                    Target::Builtin(
+                        CoreOp::Apply | CoreOp::ApplyTuple | CoreOp::Execute | CoreOp::Default
+                    )
+                ) {
+                    return Err(Boundary::unsupported(
+                        span,
+                        format!("first-class reference to special syntax `{s}`"),
+                    ));
+                }
+                Reference(target)
+            }
+            Expr::Call(s, a) => Call(self.target(e, s, span)?, self.list(a, span)?),
+            Expr::Tuple(es) => Tuple(self.list(es, span)?),
+            Expr::Array(es) => Sequence(self.list(es, span)?),
+            Expr::Cases(branches, otherwise) => {
+                let branches = branches
+                    .iter()
+                    .map(|(a, b)| Ok((self.expr(a, span)?, self.expr(b, span)?)))
+                    .collect::<Result<_, _>>()?;
+                Cases {
+                    branches,
+                    otherwise: self.expr(otherwise, span)?,
+                }
+            }
+            Expr::Lambda(formals, body) | Expr::TypedLambda(formals, _, body) => {
+                let ids = self.resolution.lambda_parameters(e).to_vec();
+                if formals.len() != ids.len() {
+                    return Err(Boundary::missing(span, "lambda parameter symbols"));
+                }
+                Closure {
+                    formals: ids,
+                    body: self.expr(body, span)?,
+                }
+            }
+            Expr::Pipeline(es) => {
+                let mut stages = Vec::new();
+                for (i, x) in es.iter().enumerate() {
+                    let input = if i == 0 {
+                        None
+                    } else {
+                        Some(
+                            self.resolution
+                                .placeholder(x)
+                                .ok_or_else(|| Boundary::missing(span, "pipeline stage symbol"))?,
+                        )
+                    };
+                    stages.push(PipelineStage {
+                        input,
+                        expr: self.expr(x, span)?,
+                    });
+                }
+                Pipeline(stages)
+            }
+            Expr::Block(stmts, tail) | Expr::Action(stmts, tail) => Block {
+                steps: self.steps(stmts)?,
+                tail: tail.as_deref().map(|v| self.expr(v, span)).transpose()?,
+                suspended: matches!(e, Expr::Action(..)),
+            },
+            Expr::Fallible(stmts, tail) | Expr::FallibleActionBody(stmts, tail) => Fallible {
+                boundary: self.boundary(e, span)?,
+                steps: self.steps(stmts)?,
+                tail: tail.as_deref().map(|v| self.expr(v, span)).transpose()?,
+            },
+            Expr::Raise(payload) => Raise {
+                boundary: self.boundary(e, span)?,
+                payload: self.expr(payload, span)?,
+            },
+            Expr::Propagate(result) => Propagate {
+                boundary: self.boundary(e, span)?,
+                result: self.expr(result, span)?,
+            },
+            Expr::AutoPropagate(value) => {
+                let id = self
+                    .resolution
+                    .syntax_id(e)
+                    .ok_or_else(|| Boundary::missing(span, "syntax identity"))?;
+                if self.inference.boundary_at(id).is_some() {
+                    Propagate {
+                        boundary: self.boundary(e, span)?,
+                        result: self.expr(value, span)?,
+                    }
+                } else {
+                    Block {
+                        steps: Vec::new(),
+                        tail: Some(self.expr(value, span)?),
+                        suspended: false,
+                    }
+                }
+            }
+            Expr::Match(value, cases) => {
+                let value = self.expr(value, span)?;
+                let arms = cases
+                    .iter()
+                    .map(|case| {
+                        let pattern = self.value_pattern(&case.pattern)?;
+                        let span = pattern.span;
+                        Ok(MatchArm {
+                            pattern,
+                            body: self.expr(&case.body, span)?,
+                            span,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Boundary>>()?;
+                Match { value, arms }
+            }
+            Expr::Recover(result, cases) => {
+                let result = self.expr(result, span)?;
+                let mut arms = Vec::new();
+                for case in cases {
+                    let span = Span::at(case.start);
+                    let mut ids = self.resolution.recovery_bindings(case).iter().copied();
+                    let missing = || Boundary::missing(span, "recovery binder");
+                    let pattern = match &case.pattern {
+                        SyntaxPattern::Wildcard => Pattern::Wildcard,
+                        SyntaxPattern::Bind(_) => Pattern::Bind(ids.next().ok_or_else(missing)?),
+                        SyntaxPattern::Constructor(_, names) => {
+                            let id =
+                                self.resolution.recovery_constructor(case).ok_or_else(|| {
+                                    Boundary::missing(span, "recovery constructor identity")
+                                })?;
+                            let mut fields = Vec::new();
+                            for n in names {
+                                fields.push(if n == "_" {
+                                    None
+                                } else {
+                                    Some(ids.next().ok_or_else(missing)?)
+                                });
+                            }
+                            Pattern::Constructor { id, fields }
+                        }
+                    };
+                    if ids.next().is_some() {
+                        return Err(Boundary::missing(span, "surplus recovery binder"));
+                    }
+                    arms.push(RecoveryArm {
+                        pattern,
+                        body: self.expr(&case.body, span)?,
+                        span,
+                    });
+                }
+                Recover { result, arms }
+            }
+            Expr::Record(fields) | Expr::NamedRecord(_, fields) => Record(
+                fields
+                    .iter()
+                    .map(|(k, v)| Ok((k.as_str().into(), self.expr(v, span)?)))
+                    .collect::<Result<_, _>>()?,
+            ),
+        };
+        let source_id = self
+            .resolution
+            .syntax_id(e)
+            .ok_or_else(|| Boundary::missing(span, "syntax identity"))?;
+        let ty = self
+            .inference
+            .type_at(source_id)
+            .cloned()
+            .ok_or_else(|| Boundary::missing(span, "inferred expression type"))?;
+        let table_schema = self.table_schema(&ty);
+        // A checked structural result can defer its ordered layout until
+        // callable instantiation. An unknown row shape is still inadmissible.
+        let deferred = matches!(&ty, Type::Table(row)
+            if matches!(row.as_ref(), Type::Record(fields) if fields.tail.is_some()));
+        if matches!(
+            &kind,
+            Call(
+                Target::Builtin(
+                    CoreOp::TableRows
+                        | CoreOp::TableFrom
+                        | CoreOp::Aggregate
+                        | CoreOp::Extend
+                        | CoreOp::InnerJoin
+                        | CoreOp::LeftJoin
+                        | CoreOp::TableSelect
+                ),
+                _
+            )
+        ) && table_schema.is_none()
+            && !deferred
+        {
+            return Err(Boundary::unsupported(
+                span,
+                "open table result schema does not have execution layout",
+            ));
+        }
+        if matches!(
+            &kind,
+            Call(Target::Builtin(CoreOp::CsvRead), _) | Reference(Target::Builtin(CoreOp::CsvRead))
+        ) && csv_returns_table(&ty)
+            && table_schema.is_none()
+        {
+            return Err(Boundary::unsupported(
+                span,
+                "typed CSV read requires a closed row schema",
+            ));
+        }
+        let lift_mode = match &kind {
+            Call(Target::Builtin(op), args) => super::lift_for_call(*op, args, &self.arena, &ty)
+                .map_err(|reason| Boundary::missing(span, reason))?,
+            _ => None,
+        };
+        let evidence = self.inference.operation_at(source_id).cloned();
+        let id = ExprId(self.arena.len());
+        self.arena.push(ExprNode {
+            source_id,
+            span,
+            ty,
+            table_schema,
+            lift_mode,
+            callee_type: self.inference.callee_type_at(source_id).cloned(),
+            evidence,
+            kind,
+        });
+        Ok(id)
+    }
+}

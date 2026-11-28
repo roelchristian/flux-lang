@@ -2,7 +2,7 @@
 
 Flux is a statically typed, array-oriented language for exact arithmetic,
 data transformation and scripting. It uses strict prefix notation: `+ 2 3`
-adds 2 and 3. This is the experimental **Draft 0.19** reference interpreter.
+adds 2 and 3. This is the experimental **Draft 0.20** reference interpreter.
 The Machina runtime uses checked dense-array storage and host-controlled
 [execution budgets](docs/implementation.md#runtime-policy).
 
@@ -43,6 +43,6 @@ action, and the combined block propagates a failed unit action.
 - [Example tour](examples/README.md): start with expressions, then explore
   exact numerics, typed tables and runnable science applications.
 - [Language reference](docs/specification.md): the normative description.
-- [Implementation and verification](docs/implementation.md): Rust pipeline,
+- [Implementation and verification](docs/implementation.md): Rust source map, pipeline,
   test commands and benchmarks.
 - [Changelog](CHANGELOG.md): notable changes; older specifications live in Git.
