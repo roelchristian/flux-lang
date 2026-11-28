@@ -8,6 +8,38 @@ pub struct Token {
     pub end: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Delimiter {
+    Brace,
+    Bracket,
+    Paren,
+}
+
+impl Delimiter {
+    pub(crate) fn opening(text: &str) -> Option<Self> {
+        match text {
+            "{" | "!{" | "#{" | "{." | "?{" | ".{" | "|{" | "^{" | "&{" => Some(Self::Brace),
+            "[" | "#[" => Some(Self::Bracket),
+            "(" => Some(Self::Paren),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn closing(text: &str) -> Option<Self> {
+        match text {
+            "}" => Some(Self::Brace),
+            "]" => Some(Self::Bracket),
+            ")" => Some(Self::Paren),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn is_ident(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    bytes.next().is_some_and(ident_start) && bytes.all(ident_continue)
+}
+
 // Candidate lists are longest-first within each first byte. This avoids
 // testing unrelated punctuation at every symbolic token.
 fn symbol_at(bytes: &[u8]) -> Option<&'static str> {
@@ -95,13 +127,17 @@ fn take_while(bytes: &[u8], mut i: usize, pred: impl Fn(u8) -> bool) -> usize {
     i
 }
 
-fn escape_end(bytes: &[u8], start: usize) -> Result<usize, Error> {
+fn escape(bytes: &[u8], start: usize) -> Result<(usize, char), Error> {
     let code = bytes
         .get(start + 1)
         .copied()
         .ok_or_else(|| Error::new(start, "unterminated escape"))?;
     match code {
-        b'\\' | b'"' | b'\'' | b'n' | b'r' | b't' | b'0' => Ok(start + 2),
+        b'\\' | b'"' | b'\'' => Ok((start + 2, code as char)),
+        b'n' => Ok((start + 2, '\n')),
+        b'r' => Ok((start + 2, '\r')),
+        b't' => Ok((start + 2, '\t')),
+        b'0' => Ok((start + 2, '\0')),
         b'u' if bytes.get(start + 2) == Some(&b'{') => {
             let hex_start = start + 3;
             let i = take_while(bytes, hex_start, |b| b.is_ascii_hexdigit());
@@ -115,10 +151,9 @@ fn escape_end(bytes: &[u8], start: usize) -> Result<usize, Error> {
                     .and_then(|n| n.checked_add((digit as char).to_digit(16).unwrap()))
                     .ok_or_else(|| Error::new(start, "Unicode escape does not encode a scalar"))?;
             }
-            if char::from_u32(scalar).is_none() {
-                return Err(Error::new(start, "Unicode escape does not encode a scalar"));
-            }
-            Ok(i + 1)
+            char::from_u32(scalar)
+                .map(|c| (i + 1, c))
+                .ok_or_else(|| Error::new(start, "Unicode escape does not encode a scalar"))
         }
         _ => Err(Error::new(start, "unknown escape")),
     }
@@ -141,13 +176,33 @@ fn literal_end(bytes: &[u8], start: usize, quote: u8) -> Result<usize, Error> {
             return Err(Error::new(i, "unescaped control character in literal"));
         }
         i = if b == b'\\' {
-            escape_end(bytes, i)?
+            escape(bytes, i)?.0
         } else {
             i + 1
         };
         count += 1;
     }
     Err(Error::new(start, "unterminated literal"))
+}
+
+// The lexer has already validated the ASCII spelling and character count.
+// Decode only after parsing establishes that this token is a literal.
+pub(crate) fn decode_literal(token: &Token) -> Result<String, Error> {
+    let bytes = &token.text.as_bytes()[1..token.text.len() - 1];
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        if b == b'\\' {
+            let (next, c) = escape(bytes, i)
+                .map_err(|err| Error::new(token.start + 1 + err.start, err.message))?;
+            out.push(c);
+            i = next;
+        } else {
+            out.push(b as char);
+            i += 1;
+        }
+    }
+    Ok(out)
 }
 
 fn numeral_end(bytes: &[u8], start: usize) -> Result<usize, Error> {
@@ -231,12 +286,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
                                 &source[start + 1..end]
                             ),
                         ));
-                    } else {
-                        literal_end(bytes, i, b'\'')?
                     }
-                } else {
-                    literal_end(bytes, i, b'\'')?
                 }
+                literal_end(bytes, i, b'\'')?
             }
             b'0'..=b'9' => numeral_end(bytes, i)?,
             b'-' if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) => numeral_end(bytes, i)?,

@@ -1,21 +1,25 @@
 # Flux language reference
 
-This is the normative reference for the implemented Draft 0.14 language.
-Unless marked **Limited** or **Proposed**, the rules describe the behavior
-of the Rust reference interpreter. Limited features have the scope stated
-here. Proposed features are not available and do not reserve a design.
-For recent changes, read the [changelog](../CHANGELOG.md); for compiler
-structure and validation, read the [implementation guide](implementation.md).
-
-The linked runnable programs are part of [the checked example corpus](../examples/README.md).
-The fragments in tables and grammar blocks illustrate individual rules;
-they are not complete programs.
+This is the normative reference for Draft 0.14. **Limited** features
+work only as stated; **Proposed** features are unavailable and do not
+reserve a design. See the [example corpus](../examples/README.md) for
+complete programs, the [implementation guide](implementation.md) for Rust
+internals, and the [changelog](../CHANGELOG.md) for revisions.
 
 ## Source, grammar and layout
 
-Flux source is ASCII. An identifier matches `[a-z][a-z0-9_]*`; `_` is a separate wildcard. Qualified names such as `csv.read` and selectors such as `.reading` and `.1` are distinct tokens. The lexer takes the longest applicable token. Keep compound punctuation together, and use whitespace where adjacent characters would change the token: `-2z` is a literal, whereas `- 2z 1z` is a call. Double quotes enclose strings and single quotes enclose a single character; escapes include `\n`, `\t`, and `\u{HEX}` for a Unicode scalar. The Boolean literals are `0b` and `1b`. A named type variable uses an adjacent tilde and identifier, such as `~a`. Neither `~ a` nor a digit-prefixed name is valid in a type. Unescaped control characters are not allowed in literals. Outside literals, `--` begins a line comment; a standalone `---` line is also a documentation convention. Comments have no runtime effect.
+Flux source is ASCII. Identifiers match `[a-z][a-z0-9_]*`; `_` is a
+wildcard. Qualified names (`csv.read`) and selectors (`.reading`, `.1`)
+are distinct tokens. Longest applicable token wins: `-2z` is a literal,
+`- 2z 1z` is a call. Double quotes delimit strings, single quotes
+characters. Escapes include `\n`, `\t` and `\u{HEX}` (a Unicode scalar);
+unescaped controls are forbidden. Booleans are `0b` and `1b`.
+Outside literals `--` starts a line comment. Standalone `---` lines are
+a documentation convention. Comments have no runtime effect.
 
-The following grammar is schematic: `TYPE` is the type grammar below, and a direct call takes exactly the operands declared by its lexical binding. Curly braces in the grammar's quoted terminals are source characters; unquoted braces mean repetition.
+In this schematic grammar, `TYPE` refers to [types](#types-and-inference),
+unquoted braces denote repetition, and a prefix call takes exactly
+the operands declared by its lexical binding.
 
 ```text
 file        = { import | export | declaration } [ action ";" ] ;
@@ -23,7 +27,8 @@ declaration = name [ "(" parameters ")" ] [ ":" TYPE ] [ qualifiers ]
               ":=" expression ";"
             | name "/" arity [ ":" TYPE ] [ qualifiers ] ":=" expression ";"
             | name "::" "{" { field ":" TYPE ";" } "}" ";"
-            | name "::" "{" variant { variant } "}" ";" ;
+            | name [ "[" type-parameters "]" ] "::"
+              "{" variant { variant } "}" ";" ;
 variant     = "|" name { payload-type } ";" ;
 block       = "{" { declaration } expression "}" ;
 action      = "!{" { declaration | expression ";" } [ expression ] "}" ;
@@ -32,61 +37,83 @@ parameters  = parameter { "," parameter } ;
 parameter   = name [ ":" TYPE ] ;
 ```
 
-An import, export, or declaration cannot follow the final anonymous entry action. There is no special `main` name. A library has no entry. Types and values have distinct namespaces. Consecutive parameter names can share the type written on the last name of their group: `add(x, y: z): z`. A parameter list can omit all types; giving the result type of a named function requires its parameter types as well. Signature qualifiers belong to complete named-function signatures. See the [function examples](../examples/basics/functions.flx) and [geometry module](../examples/modules/geometry/demo.flx).
+An optional final anonymous action is the script entry. Libraries have
+no entry; no name, including `main`, is special. Type and value
+namespaces are distinct. Named parameters may share a type as in
+`add(x, y: z): z`, or all omit types. With a declared result, all named
+parameters need types. Qualifiers belong to complete callable signatures.
 
-Indentation and line endings are not statement terminators. Four spaces per structural level, vertical operands for substantial prefix expressions, and aligned related guard/field margins are the layout convention; explicit delimiters and semicolons still determine structure. `flux fmt FILE` writes formatted source to stdout without editing the file; `flux fmt --check FILE` is quiet for canonical source and reports noncanonical or invalid input. The formatter is idempotent and preserves the token sequence, explicit parentheses, literals, and comment wording; it may change spacing and remove trailing horizontal whitespace. It formats only the requested source file, not its imported files. See the [formatted pipeline](../examples/basics/pipeline.flx).
+Indentation and newlines do not determine structure; delimiters and
+semicolons do. Prefer four spaces per level, vertical operands for long
+expressions and aligned guards and fields. `flux fmt FILE` prints one
+file without editing it or its imports; `flux fmt --check FILE` reports
+noncanonical or invalid input and is quiet on success. Formatting is
+idempotent and preserves tokens, parentheses, literals and comment wording,
+but may change spacing and strip trailing horizontal whitespace.
 
 ## Expressions and evaluation
 
-Expressions include literals, values, strict prefix calls, pattern matching, function references and lambdas, tuples and sequences, record and table construction, grouping, guarded cases, blocks, pipelines, and the effect and typed-failure forms described below. There is no infix fallback. Parentheses around one expression group it; `()` is unit; `(a, b)` is a tuple with two or more fields, and `[a b]` is an ordered sequence with no commas. Named records use `schema { field := value; }`; structural records use `.{ field := value; }`. Both require unique field names. Use `.field value` for named projection, or `.1 pair` for the first positional field. `:=` defines an immutable binding; it is not equality or assignment to an existing cell.
+Calls are strictly prefix, without infix fallback. Parentheses group
+one expression, `()` is unit, `(a, b)` is a tuple of at least two elements, and `[a b]` is an
+ordered sequence without commas. `:=` defines an immutable binding.
 
-Ordinary evaluation is strict and evaluates operands from left to right. The conditional `? CONDITION YES NO` selects one branch. In `?{ CONDITION : VALUE; ... _ : DEFAULT; }`, guards are tested in order, only the chosen value is evaluated, and the final default is required. Boolean `&&` and `||` are ordinary strict operations, not short-circuit control flow. Optional fallback `?? FALLBACK OPTIONAL` checks the optional first and evaluates the fallback only on absence. Typed recovery evaluates an arm only on the matching failure. See [guards](../examples/basics/guards.flx) and [optionals](../examples/library/optionals.flx).
+Operands evaluate left to right. Exceptions are control forms:
+`? CONDITION YES NO` evaluates only the selected branch;
+`?{ CONDITION : VALUE; ... _ : DEFAULT; }` tests guards in order,
+evaluates only the chosen value and requires a final default.
+Boolean `&&` and `||` are strict. `?? FALLBACK OPTIONAL` evaluates the
+optional first and its fallback only on absence.
 
-A pure block `{ ... }` contains local declarations and a required final expression; use `()` for a unit result. A pipeline `|{ SOURCE; STAGE; ... FINAL }` evaluates its source once, then evaluates each later stage in order. Within a stage, each `$` refers to the same preceding value. The pipeline itself does not bind `$` in its source expression. It needs at least one stage after the source, and the final expression has no trailing semicolon. The pipeline returns that final value. It is immediate evaluation, not a way to define a reusable function. See [pipelines](../examples/basics/pipeline.flx).
+A pure block `{ ... }` contains declarations and a required final
+expression. A pipeline `|{ SOURCE; STAGE; ... FINAL }` evaluates SOURCE
+once, then at least one stage. In each stage, every `$` refers to the
+previous value; the pipeline does not bind it in SOURCE. The last stage
+has no semicolon and supplies the result. See [pipelines](../examples/basics/pipeline.flx).
 
 ## Named and first-class functions
 
-A named callable such as `add(x, y: z): z := + x y;` consumes two expressions when written as `add 2z 3z`. The parser determines call arity before type inference. Named callable headers are visible throughout their lexical scope, allowing forward calls and checked recursion; values held in ordinary bindings are not implicitly called. Local value initialization is sequential: an eagerly evaluated expression cannot read a later, uninitialized local value. A parameter or local name can shadow an outer name, and the visible binding determines whether the token is a callable or a value.
+A named callable `add(x, y: z): z := + x y;` consumes two operands in
+`add 2z 3z`. The parser knows arity before inferring types. Headers are
+visible throughout their lexical scope, allowing forward calls and checked
+recursion. Local value initialization is sequential; eager expressions
+cannot read uninitialized locals. Parameters and local names may shadow
+outer bindings, including their callable status.
 
-`&add` obtains the curried function value of a referenceable callable. Builtin operators and selectors can also be referenceable, for example `&+` and `&.reading`; not all special forms can be referenced. Write a lambda as `\x -> EXPR` or `\(x: z, y: z) -> EXPR`; explicit action construction, not a lambda alone, is needed to suspend effects.
+`&add` obtains the curried value of a referenceable callable. Operators
+and selectors such as `&+` and `&.reading` may be referenced; some special
+forms cannot. Lambdas use `\x -> EXPR` or `\(x: z, y: z) -> EXPR`.
 
-- `@ F X` applies a function value to one argument. If `X` is a tuple it stays one argument.
-- `@@ F ARGS` spreads a tuple value into successive unary applications. It evaluates `F` and then the tuple once before applying its fields in order. It requires a tuple, not unit. Supplying fewer arguments than the curried function accepts leaves a function.
-- `@: F XS` maps explicitly over a supported collection. A user-defined function does not automatically lift over a sequence or table.
+- `@ F X` supplies one argument, even if X is a tuple. Ordinary
+  function-valued bindings require explicit application.
+- `@@ F ARGS` evaluates F and then a tuple (not unit) once, then applies
+  its fields in order. Supplying fewer arguments leaves a curried function.
+- `@: F XS` explicitly maps over a supported collection. User functions
+  do not automatically lift over sequences or tables.
 
-See [functions and inference](../examples/basics/functions.flx) and [explicit mapping](../examples/basics/collections.flx).
+See [functions and inference](../examples/basics/functions.flx).
 
 ### Declared arity without named parameters
 
-`name/N := EXPR;` declares an ordinary named callable with exactly N
-syntactic operands. The name, slash and unsuffixed decimal integer must
-be adjacent. The count must be positive, and is currently limited to 64
-before the compiler generates applications. The slash here belongs to the header;
-elsewhere `/` remains ordinary prefix division.
+`name/N := EXPR;` declares a named callable with N syntactic operands
+(1–64). The name, slash and unsuffixed decimal integer must be adjacent.
+Elsewhere `/` is ordinary division. EXPR is a tacit block, explicit reference
+or lambda, optionally grouped. The checker verifies N successive
+applications. EXPR runs once per saturated call, after the operands
+evaluate left to right. A returned action stays suspended.
 
-The right-hand side is a tacit block, explicit reference, or lambda,
-optionally grouped. The compiler checks that it accepts N successive
-applications. It is evaluated once in the callable body after the N
-operands have evaluated, left to right. It is never an eagerly
-initialized value. An action returned by the function remains suspended.
+The optional annotation gives the complete curried type, as in
+`add/2 : q->q->q := &+;`. With `add/1 : q->q->q := &+;`, the
+single-operand call returns a `q->q` function. Signature qualifiers
+and explicit public signatures apply. Interfaces publish N separately
+from the type. Reference the callable with `&name` or its bare name in a tacit block,
+without `/N`.
 
-An optional annotation is the complete curried type:
-`add/2 : q->q->q := &+;`. A signature with more than N leading arrows
-returns a function at the residual type. For example,
-`add/1 : q->q->q := &+;` consumes one operand, and its result
-can be used with `@`. Ordinary signature qualifiers and explicit
-interface requirements apply. Module interfaces publish N, not the
-total number of arrows. References to the callable use `&name`,
-without the slash suffix; its name can also be a tacit atom.
-
-An ordinary value binding such as `f := &{ . };` still requires explicit
-application. A callable `f/1 := &{ . };` instead accepts `f VALUE`.
 See [callable tacit algebra](../examples/tacit/callable.flx) and
 [an imported callable](../examples/modules/callables/demo.flx).
 
 ## Tacit function algebra
 
-A tacit block builds an ordinary first-class function. Its content is one strict prefix expression:
+A tacit block builds a first-class function from one prefix expression:
 
 ```text
 tacit-block = "&{" tacit-expr "}" ;
@@ -97,7 +124,11 @@ tacit-expr  = "." | callable-or-function-value
             | "(" tacit-expr ")" ;
 ```
 
-Use a bare referenceable callable, operator, nonnullary constructor, selector, or lexical function-valued binding as an atom. Do not prefix it with `&` inside the block. Scalars, action execution and pipeline `$` are not tacit atoms. Outside a block, the standalone adjacent spelling `&.` gives identity; bare period and the tacit combinators are not ordinary expressions. Compact ordinary application such as `@.field` or `@.1` still uses the existing selector token. Separate tacit operators and operands when needed to retain their token boundaries.
+An atom is a bare referenceable callable, operator, nonnullary constructor,
+selector or function-valued binding, without `&`. Scalars, action execution
+and pipeline `$` are not atoms. Outside a block, `&.` gives identity; bare
+period and combinators are not ordinary expressions. Compact `@.field` and
+`@.1` still mean application followed by a selector.
 
 | Tacit form | Applied to `x` |
 | --- | --- |
@@ -106,13 +137,17 @@ Use a bare referenceable callable, operator, nonnullary constructor, selector, o
 | `@* F G H` | `@@ F ((@ G x), (@ H x))` |
 | `@? F H` | `@@ F (x, (@ H x))` |
 
-A fork evaluates the left branch and then the right exactly once each before applying the combiner. A hook uses identity for its left branch, not a condition. Tacit functions infer and generalize under the ordinary checker, including its restrictions on numeric lifting and open rows. Constructing a tacit value does not run its body, and applying a tacit function does not implicitly execute actions or unwrap optionals or results. A tacit declaration such as `square := &{ @* * . . };` binds a value: call it as `@ square 5z`, not `square 5z`. See [composition](../examples/tacit/composition.flx), [forks](../examples/tacit/forks.flx), and [hooks](../examples/tacit/hooks.flx).
+A fork evaluates both branches once, left then right, before invoking
+the combiner. A hook is a fork with identity on the left. Tacit values
+follow ordinary inference, lifting and application rules. Construction
+does not run the body; application does not implicitly execute actions
+or unwrap optionals or results. See [composition](../examples/tacit/composition.flx),
+[forks](../examples/tacit/forks.flx) and [hooks](../examples/tacit/hooks.flx).
+
 ## Types and inference
 
-Flux is statically typed. An annotation uses `:` in a binding or parameter
-declaration. Omitted types are inferred where there is sufficient context.
-A type annotation is not a numeric conversion; use an explicit conversion
-when the value has the wrong domain.
+Annotations use `:`; omitted types are inferred where context suffices.
+An annotation is not a conversion.
 
 | Form | Meaning |
 |---|---|
@@ -134,14 +169,12 @@ a sequence. Parenthesize a nested result rather than chaining bare carets.
 
 ### Schemes, constraints and recursion
 
-In a type or qualifier, `~name` represents a named variable. The tilde
-and identifier must be contiguous; the same spelling in a single
-signature refers to the same variable. A row-tail occurrence establishes
-row kind; it is not a scalar variable. The placeholder `_` is unchanged.
-Apostrophe-prefixed type variables are rejected with a migration diagnostic;
-character literals such as `'a'` and `'\n'` retain single quotes.
-Expression operators beginning with `~` are unchanged.
-
+A named variable uses adjacent tilde and identifier (`~name`) in types
+and qualifiers; repeated occurrences in a signature share one variable.
+A row tail gives the
+variable row kind. Use `_` for an inferred type. Old apostrophe variables
+trigger a migration error; character literals and tilde operators are
+unchanged.
 
 Flux uses rank-one polymorphism. A reference to an eligible binding
 freshens its quantified variables and their constraints. Type variables
@@ -184,15 +217,12 @@ different types in the caller's body.
 
 ### Checking and elaboration
 
-Checking resolves names and constructor identities, unifies structural
-requirements and infers types. For numerical operations it resolves
-scalar or one-dimensional lift shape, checks applicable constraints and
-selects the checked domain and operation. The evaluator uses typed HIR
-and checked callable instances for direct, indirect and tacit applications;
-it does not choose a different static overload from the particular value
-it happens to see. The runtime still checks dynamic bounds, compatible
-sequence lengths and domain failures. The reference compiler does not
-provide arbitrary overload search or a user-defined class system.
+The checker resolves identities, unifies structural requirements and
+selects the domain and scalar or lifted shape of numerical operations.
+Typed HIR carries this evidence for direct, indirect and tacit calls;
+execution does not select static overloads at runtime. Dynamic bounds,
+sequence lengths and domain errors still require runtime checks. There
+is no arbitrary overload search or user-defined class system.
 
 ## Exact and approximate numerics
 
@@ -282,77 +312,50 @@ constructors and inferred polymorphism.
 
 ## Collections, records and tables
 
-Sequences preserve order and duplicates. Tuple components may have
-different types. A record has uniquely named fields; its structural type
-is determined by their names and types. `.{ field := value; }` constructs
-a structural record. `row :: { field:a; };` declares a nominal record and
-`row { field := value; }` constructs that type. Two separately declared
-nominal types are distinct even if their field layouts match. Select a
-field with `.field` or a tuple position with a one-based selector such as
-`.1`. A table selector returns the named column or tuple component as a
-sequence.
+Sequences preserve order and duplicates; tuples may mix types. Records
+have unique fields. `.{ field := value; }` constructs a structural record
+whose type follows its field names and types. `row :: { field:a; };`
+declares a nominal record, constructed with `row { field := value; }`.
+Separate nominal declarations remain distinct even with identical
+fields. Project with `.field` or a one-based tuple selector such as `.1`.
+A table projection yields a column sequence. Projection can infer a
+structural field requirement instead of a closed record type.
 
-Projection can infer a structural requirement instead of fixing all
-fields: a function that projects `.value` can be used with structural
-records containing appropriately typed `value` fields and other fields.
-See the
-[tacit projection example](../examples/tacit/projection.flx).
+Tables are ordered collections of same-type record or tuple rows.
+`#[…]` constructs a table; `#:` constructs one from a sequence of rows
+or a nonempty record of equal-length columns, and `:#` extracts its rows.
+Empty values need context when ambiguous. Tables retain their schema,
+including field order for interchange such as CSV, even with zero rows.
 
-Tables are ordered homogeneous collections of record or tuple rows.
-`#[…]` constructs a table; `#:` reconstructs one from a row sequence
-or a nonempty named record of equally sized columns (which can have zero rows), and `:#`
-extracts its row sequence. Field order is retained for the checked schema
-and for schema-driven interchange, including CSV. Supply context for
-ambiguous empty sequences or tables; an empty table still carries
-its row schema. See [projection and reconstruction](../examples/tables/projection.flx)
-and [checked observations](../examples/tables/observations.flx).
-
-`@:` maps function values, and `?:` filters sequences and tables with
-a compatible boolean mask or predicate, retaining source order. A mask
-must have precisely the input length.
-`/:` folds with a seed and `\:` scans including the initial seed.
-`+:` concatenates compatible collections, preserving duplicates.
-`&:` zips equal-length sequences and `*:` forms a Cartesian product.
-`.:` is one-based lookup for sequences and tables, or key lookup for
-dictionaries; a missing key, zero index or out-of-range index returns
-absence. Dictionaries can be obtained by grouping with `=:`; dictionary
-literal syntax is not executable. Nested sequences remain independent from dense arrays. See
-[functional collections](../examples/basics/collections.flx) and
-[descriptive statistics](../examples/statistics/descriptive.flx).
+`?:` filters sequences or tables with a predicate or an equal-length
+Boolean mask, preserving input order. `+:` concatenates compatible
+collections without removing duplicates. `&:` zips equal-length sequences;
+`*:` forms their Cartesian product. `.:` looks up a one-based index in
+a sequence or table, or a dictionary key. Missing keys and invalid
+indices yield absence. For dictionaries use grouping (`=:`); dictionary
+literals are not executable.
 
 ### Open structural rows
 
-An annotation such as `.{ value:q; | ~r }` requires a rational field
-`value` and permits any other correctly typed fields. The suffix `~r`
-stands for the rest of the row, not a scalar type. A row variable can
-occur more than once in a signature; those occurrences describe the
-same remaining fields. Using the same spelling as a scalar type variable
-in that signature is an error. Open row annotations do not affect
-the syntax of record values.
+`.{ value:q; | ~r }` requires a rational `value` field and permits other
+fields. Repeated tails describe the same remaining fields, but a name
+cannot represent both a scalar and a row variable in one signature.
+`#.{ value:q; | ~r }` is the corresponding table type. Returning that
+type preserves extra columns. Use separate variables for independent
+tails. Missing or conflicting required fields are static errors.
 
-Use `#.{ value:q; | ~r }` for a table with that schema. A function
-returning the same table type preserves its extra columns. Use a second
-row variable for an independent table, such as the other operand to
-a keyed join. Static checks reject missing or conflicting required
-fields and do not automatically convert a nominal row into a structural
-row. Use `df.structural T` to explicitly view a named table as structural;
-the field names, order, types and values remain unchanged, even when
-there are no rows.
+Nominal rows do not implicitly satisfy structural annotations.
+`df.structural T` views a named table structurally, preserving field
+names, order, types and values even when empty. It is an identity for
+already structural named-field tables. A transformation can extend the
+same tail, e.g. return `#.{ value:q; squared:q; | ~r }` from
+`#.{ value:q; | ~r }`, only if `squared` is absent from the tail.
+Checked calls and module interfaces carry this evidence; empty tables
+do not need a row to determine their schema.
 
-A transformation can name a new field in the result while keeping the
-input tail, provided that the new name is absent from the tail. For
-example, a declaration can take `#.{ value:q; | ~r }` and return
-`#.{ value:q; squared:q; | ~r }`. An input with an existing `squared`
-column is rejected; this is an addition, not a silent overwrite.
-Type evidence travels through checked calls and module interfaces, and
-empty table results use that evidence rather than inspecting a row.
-
-Column-record reconstruction (`#: COLUMNS`) and the new-columns
-argument of `df.extend` require a closed schema: every column type must
-be known to be a sequence. Reconstruction from a checked sequence of
-rows can instead preserve an open row tail. Applying `df.structural`
-to an already structural named-field table is an identity.
-See the [open-row table specimen](../examples/tables/open-rows.flx).
+Column records passed to `#:` or `df.extend` require a closed schema
+of sequences. Reconstruction from a row sequence can preserve an open
+tail. See the [open-row specimen](../examples/tables/open-rows.flx).
 
 ### Sequence operators and reductions
 
@@ -368,21 +371,19 @@ equal-length sequence rows and rejects ragged input.
 `>: KEY X` sorts ascending and `<: KEY X` descending; equal keys retain
 their input order.
 
-Reductions consume sequences rather than tables. Project a table column
-first. `+/ X` and `*/ X` return the sum and product in the checked
-numeric domain, with empty identities zero and one; `&&/ X` and `||/ X`
-use the Boolean identities true and false. `>/ X` and `</ X` return
-optional numeric extrema, absent on empty input.
+Reductions consume sequences; project a table column first. `+/ X`,
+`*/ X`, `&&/ X` and `||/ X` have empty identities zero, one, true and
+false, respectively. Numeric reductions use the checked domain; `>/ X`
+and `</ X` return optional numeric extrema, absent on empty input.
+`/: F SEED XS` folds from a seed; `\: F SEED XS` scans, including the seed.
 
-`@/ F XS` reduces a sequence of `a` with a curried `a->a->a` binary
-function, using the first element as the seed. It associates to the left.
-It evaluates F and XS once, in that order, and makes one binary call
-per element after the first. It returns `?0` for an empty sequence and
-`?1 X` for a singleton without calling F in either case. An optional,
-result, or action element stays wrapped and is not executed or
-propagated implicitly. For example, `@/ &- [10 3 2]` is
-`?1 5`. Use `/: F SEED XS` when a seed is required. See
-[sequence calculus](../examples/basics/sequence-calculus.flx).
+`@/ F XS` accepts a curried `a->a->a` callback and a sequence `[a]`,
+evaluates both operands once in order, then folds left from the first
+element. It calls F once per remaining element and returns `?a`. Empty
+and singleton inputs make no calls and return `?0` and `?1 X`,
+respectively. Optional, result and action elements are not unwrapped,
+propagated or executed. `@/ &- [10 3 2]` returns `?1 5`.
+See [sequence calculus](../examples/basics/sequence-calculus.flx).
 
 Write a space before the operand of `|:` when its name could be a
 conversion suffix: `|: q` transposes q, while `|:q x` retains the
@@ -485,13 +486,12 @@ a checked function that produces a closed row for each input row.
 Present zero is never missing. See [set operations](../examples/tables/duplicates.flx),
 [nullable transformations](../examples/tables/missing.flx) and the
 [calibration reconciliation](../examples/applications/calibration/README.md).
+
 ## Actions and typed failure
 
-An optional `?a` represents presence or ordinary absence. A result `a^e`
-contains a success of type `a` or a recoverable error of type `e`. An
-action `!a` suspends a computation that produces `a`. These are different
-constructors: `!q^e` means `(!q)^e`; an action returning a result is
-`!(q^e)`. Parenthesize nested results rather than writing `a^e^f`.
+An optional `?a` distinguishes presence from absence; a result `a^e`
+distinguishes success from recoverable failure; an action `!a` suspends
+computation. See [type precedence](#types-and-inference) for compositions.
 
 - `!{ ... }` constructs an action; `! ACTION` executes it where effects
   are permitted. A call such as `print VALUE` constructs an action, not a
@@ -522,7 +522,7 @@ constructors: `!q^e` means `(!q)^e`; an action returning a result is
   optional, is not a recoverable result. Completed effects are not
   rolled back.
 
-A script entry runs its action and may complete with unit or a natural
+The final anonymous action is executed and may complete with unit or a natural
 exit status in 0–255, directly or inside a successful result. Unit exits
 with status 0. An uncaught error exits with status 1 and a diagnostic on
 stderr; recovered errors are not printed as terminal failures. See the
@@ -643,7 +643,6 @@ newlines do not advance the record number. See
 constructs presence, `?+ VALUE` tests presence and `?! VALUE` extracts
 a present payload or raises a fatal diagnostic. These are scalar
 operations; use explicit mapping for a nullable sequence.
-
 
 | Operation | Type |
 |---|---|

@@ -104,11 +104,11 @@ fn grade(selector: &V, input: &V, types: &[Type], eval: &mut Eval<'_>, span: Spa
     let input = seq(input, span)?;
     let mut keys = Vec::with_capacity(input.len());
     for (i, value) in input.iter().enumerate() {
-        let key = eval.apply_checked(
+        let key = eval.apply_unary(
             selector.clone(),
-            vec![value.clone()],
-            Some(vec![item.as_ref().clone()]),
-            Some(key.as_ref().clone()),
+            value.clone(),
+            (**item).clone(),
+            (**key).clone(),
             span,
         )?;
         keys.push((key, i));
@@ -138,30 +138,34 @@ fn grade(selector: &V, input: &V, types: &[Type], eval: &mut Eval<'_>, span: Spa
     ))
 }
 
+pub(super) fn handles(op: CoreOp) -> bool {
+    matches!(
+        op,
+        CoreOp::ArrayWindows | CoreOp::ArraySelect | CoreOp::ArrayGrade | CoreOp::ArrayPermute
+    )
+}
+
 pub(super) fn apply(
     op: CoreOp,
     args: &[V],
     types: &[Type],
     eval: &mut Eval<'_>,
     span: Span,
-) -> Option<R<V>> {
+) -> R<V> {
     use CoreOp::*;
-    if !matches!(op, ArrayWindows | ArraySelect | ArrayGrade | ArrayPermute) {
-        return None;
-    }
     let [a, b] = args else {
-        return Some(Err(invariant(
-            span,
-            "invalid checked indexed sequence arity",
-        )));
+        return Err(invariant(span, "invalid checked indexed sequence arity"));
     };
-    Some(match op {
+    match op {
         ArrayWindows => windows(a, b, span),
         ArraySelect => select(a, b, span),
         ArrayGrade => grade(a, b, types, eval, span),
         ArrayPermute => permute(a, b, span),
-        _ => unreachable!(),
-    })
+        _ => Err(invariant(
+            span,
+            "checked array operation has no implementation",
+        )),
+    }
 }
 
 #[cfg(test)]

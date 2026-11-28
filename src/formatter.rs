@@ -2,38 +2,13 @@
 //! Never render a reconstructed AST: even filtered punctuation and comments
 //! belong to the user's original source.
 use crate::{
-    lexer::{lex, Token},
+    lexer::{is_ident, lex, Delimiter, Token},
     parser::FormattingApplication,
     Error,
 };
 
 const INDENT: usize = 4;
 const COMPLEX_WIDTH: usize = 64;
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Delimiter {
-    Brace,
-    Bracket,
-    Paren,
-}
-
-fn opening(text: &str) -> Option<Delimiter> {
-    match text {
-        "{" | "!{" | "^{" | "?{" | ".{" | "|{" | "&{" | "#{" | "{." => Some(Delimiter::Brace),
-        "[" | "#[" => Some(Delimiter::Bracket),
-        "(" => Some(Delimiter::Paren),
-        _ => None,
-    }
-}
-
-fn closing(text: &str) -> Option<Delimiter> {
-    match text {
-        "}" => Some(Delimiter::Brace),
-        "]" => Some(Delimiter::Bracket),
-        ")" => Some(Delimiter::Paren),
-        _ => None,
-    }
-}
 
 #[derive(Default)]
 struct Layout {
@@ -53,7 +28,7 @@ fn groups(tokens: &[Token]) -> Vec<Group> {
     let mut stack: Vec<Group> = vec![];
     let mut found = vec![];
     for (i, token) in tokens.iter().enumerate() {
-        if let Some(close) = closing(&token.text) {
+        if let Some(close) = Delimiter::closing(&token.text) {
             if stack.last().is_some_and(|group| group.delimiter == close) {
                 let mut group = stack.pop().unwrap();
                 group.end = i;
@@ -63,7 +38,7 @@ fn groups(tokens: &[Token]) -> Vec<Group> {
             if let Some(parent) = stack.last_mut() {
                 parent.direct.push(i);
             }
-            if let Some(delimiter) = opening(&token.text) {
+            if let Some(delimiter) = Delimiter::opening(&token.text) {
                 stack.push(Group {
                     start: i,
                     end: 0,
@@ -107,11 +82,7 @@ fn callable_header(tokens: &[Token]) -> bool {
         return false;
     };
     slash.text == "/"
-        && name.text.as_bytes()[0].is_ascii_lowercase()
-        && name
-            .text
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && is_ident(&name.text)
         && arity.text.bytes().all(|b| b.is_ascii_digit())
         && matches!(next.text.as_str(), ":" | ":#" | ":=")
 }
@@ -126,12 +97,7 @@ fn header_edge(tokens: &[Token], i: usize) -> bool {
 // Tilde variables are adjacent tokens interpreted in type contexts by
 // the parser. Preserve both spellings in expressions without re-lexing.
 fn tilde_identifier(left: &Token, right: &Token) -> bool {
-    left.text == "~"
-        && right.text.as_bytes()[0].is_ascii_lowercase()
-        && right
-            .text
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    left.text == "~" && is_ident(&right.text)
 }
 
 fn spacing(source: &str, tokens: &[Token], i: usize) -> usize {
@@ -156,11 +122,7 @@ fn spacing(source: &str, tokens: &[Token], i: usize) -> usize {
     if matches!(second, ":" | ":#") && adjacent {
         return 0;
     }
-    if matches!(
-        first,
-        "{" | "!{" | "^{" | "?{" | ".{" | "|{" | "&{" | "#{" | "{."
-    ) && second == "}"
-    {
+    if Delimiter::opening(first) == Some(Delimiter::Brace) && second == "}" {
         return usize::from(!adjacent);
     }
     if matches!(second, "(" | "[") && adjacent && first.as_bytes()[0].is_ascii_lowercase() {
@@ -425,7 +387,7 @@ fn structure(
                     || mark <= start
                     || segment
                         .iter()
-                        .any(|&i| i < mark && opening(&tokens[i].text).is_some())
+                        .any(|&i| i < mark && Delimiter::opening(&tokens[i].text).is_some())
                     || (start + 1..=mark).any(|i| original_gap(source, tokens, i).contains("--"))
                 {
                     invalid = true;
@@ -466,7 +428,7 @@ fn render(source: &str, tokens: &[Token], layout: &[Layout], delta: &[isize]) ->
         if gap.contains("--") {
             // An inline comment belongs to the preceding line, even when the
             // next lexeme must begin a new structural line.
-            let comment_depth = if closing(&token.text).is_some() {
+            let comment_depth = if Delimiter::closing(&token.text).is_some() {
                 previous_depth
             } else {
                 depth

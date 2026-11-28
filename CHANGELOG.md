@@ -5,6 +5,11 @@ This log summarizes material changes. Earlier text and design revisions
 are available through [the repository's commit history](https://github.com/roelchristian/flux-lang/commits/main/);
 obsolete specifications are not kept as duplicate files.
 
+## Unreleased
+
+- Consolidate shared Rust internals and streamline the reference and example
+  index without changing the language.
+
 ## Draft 0.14
 
 - Prefer `[:` (take), `:]` (drop), `sect` (section), `,.` (flatten one level),

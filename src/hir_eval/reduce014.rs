@@ -19,23 +19,8 @@ pub(super) fn apply(
     let Some((first, rest)) = items.split_first() else {
         return Ok(V::Optional(None));
     };
-    let mut acc = first.clone();
-    let residual = Type::Fun(input.clone(), result.clone());
-    for item in rest {
-        let part = eval.apply_checked(
-            callback.clone(),
-            vec![acc],
-            Some(vec![(**result).clone()]),
-            Some(residual.clone()),
-            span,
-        )?;
-        acc = eval.apply_checked(
-            part,
-            vec![item.clone()],
-            Some(vec![(**input).clone()]),
-            Some((**result).clone()),
-            span,
-        )?;
-    }
+    let acc = rest.iter().try_fold(first.clone(), |acc, item| {
+        eval.apply_dyadic(callback, (acc, result), (item.clone(), input), result, span)
+    })?;
     Ok(V::Optional(Some(Rc::new(acc))))
 }

@@ -25,12 +25,14 @@ mod arrays012;
 mod collections042;
 mod combinators05;
 mod decimal05;
+mod display;
 mod joins06;
 mod json05;
 mod library05;
 mod reduce014;
 mod relations06;
 mod wide05;
+use display::{inspect, repr};
 use wide05::Wide;
 mod operations041;
 pub use crate::csv::{FsInput, OpenedInput, RuntimeInput};
@@ -43,6 +45,16 @@ struct Failure {
     origin: Span,
     propagations: Vec<Span>,
     diagnostic: Option<String>,
+}
+impl Failure {
+    fn new(payload: Rc<V>, origin: Span, diagnostic: Option<String>) -> Rc<Self> {
+        Rc::new(Self {
+            payload,
+            origin,
+            propagations: Vec::new(),
+            diagnostic,
+        })
+    }
 }
 enum Control {
     Fatal(Error),
@@ -594,6 +606,14 @@ struct Fun {
     bound_types: Vec<Type>,
     instance: Option<Type>,
 }
+fn function(code: Function) -> V {
+    V::Fun(Rc::new(Fun {
+        code,
+        bound: Vec::new(),
+        bound_types: Vec::new(),
+        instance: None,
+    }))
+}
 #[derive(Clone)]
 enum Action {
     Block { expr: ExprId, env: usize },
@@ -669,83 +689,6 @@ fn uncaught(program: &HirProgram, f: &Failure) -> Error {
     }
     d.into_error()
 }
-fn repr(v: &V) -> String {
-    match v {
-        V::Exact(n) if n.d == 1 => n.n.to_string(),
-        V::Exact(n) => format!("{}/{}", n.n, n.d),
-        V::Wide(n) => format!("{n}"),
-        V::Real(n) => n.to_string(),
-        V::Bool(b) => if *b { "1b" } else { "0b" }.into(),
-        V::String(s) => s.to_string(),
-        V::Char(c) => c.to_string(),
-        V::Unit => "()".into(),
-        V::Tuple(xs) => format!("({})", xs.iter().map(repr).collect::<Vec<_>>().join(", ")),
-        V::Dense(value) => value.render(repr),
-        V::Sequence(xs) => format!("[{}]", xs.iter().map(repr).collect::<Vec<_>>().join(" ")),
-        V::Record(fs) => format!(
-            "{{{}}}",
-            fs.iter()
-                .map(|(k, v)| format!("{k} := {}", repr(v)))
-                .collect::<Vec<_>>()
-                .join("; ")
-        ),
-        V::Table(xs, schema) => format!(
-            "#[{}]",
-            xs.iter()
-                .map(|row| repr_table_row(row, schema))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ),
-        V::Dict(xs) => format!(
-            "#{{{}}}",
-            xs.iter()
-                .map(|(k, v)| format!("{} : {}", repr(k), repr(v)))
-                .collect::<Vec<_>>()
-                .join("; ")
-        ),
-        V::Optional(None) => "?0".into(),
-        V::Optional(Some(x)) => format!("?1 {}", repr(x)),
-        V::Variant(variant) => {
-            let VariantValue { name, fields, .. } = variant.as_ref();
-            if fields.is_empty() {
-                name.to_string()
-            } else {
-                format!(
-                    "{name} {}",
-                    fields.iter().map(repr).collect::<Vec<_>>().join(" ")
-                )
-            }
-        }
-        V::Outcome(Ok(v)) => format!("ok {}", repr(v)),
-        V::Outcome(Err(f)) => format!("err {}", repr(&f.payload)),
-        V::Fun(_) => "<function>".into(),
-        V::Action(_) => "<action>".into(),
-    }
-}
-fn repr_table_row(row: &V, schema: &TableSchema) -> String {
-    if let (V::Record(fields), TableSchema::Named(columns)) = (row, schema) {
-        if fields
-            .iter()
-            .map(|(n, _)| n.as_ref())
-            .ne(columns.iter().map(|(n, _)| n.as_str()))
-        {
-            let ordered = columns
-                .iter()
-                .map(|(name, _)| {
-                    fields
-                        .iter()
-                        .find(|(key, _)| key.as_ref() == name)
-                        .map(|(_, value)| format!("{name} := {}", repr(value)))
-                })
-                .collect::<Option<Vec<_>>>();
-            if let Some(values) = ordered.filter(|_| fields.len() == columns.len()) {
-                return format!("{{{}}}", values.join("; "));
-            }
-        }
-    }
-    repr(row)
-}
-
 // A schema's stored order controls presentation, not structural equality.
 // Preserve order for tuple slots and retain lexical identity for nominal types.
 fn same_field_types(a: &[(String, Type)], b: &[(String, Type)]) -> bool {
@@ -919,31 +862,33 @@ enum Key {
     Some(Box<Key>),
     Tuple(Box<[Key]>),
 }
-fn array_op(op: CoreOp) -> bool {
-    use CoreOp::*;
-    matches!(
-        op,
-        ArrayReshape
-            | ArrayShape
-            | ArrayRavel
-            | ArrayAt
-            | ArrayMap
-            | ArrayZip
-            | ArrayOuter
-            | ArrayRankMap
-            | ArrayScan
-            | ArrayWindows
-            | ArraySelect
-            | ArrayGrade
-            | ArrayPermute
-    )
+/// Builtins whose evaluator needs checked input types, not only the result
+/// type and lift plan. Direct calls and saturated references share this path.
+enum WitnessedOp {
+    Dense(CoreOp),
+    Indexed(CoreOp),
+    Join(CoreOp),
+    Relation(CoreOp),
+    Combinator(CoreOp),
+    Reduce,
 }
-fn relation_op(op: CoreOp) -> bool {
-    use CoreOp::*;
-    matches!(
-        op,
-        TableUnion | TableDistinct | TableSelect | DropNa | Fill | PresentOnly
-    )
+
+fn witnessed_op(op: CoreOp) -> Option<WitnessedOp> {
+    Some(if arrays012::handles(op) {
+        WitnessedOp::Dense(op)
+    } else if array_sequences012::handles(op) {
+        WitnessedOp::Indexed(op)
+    } else if joins06::handles(op) {
+        WitnessedOp::Join(op)
+    } else if relations06::handles(op) {
+        WitnessedOp::Relation(op)
+    } else if combinators05::handles(op) {
+        WitnessedOp::Combinator(op)
+    } else if op == CoreOp::Reduce {
+        WitnessedOp::Reduce
+    } else {
+        return None;
+    })
 }
 fn key(v: &V) -> Option<Key> {
     let mut budget = KEY_WORK_LIMIT;
@@ -1451,16 +1396,7 @@ impl Eval<'_> {
             declared: d.scheme.ty.clone(),
             open_rows: contains_open_row(&d.scheme.ty),
         };
-        self.put(
-            env,
-            d.symbol,
-            V::Fun(Rc::new(Fun {
-                code,
-                bound: Vec::new(),
-                bound_types: Vec::new(),
-                instance: None,
-            })),
-        );
+        self.put(env, d.symbol, function(code));
     }
     fn make_variant(&self, id: SymbolId, fields: Vec<V>, span: Span) -> R<V> {
         let info = self
@@ -1548,26 +1484,17 @@ impl Eval<'_> {
                 if arity == 0 {
                     self.make_variant(*id, Vec::new(), s)?
                 } else {
-                    V::Fun(Rc::new(Fun {
-                        code: Function::Constructor(*id, arity),
-                        bound: Vec::new(),
-                        bound_types: Vec::new(),
-                        instance: None,
-                    }))
+                    function(Function::Constructor(*id, arity))
                 }
             }
-            ExprKind::Reference(Target::Projection(field)) => V::Fun(Rc::new(Fun {
-                code: Function::Projection(field.clone()),
-                bound: Vec::new(),
-                bound_types: Vec::new(),
-                instance: None,
-            })),
-            ExprKind::Reference(Target::Builtin(op)) => V::Fun(Rc::new(Fun {
-                code: Function::Core(*op, self.type_at(&n.ty, env), n.table_schema.clone()),
-                bound: Vec::new(),
-                bound_types: Vec::new(),
-                instance: None,
-            })),
+            ExprKind::Reference(Target::Projection(field)) => {
+                function(Function::Projection(field.clone()))
+            }
+            ExprKind::Reference(Target::Builtin(op)) => function(Function::Core(
+                *op,
+                self.type_at(&n.ty, env),
+                n.table_schema.clone(),
+            )),
             ExprKind::Call(Target::Builtin(CoreOp::TableFrom), args)
                 if n.table_schema.is_none()
                     && matches!(
@@ -1605,6 +1532,11 @@ impl Eval<'_> {
                     .iter()
                     .map(|id| self.eval(*id, env))
                     .collect::<R<Vec<_>>>()?;
+                let arg_types = |eval: &Self| {
+                    ids.iter()
+                        .map(|id| eval.type_at(&p.node(*id).ty, env))
+                        .collect::<Vec<_>>()
+                };
                 match target {
                     Target::Builtin(CoreOp::Apply | CoreOp::ApplyTuple) => {
                         let [f, arg]: [V; 2] = args
@@ -1625,17 +1557,11 @@ impl Eval<'_> {
                                 } else {
                                     next.clone()
                                 };
-                                f = self.apply_checked(
-                                    f,
-                                    vec![operand.clone()],
-                                    Some(vec![actual]),
-                                    Some(result),
-                                    s,
-                                )?;
+                                f = self.apply_unary(f, operand.clone(), actual, result, s)?;
                             }
                             f
                         } else {
-                            self.apply_checked(f, vec![arg], Some(vec![input]), Some(output), s)?
+                            self.apply_unary(f, arg, input, output, s)?
                         }
                     }
                     Target::Builtin(op) => {
@@ -1644,30 +1570,15 @@ impl Eval<'_> {
                             _ => &n.ty,
                         };
                         let ty = self.type_at(ty, env);
-                        if array_op(*op) {
-                            let types = ids
-                                .iter()
-                                .map(|id| self.type_at(&p.node(*id).ty, env))
-                                .collect::<Vec<_>>();
-                            self.array(*op, args, &types, &ty, s)?
-                        } else if *op == CoreOp::Reduce {
-                            let types = ids
-                                .iter()
-                                .map(|id| self.type_at(&p.node(*id).ty, env))
-                                .collect::<Vec<_>>();
-                            reduce014::apply(&args, &types, &ty, self, s)?
-                        } else if joins06::handles(*op) || relation_op(*op) {
-                            let types = ids
-                                .iter()
-                                .map(|id| self.type_at(&p.node(*id).ty, env))
-                                .collect::<Vec<_>>();
-                            self.relation(*op, args, &types, &ty, n.table_schema.as_ref(), s)?
-                        } else if combinators05::handles(*op) {
-                            let types = ids
-                                .iter()
-                                .map(|id| self.type_at(&p.node(*id).ty, env))
-                                .collect::<Vec<_>>();
-                            combinators05::apply(*op, args, &types, &ty, self, s)?
+                        if let Some(op) = witnessed_op(*op) {
+                            self.witnessed_core(
+                                op,
+                                args,
+                                &arg_types(self),
+                                &ty,
+                                n.table_schema.as_ref(),
+                                s,
+                            )?
                         } else {
                             let layout = if dynamic_schema_operation(*op)
                                 && self.frames[env].type_scope.is_some()
@@ -1694,33 +1605,17 @@ impl Eval<'_> {
                         projection(field, v, s)?
                     }
                     Target::Symbol(_) => {
+                        let mut f = f.expect("callee loaded");
                         if let Some(sig) = n.callee_type.as_ref() {
-                            let f = self.specialize_fun(f.expect("callee loaded"), sig, env);
-                            if matches!(&f, V::Fun(f) if matches!(f.code, Function::User { open_rows: true, .. }))
+                            f = self.specialize_fun(f, sig, env);
+                            if !matches!(&f, V::Fun(f) if matches!(f.code, Function::User { open_rows: true, .. }))
                             {
-                                let input = ids
-                                    .iter()
-                                    .map(|id| self.type_at(&p.node(*id).ty, env))
-                                    .collect();
-                                let output = self.type_at(&n.ty, env);
-                                self.apply_checked(f, args, Some(input), Some(output), s)?
-                            } else {
-                                self.apply(f, args, s)?
+                                return self.apply(f, args, s);
                             }
-                        } else {
-                            let types = ids
-                                .iter()
-                                .map(|i| self.type_at(&p.node(*i).ty, env))
-                                .collect();
-                            let out = self.type_at(&n.ty, env);
-                            self.apply_checked(
-                                f.expect("callee loaded"),
-                                args,
-                                Some(types),
-                                Some(out),
-                                s,
-                            )?
                         }
+                        let input = arg_types(self);
+                        let output = self.type_at(&n.ty, env);
+                        self.apply_checked(f, args, Some(input), Some(output), s)?
                     }
                 }
             }
@@ -1754,18 +1649,13 @@ impl Eval<'_> {
                 }
                 self.eval(*otherwise, env)?
             }
-            ExprKind::Closure { formals, body } => V::Fun(Rc::new(Fun {
-                code: Function::User {
-                    formals: formals.clone().into(),
-                    body: *body,
-                    env,
-                    declared: n.ty.clone(),
-                    open_rows: contains_open_row(&n.ty),
-                },
-                bound: Vec::new(),
-                bound_types: Vec::new(),
-                instance: None,
-            })),
+            ExprKind::Closure { formals, body } => function(Function::User {
+                formals: formals.clone().into(),
+                body: *body,
+                env,
+                declared: n.ty.clone(),
+                open_rows: contains_open_row(&n.ty),
+            }),
             ExprKind::Pipeline(stages) => {
                 let mut value = V::Unit;
                 for stage in stages {
@@ -1796,12 +1686,7 @@ impl Eval<'_> {
                 let v = self.eval(*payload, env)?;
                 return Err(Control::Raise {
                     boundary: *boundary,
-                    failure: Rc::new(Failure {
-                        payload: Rc::new(v),
-                        origin: s,
-                        propagations: Vec::new(),
-                        diagnostic: None,
-                    }),
+                    failure: Failure::new(Rc::new(v), s, None),
                 });
             }
             ExprKind::Propagate { boundary, result } => match self.eval(*result, env)? {
@@ -1941,6 +1826,25 @@ impl Eval<'_> {
     fn apply(&mut self, f: V, args: Vec<V>, span: Span) -> R<V> {
         self.apply_checked(f, args, None, None, span)
     }
+    fn apply_unary(&mut self, f: V, arg: V, input: Type, output: Type, span: Span) -> R<V> {
+        self.apply_checked(f, vec![arg], Some(vec![input]), Some(output), span)
+    }
+
+    /// Apply both stages of a curried callback, in order, without losing
+    /// the checked intermediate function type at the first application.
+    fn apply_dyadic(
+        &mut self,
+        f: &V,
+        a: (V, &Type),
+        b: (V, &Type),
+        out: &Type,
+        span: Span,
+    ) -> R<V> {
+        let residual = Type::Fun(Box::new(b.1.clone()), Box::new(out.clone()));
+        let partial = self.apply_unary(f.clone(), a.0, a.1.clone(), residual, span)?;
+        self.apply_unary(partial, b.0, b.1.clone(), out.clone(), span)
+    }
+
     fn apply_checked(
         &mut self,
         f: V,
@@ -2029,27 +1933,21 @@ impl Eval<'_> {
             }
             Function::Core(op, ty, schema) => {
                 let out = out.as_ref().unwrap_or_else(|| result_type(&ty, arity));
-                if array_op(op) {
-                    return self.array(op, f.bound, &f.bound_types, out, span);
-                }
-                if op == CoreOp::Reduce {
-                    return reduce014::apply(&f.bound, &f.bound_types, out, self, span);
-                }
-                if joins06::handles(op) || relation_op(op) {
-                    return self.relation(op, f.bound, &f.bound_types, out, schema.as_ref(), span);
-                }
-                if combinators05::handles(op) {
-                    return combinators05::apply(op, f.bound, &f.bound_types, out, self, span);
+                if let Some(op) = witnessed_op(op) {
+                    return self.witnessed_core(
+                        op,
+                        f.bound,
+                        &f.bound_types,
+                        out,
+                        schema.as_ref(),
+                        span,
+                    );
                 }
                 let mode = callable_lift(op, &f.bound_types).map_err(|m| error(span, m))?;
-                let instance_schema = match op {
-                    CoreOp::TableFrom
-                    | CoreOp::TableRows
-                    | CoreOp::Aggregate
-                    | CoreOp::Extend
-                    | CoreOp::Cartesian
-                    | CoreOp::CsvRead => self.p.instance_schema(out).or(schema),
-                    _ => schema,
+                let instance_schema = if dynamic_schema_operation(op) {
+                    self.p.instance_schema(out).or(schema)
+                } else {
+                    schema
                 };
                 self.core(op, f.bound, out, instance_schema.as_ref(), mode, span)
             }
@@ -2116,59 +2014,52 @@ impl Eval<'_> {
         }
         Ok(groups)
     }
-    fn array(
+    fn witnessed_core(
         &mut self,
-        op: CoreOp,
+        op: WitnessedOp,
         args: Vec<V>,
-        types: &[Type],
+        inputs: &[Type],
         output: &Type,
-        span: Span,
-    ) -> R<V> {
-        self.tick(span)?;
-        if args.len() != operation_arity(op, span)? || types.len() != args.len() {
-            return Err(invariant(span, "invalid checked array arity"));
-        }
-        arrays012::apply(op, &args, types, output, self, span)
-            .or_else(|| array_sequences012::apply(op, &args, types, self, span))
-            .unwrap_or_else(|| {
-                Err(invariant(
-                    span,
-                    "checked array operation has no implementation",
-                ))
-            })
-    }
-
-    fn relation(
-        &mut self,
-        op: CoreOp,
-        args: Vec<V>,
-        types: &[Type],
-        ty: &Type,
         schema: Option<&Rc<TableSchema>>,
         span: Span,
     ) -> R<V> {
-        if args.len() != operation_arity(op, span)? || types.len() != args.len() {
-            return Err(invariant(span, "invalid checked relation arity"));
+        match op {
+            WitnessedOp::Dense(core) | WitnessedOp::Indexed(core) => {
+                self.tick(span)?;
+                if args.len() != operation_arity(core, span)? || inputs.len() != args.len() {
+                    return Err(invariant(span, "invalid checked array arity"));
+                }
+                if matches!(op, WitnessedOp::Dense(_)) {
+                    arrays012::apply(core, &args, inputs, output, self, span)
+                } else {
+                    array_sequences012::apply(core, &args, inputs, self, span)
+                }
+            }
+            WitnessedOp::Join(core) | WitnessedOp::Relation(core) => {
+                if args.len() != operation_arity(core, span)? || inputs.len() != args.len() {
+                    return Err(invariant(span, "invalid checked relation arity"));
+                }
+                if matches!(op, WitnessedOp::Join(_)) {
+                    return joins06::apply(core, args, inputs, output, schema, self, span);
+                }
+                self.tick(span)?;
+                let concrete = (core == CoreOp::TableSelect)
+                    .then(|| self.p.instance_schema(output))
+                    .flatten();
+                relations06::apply(
+                    core,
+                    &args,
+                    inputs,
+                    concrete.as_ref().or(schema),
+                    self,
+                    span,
+                )
+            }
+            WitnessedOp::Combinator(core) => {
+                combinators05::apply(core, args, inputs, output, self, span)
+            }
+            WitnessedOp::Reduce => reduce014::apply(&args, inputs, output, self, span),
         }
-        if joins06::handles(op) {
-            return joins06::apply(op, args, types, ty, schema, self, span);
-        }
-        self.tick(span)?;
-        let concrete = if op == CoreOp::TableSelect {
-            self.p.instance_schema(ty)
-        } else {
-            None
-        };
-        relations06::apply(
-            op,
-            &args,
-            types,
-            ty,
-            concrete.as_ref().or(schema),
-            self,
-            span,
-        )
-        .unwrap_or_else(|| Err(invariant(span, "checked relation has no implementation")))
     }
 
     fn core(
@@ -2812,81 +2703,6 @@ pub(crate) fn run_prevalidated(program: &HirProgram) -> Result<Output, Error> {
     Ok(out)
 }
 
-fn table_view(rows: &[V], schema: &TableSchema) -> String {
-    let headers = match schema {
-        TableSchema::Named(fields) => fields.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
-        TableSchema::Positional(fields) => (1..=fields.len()).map(|i| format!(".{i}")).collect(),
-    };
-    if headers.is_empty() {
-        return format!("#[ ]  ({} rows)", rows.len());
-    }
-    let safe = |text: String| {
-        let snippet = text.chars().take(32).collect::<String>();
-        let mut escaped = String::new();
-        for c in snippet.chars() {
-            if c.is_control() {
-                escaped.extend(c.escape_default())
-            } else {
-                escaped.push(c)
-            }
-        }
-        if snippet.len() < text.len() {
-            escaped.push_str("...")
-        }
-        escaped
-    };
-    let mut display = vec![headers.iter().map(|h| safe(h.clone())).collect::<Vec<_>>()];
-    for row in rows.iter().take(12) {
-        let cells = match row {
-            V::Record(fs) => headers
-                .iter()
-                .map(|key| {
-                    fs.iter()
-                        .find(|(k, _)| k.as_ref() == key)
-                        .map(|(_, v)| safe(repr(v)))
-                        .unwrap_or_else(|| "-".into())
-                })
-                .collect(),
-            V::Tuple(xs) => xs.iter().map(|x| safe(repr(x))).collect(),
-            _ => vec![safe(repr(row))],
-        };
-        display.push(cells);
-    }
-    let width = (0..headers.len())
-        .map(|i| {
-            display
-                .iter()
-                .filter_map(|r| r.get(i))
-                .map(|x| x.chars().count())
-                .max()
-                .unwrap_or(0)
-        })
-        .collect::<Vec<_>>();
-    let mut out = Vec::new();
-    for (i, row) in display.into_iter().enumerate() {
-        out.push(
-            row.into_iter()
-                .zip(&width)
-                .map(|(s, w)| format!("{s:<width$}", width = *w))
-                .collect::<Vec<_>>()
-                .join(" | "),
-        );
-        if i == 0 {
-            out.push(
-                width
-                    .iter()
-                    .map(|w| "-".repeat(*w))
-                    .collect::<Vec<_>>()
-                    .join("-+-"),
-            )
-        }
-    }
-    if rows.len() > 12 {
-        out.push(format!("... ({} rows total)", rows.len()))
-    }
-    out.join("\n")
-}
-
 /// Inspect an entry with EOF line input and no script arguments.
 pub fn view_with_io(
     program: &HirProgram,
@@ -2916,49 +2732,6 @@ pub(crate) fn view_with_host_prevalidated(
     sink: &mut dyn Write,
 ) -> Result<crate::eval::ReplOutput, Error> {
     let value = evaluate(program, input, stdin, args, sink).map_err(Control::into_error)?;
-    fn inspect(v: &V) -> String {
-        match v {
-            V::String(s) => format!("{s:?}"),
-            V::Char(c) => format!("{c:?}"),
-            V::Tuple(xs) => format!(
-                "({})",
-                xs.iter().map(inspect).collect::<Vec<_>>().join(", ")
-            ),
-            V::Dense(value) => value.render(inspect),
-            V::Sequence(xs) => {
-                format!("[{}]", xs.iter().map(inspect).collect::<Vec<_>>().join(" "))
-            }
-            V::Record(fs) => format!(
-                ".{{ {} }}",
-                fs.iter()
-                    .map(|(k, v)| format!("{k} := {}", inspect(v)))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-            V::Table(rows, schema) => table_view(rows, schema),
-            V::Dict(fs) => format!(
-                "#{{ {} }}",
-                fs.iter()
-                    .map(|(k, v)| format!("{} : {}", inspect(k), inspect(v)))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-            V::Outcome(Ok(v)) => format!("ok {}", inspect(v)),
-            V::Outcome(Err(f)) => format!("err {}", inspect(&f.payload)),
-            V::Variant(variant) if !variant.fields.is_empty() => format!(
-                "{} {}",
-                variant.name,
-                variant
-                    .fields
-                    .iter()
-                    .map(inspect)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-            V::Optional(Some(x)) => format!("?1 {}", inspect(x)),
-            v => repr(v),
-        }
-    }
     Ok(crate::eval::ReplOutput {
         value: inspect(&value),
         stdout: String::new(),

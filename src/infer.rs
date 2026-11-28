@@ -157,57 +157,10 @@ fn scan_dependencies(
     local: &HashSet<SymbolId>,
     out: &mut HashSet<SymbolId>,
 ) {
-    if let Some(id) = res.reference(e) {
-        if local.contains(&id) {
-            out.insert(id);
-        }
+    if let Some(id) = res.reference(e).filter(|id| local.contains(id)) {
+        out.insert(id);
     }
-    use Expr::*;
-    let mut visit = |e: &Expr| scan_dependencies(e, res, local, out);
-    match e {
-        Raise(x) | Propagate(x) => visit(x),
-        Match(value, cases) => {
-            visit(value);
-            for case in cases {
-                visit(&case.body);
-            }
-        }
-        Recover(value, cases) => {
-            visit(value);
-            for case in cases {
-                visit(&case.body);
-            }
-        }
-        Call(_, xs) | Array(xs) | Tuple(xs) | Pipeline(xs) => {
-            for x in xs {
-                visit(x)
-            }
-        }
-        Lambda(_, x) | TypedLambda(_, _, x) => visit(x),
-        Cases(cs, alt) => {
-            for (c, e) in cs {
-                visit(c);
-                visit(e);
-            }
-            visit(alt);
-        }
-        Record(fs) | NamedRecord(_, fs) => {
-            for (_, e) in fs {
-                visit(e);
-            }
-        }
-        Block(ds, tail) | Action(ds, tail) | Fallible(ds, tail) => {
-            for d in ds {
-                if let Stmt::Def { body, .. } | Stmt::Effect { body, .. } = d {
-                    visit(body);
-                }
-            }
-            if let Some(t) = tail {
-                visit(t);
-            }
-        }
-        _ => {}
-    }
+    e.for_each_child(|child| scan_dependencies(child, res, local, out));
 }
 fn exact(t: Prim) -> bool {
     matches!(t, Prim::N | Prim::Z | Prim::Q | Prim::D)
@@ -216,16 +169,8 @@ fn num(t: Prim) -> bool {
     exact(t) || t == Prim::R
 }
 fn type_has_nominal(t: &Type) -> bool {
-    match t {
-        Type::Nominal(_) | Type::Applied(_, _) => true,
-        Type::Seq(t) | Type::Table(t) | Type::Optional(t) | Type::Action(t) => type_has_nominal(t),
-        Type::Fun(a, b) | Type::Dict(a, b) | Type::Result(a, b) => {
-            type_has_nominal(a) || type_has_nominal(b)
-        }
-        Type::Tuple(ts) => ts.iter().any(type_has_nominal),
-        Type::Record(row) => row.fields.iter().any(|(_, t)| type_has_nominal(t)),
-        _ => false,
-    }
+    t.find_map(|node| matches!(node, Type::Nominal(_) | Type::Applied(_, _)).then_some(()))
+        .is_some()
 }
 fn numeric_kind(x: Prim) -> Option<crate::builtins::Numeric> {
     use crate::builtins::Numeric as K;
@@ -286,23 +231,16 @@ impl Engine<'_> {
     }
 
     fn err(&self, text: impl Into<String>) -> InferError {
-        InferError {
-            kind: InferErrorKind::TypeError,
-            start: self.start,
-            end: self
-                .active
-                .as_ref()
-                .filter(|s| s.start == self.start)
-                .map_or(self.start, |s| s.end),
-            expected: None,
-            actual: None,
-            constraint: None,
-            message: text.into(),
-        }
+        self.make_error(InferErrorKind::TypeError, text)
     }
+
     fn unsupported(&self, text: impl Into<String>) -> InferError {
+        self.make_error(InferErrorKind::Unsupported, text)
+    }
+
+    fn make_error(&self, kind: InferErrorKind, text: impl Into<String>) -> InferError {
         InferError {
-            kind: InferErrorKind::Unsupported,
+            kind,
             start: self.start,
             end: self
                 .active
@@ -1723,6 +1661,29 @@ impl Engine<'_> {
             _ => false,
         }
     }
+    /// Known functions supply argument context, whereas overloaded references
+    /// need operand information first. This order affects inference only.
+    fn check_application_pair(
+        &mut self,
+        env: &Env,
+        args: &[Expr],
+        function: &Type,
+        operand: &Type,
+        effect: bool,
+    ) -> R<bool> {
+        let operands = [(&args[0], function), (&args[1], operand)];
+        let order = if self.known_callee(env, &args[0]) {
+            [0, 1]
+        } else {
+            [1, 0]
+        };
+        let mut diverges = false;
+        for i in order {
+            let (expr, expected) = operands[i];
+            diverges |= self.expr(env, expr, Some(expected), effect)? == Type::Never;
+        }
+        Ok(diverges)
+    }
     fn bundle_arguments(
         &mut self,
         env: &Env,
@@ -2051,6 +2012,41 @@ impl Engine<'_> {
             _ => unreachable!(),
         }
     }
+    fn extend_columns(&mut self, mut out: Row, source: &Type) -> R<Type> {
+        let columns = self.row(source)?;
+        if columns.tail.is_some() {
+            return Err(self.err("df.extend requires a closed record of new columns"));
+        }
+        if columns.fields.is_empty() {
+            return Err(self.err("df.extend requires at least one new column"));
+        }
+        for (name, t) in columns.fields {
+            if out.fields.iter().any(|(k, _)| k == &name) {
+                return Err(self.err(format!("df.extend cannot replace existing column {name}")));
+            }
+            out.fields.push((name, self.seq_element(&t)?));
+        }
+        let ty = Type::Table(b(Type::Record(out)));
+        self.cx.register(&ty).map_err(|msg| self.err(msg))?;
+        Ok(ty)
+    }
+
+    fn column_record(&mut self, source: &Type) -> R<Type> {
+        let columns = self.row(source)?;
+        if columns.tail.is_some() {
+            return Err(self.err("#: column records must have a closed schema; use a sequence of rows for an open row"));
+        }
+        if columns.fields.is_empty() {
+            return Err(self.err("#: requires at least one column"));
+        }
+        let fields = columns
+            .fields
+            .into_iter()
+            .map(|(name, t)| Ok((name, self.seq_element(&t)?)))
+            .collect::<R<_>>()?;
+        Ok(Type::Record(Row { fields, tail: None }))
+    }
+
     fn builtin_call(
         &mut self,
         env: &Env,
@@ -2097,21 +2093,7 @@ impl Engine<'_> {
                 let arg = self.cx.fresh();
                 let out = want.cloned().unwrap_or_else(|| self.cx.fresh());
                 let expected = f(arg.clone(), out.clone());
-                // Known function signatures provide argument context, for
-                // example when a checked CSV action needs its row annotation.
-                // Overloaded operator/selector refs instead need the operand.
-                let known = self.known_callee(env, &args[0]);
-                let (callee, input) = if known {
-                    (
-                        self.expr(env, &args[0], Some(&expected), effect)?,
-                        self.expr(env, &args[1], Some(&arg), effect)?,
-                    )
-                } else {
-                    let operand = self.expr(env, &args[1], Some(&arg), effect)?;
-                    let callee = self.expr(env, &args[0], Some(&expected), effect)?;
-                    (callee, operand)
-                };
-                if callee == Type::Never || input == Type::Never {
+                if self.check_application_pair(env, args, &expected, &arg, effect)? {
                     Type::Never
                 } else {
                     out
@@ -2207,26 +2189,9 @@ impl Engine<'_> {
                 let Type::Table(row) = self.cx.resolve(&src) else {
                     return Err(self.err("df.extend expects a table"));
                 };
-                let mut out = self.row(&row)?;
+                let out = self.row(&row)?;
                 let columns = self.expr(env, &args[0], None, effect)?;
-                let columns = self.row(&columns)?;
-                if columns.tail.is_some() {
-                    return Err(self.err("df.extend requires a closed record of new columns"));
-                }
-                if columns.fields.is_empty() {
-                    return Err(self.err("df.extend requires at least one new column"));
-                }
-                for (n, t) in columns.fields {
-                    if out.fields.iter().any(|(k, _)| k == &n) {
-                        return Err(
-                            self.err(format!("df.extend cannot replace existing column {n}"))
-                        );
-                    }
-                    out.fields.push((n, self.seq_element(&t)?));
-                }
-                let ty = Type::Table(b(Type::Record(out)));
-                self.cx.register(&ty).map_err(|msg| self.err(msg))?;
-                ty
+                self.extend_columns(out, &columns)?
             }
             "#[" => {
                 let Expr::Array(rows) = &args[0] else {
@@ -2272,20 +2237,7 @@ impl Engine<'_> {
                         Type::Record(_) | Type::Nominal(_) | Type::Tuple(_) => *t,
                         _ => return Err(self.err("#: expects tuple or record rows")),
                     },
-                    Type::Nominal(_) | Type::Record(_) => {
-                        let cols = self.row(&src)?;
-                        if cols.tail.is_some() {
-                            return Err(self.err("#: column records must have a closed schema; use a sequence of rows for an open row"));
-                        }
-                        if cols.fields.is_empty() {
-                            return Err(self.err("#: requires at least one column"));
-                        }
-                        let mut fields = Vec::new();
-                        for (name, t) in cols.fields {
-                            fields.push((name, self.seq_element(&t)?));
-                        }
-                        Type::Record(Row { fields, tail: None })
-                    }
+                    Type::Nominal(_) | Type::Record(_) => self.column_record(&src)?,
                     _ => return Err(self.err("#: expects row sequence or record of columns")),
                 };
                 Type::Table(b(r))
@@ -2360,16 +2312,7 @@ impl Engine<'_> {
                     _ => self.cx.fresh(),
                 };
                 let expected = f(item.clone(), f(item.clone(), item.clone()));
-                let (callback, sequence) = if self.known_callee(env, &args[0]) {
-                    let callback = self.expr(env, &args[0], Some(&expected), effect)?;
-                    let sequence = self.expr(env, &args[1], Some(&s(item.clone())), effect)?;
-                    (callback, sequence)
-                } else {
-                    let sequence = self.expr(env, &args[1], Some(&s(item.clone())), effect)?;
-                    let callback = self.expr(env, &args[0], Some(&expected), effect)?;
-                    (callback, sequence)
-                };
-                if callback == Type::Never || sequence == Type::Never {
+                if self.check_application_pair(env, args, &expected, &s(item.clone()), effect)? {
                     Type::Never
                 } else {
                     o(item)
@@ -2864,25 +2807,8 @@ impl Engine<'_> {
                 let Type::Table(row) = self.cx.resolve(&xs[1]) else {
                     return Err(self.err("df.extend expects a statically known table schema"));
                 };
-                let mut out = self.row(&row)?;
-                let columns = self.row(&xs[0])?;
-                if columns.tail.is_some() {
-                    return Err(self.err("df.extend requires a closed record of new columns"));
-                }
-                if columns.fields.is_empty() {
-                    return Err(self.err("df.extend requires at least one new column"));
-                }
-                for (name, t) in columns.fields {
-                    if out.fields.iter().any(|(k, _)| k == &name) {
-                        return Err(
-                            self.err(format!("df.extend cannot replace existing column {name}"))
-                        );
-                    }
-                    out.fields.push((name, self.seq_element(&t)?));
-                }
-                let ty = Type::Table(b(Type::Record(out)));
-                self.cx.register(&ty).map_err(|msg| self.err(msg))?;
-                ty
+                let out = self.row(&row)?;
+                self.extend_columns(out, &xs[0])?
             }
             "io.print" | "io.println" => a(result(p(Unit), Self::standard_type("ioerr"))),
             "io.read" | "io.exists" | "io.write" => {
@@ -2940,36 +2866,21 @@ impl Engine<'_> {
             }
             "#:" => {
                 let source = self.cx.resolve(&xs[0]);
-                let row = match source {
-                    Type::Seq(row)
-                        if matches!(
-                            row.as_ref(),
-                            Type::Record(_) | Type::Nominal(_) | Type::Tuple(_)
-                        ) =>
-                    {
-                        *row
-                    }
-                    Type::Record(_) | Type::Nominal(_) => {
-                        let cols = self.row(&source)?;
-                        if cols.tail.is_some() {
-                            return Err(self.err("#: column records must have a closed schema; use a sequence of rows for an open row"));
+                let row =
+                    match source {
+                        Type::Seq(row)
+                            if matches!(
+                                row.as_ref(),
+                                Type::Record(_) | Type::Nominal(_) | Type::Tuple(_)
+                            ) =>
+                        {
+                            *row
                         }
-                        if cols.fields.is_empty() {
-                            return Err(self.err("#: requires at least one column"));
-                        }
-                        let fields = cols
-                            .fields
-                            .into_iter()
-                            .map(|(name, t)| Ok((name, self.seq_element(&t)?)))
-                            .collect::<crate::infer::R<_>>()?;
-                        Type::Record(Row { fields, tail: None })
-                    }
-                    _ => {
-                        return Err(self.err(
+                        Type::Record(_) | Type::Nominal(_) => self.column_record(&source)?,
+                        _ => return Err(self.err(
                             "#: reference needs a known sequence of rows or record-of-columns type",
-                        ))
-                    }
-                };
+                        )),
+                    };
                 Type::Table(b(row))
             }
             ":#" => {
@@ -3018,27 +2929,23 @@ impl Engine<'_> {
             unreachable!()
         };
         self.start = *start;
-        if params.is_empty() {
+        let checked = if params.is_empty() {
             self.expr(env, body, Some(&sig.out), effect)
-                .map_err(|mut e| {
-                    e.message = format!("{name}: {}", e.message);
-                    e
-                })?;
-            return Ok(());
-        }
-        let mut nested = env.clone();
-        let ids = self.resolver.parameters(stmt);
-        for (i, (name, t)) in params.iter().zip(&sig.args).enumerate() {
-            nested.insert(name.clone(), mono(t.clone()));
-            if let Some(id) = ids.get(i) {
-                self.result.bindings.insert(*id, mono(t.clone()));
+        } else {
+            let mut nested = env.clone();
+            let ids = self.resolver.parameters(stmt);
+            for (i, (name, t)) in params.iter().zip(&sig.args).enumerate() {
+                nested.insert(name.clone(), mono(t.clone()));
+                if let Some(id) = ids.get(i) {
+                    self.result.bindings.insert(*id, mono(t.clone()));
+                }
             }
-        }
-        self.reset_boundary(|this| this.expr(&nested, body, Some(&sig.out), false))
-            .map_err(|mut e| {
-                e.message = format!("{name}: {}", e.message);
-                e
-            })?;
+            self.reset_boundary(|this| this.expr(&nested, body, Some(&sig.out), false))
+        };
+        checked.map_err(|mut e| {
+            e.message = format!("{name}: {}", e.message);
+            e
+        })?;
         Ok(())
     }
     fn finish_signature(&mut self, sig: &Signature, outer: &Env) -> R<()> {
@@ -3384,62 +3291,17 @@ impl Engine<'_> {
         Ok(())
     }
 }
-fn visit_inference_exprs(p: &Program, mut f: impl FnMut(&Expr) -> R<()>) -> R<()> {
-    fn defs(ds: &[Stmt], f: &mut impl FnMut(&Expr) -> R<()>) -> R<()> {
-        for s in ds {
-            if let Stmt::Def { body, .. } | Stmt::Effect { body, .. } = s {
-                visit(body, f)?;
-            }
-        }
-        Ok(())
+fn visit_inference_exprs(p: &Program, mut visit: impl FnMut(&Expr) -> R<()>) -> R<()> {
+    fn walk(e: &Expr, visit: &mut impl FnMut(&Expr) -> R<()>) -> R<()> {
+        visit(e)?;
+        e.try_for_each_child(|child| walk(child, visit))
     }
-    fn visit(e: &Expr, f: &mut impl FnMut(&Expr) -> R<()>) -> R<()> {
-        use Expr::*;
-        f(e)?;
-        match e {
-            Call(_, xs) | Tuple(xs) | Array(xs) | Pipeline(xs) => {
-                for x in xs {
-                    visit(x, f)?;
-                }
-            }
-            Record(fs) | NamedRecord(_, fs) => {
-                for (_, x) in fs {
-                    visit(x, f)?;
-                }
-            }
-            Block(ss, tail) | Action(ss, tail) | Fallible(ss, tail) => {
-                defs(ss, f)?;
-                if let Some(x) = tail {
-                    visit(x, f)?;
-                }
-            }
-            Cases(cs, x) => {
-                for (c, b) in cs {
-                    visit(c, f)?;
-                    visit(b, f)?;
-                }
-                visit(x, f)?;
-            }
-            Lambda(_, x) | TypedLambda(_, _, x) | Raise(x) | Propagate(x) => visit(x, f)?,
-            Match(x, cs) => {
-                visit(x, f)?;
-                for c in cs {
-                    visit(&c.body, f)?;
-                }
-            }
-            Recover(x, cs) => {
-                visit(x, f)?;
-                for c in cs {
-                    visit(&c.body, f)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
+
+    for (body, _) in p.defs.iter().filter_map(Stmt::body_and_arity) {
+        walk(body, &mut visit)?;
     }
-    defs(&p.defs, &mut f)?;
     if let Some(e) = &p.entry {
-        visit(e, &mut f)?;
+        walk(e, &mut visit)?;
     }
     Ok(())
 }

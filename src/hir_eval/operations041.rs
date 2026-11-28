@@ -42,17 +42,8 @@ pub(super) fn variant(
     })))
 }
 
-pub(super) fn success(v: V) -> V {
-    V::Outcome(Ok(Rc::new(v)))
-}
-
 pub(super) fn failure(payload: V, origin: Span, diagnostic: Option<String>) -> V {
-    V::Outcome(Err(Rc::new(Failure {
-        payload: Rc::new(payload),
-        origin,
-        propagations: Vec::new(),
-        diagnostic,
-    })))
+    V::Outcome(Err(Failure::new(Rc::new(payload), origin, diagnostic)))
 }
 
 fn io_payload(program: &HirProgram, fault: &IoFault, span: Span) -> R<V> {
@@ -67,7 +58,7 @@ fn io_payload(program: &HirProgram, fault: &IoFault, span: Span) -> R<V> {
 
 pub(super) fn on_io(program: &HirProgram, r: Result<V, IoFault>, span: Span) -> R<V> {
     match r {
-        Ok(v) => Ok(success(v)),
+        Ok(v) => Ok(succeeded(v)),
         Err(e) => Ok(failure(
             io_payload(program, &e, span)?,
             span,
@@ -90,7 +81,7 @@ enum CsvFailure {
 
 fn on_csv(program: &HirProgram, result: Result<V, CsvFailure>, span: Span) -> R<V> {
     let (value, diagnostic) = match result {
-        Ok(v) => return Ok(success(v)),
+        Ok(v) => return Ok(succeeded(v)),
         Err(CsvFailure::Io(fault)) => {
             let payload = io_payload(program, &fault, span)?;
             (
@@ -298,7 +289,7 @@ pub(super) fn apply_core(
         }
         (CoreOp::IoPrint, [value]) => Ok(V::Action(Rc::new(Action::IoPrint(value.clone())))),
         (CoreOp::CheckedDiv, [a, b]) => match exact_binary(CoreOp::Div, a, b, Domain::Rational) {
-            Ok(v) => Ok(success(v)),
+            Ok(v) => Ok(succeeded(v)),
             Err(e) => numeric_failure(program, e, span),
         },
         (

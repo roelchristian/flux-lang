@@ -179,11 +179,11 @@ fn transform(
     };
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let value = eval.apply_checked(
+        let value = eval.apply_unary(
             callback.clone(),
-            vec![row.clone()],
-            Some(vec![row_type.clone()]),
-            Some(output_type.clone()),
+            row.clone(),
+            row_type.clone(),
+            output_type.clone(),
             span,
         )?;
         if select {
@@ -227,23 +227,24 @@ fn optional_sequence(items: &V, replacement: Option<&V>, span: Span) -> R<V> {
     Ok(wrap(out, None))
 }
 
+pub(super) fn handles(op: CoreOp) -> bool {
+    use CoreOp::*;
+    matches!(
+        op,
+        TableUnion | TableDistinct | TableSelect | DropNa | Fill | PresentOnly
+    )
+}
+
 pub(super) fn apply(
     op: CoreOp,
     args: &[V],
     types: &[Type],
-    _ty: &Type,
     schema: Option<&Rc<TableSchema>>,
     eval: &mut Eval<'_>,
     span: Span,
-) -> Option<R<V>> {
+) -> R<V> {
     use CoreOp::*;
-    if !matches!(
-        op,
-        TableUnion | TableDistinct | TableSelect | DropNa | Fill | PresentOnly
-    ) {
-        return None;
-    }
-    Some((|| match (op, args) {
+    match (op, args) {
         (TableUnion, [left, right]) => {
             let (left, left_schema) = table(left, span)?;
             let (right, right_schema) = table(right, span)?;
@@ -276,7 +277,7 @@ pub(super) fn apply(
         (Fill, [replacement, input]) => optional_sequence(input, Some(replacement), span),
         (PresentOnly, [input]) => optional_sequence(input, None, span),
         _ => Err(invariant(span, "invalid relational operation operands")),
-    })())
+    }
 }
 
 #[cfg(test)]
@@ -310,9 +311,9 @@ mod tests {
     #[test]
     fn outcomes_without_hash_representation_use_structural_equality() {
         let rows = [
-            operations041::success(exact_i128(3, Domain::Integer)),
-            operations041::success(exact_i128(3, Domain::Rational)),
-            operations041::success(exact_i128(9, Domain::Integer)),
+            succeeded(exact_i128(3, Domain::Integer)),
+            succeeded(exact_i128(3, Domain::Rational)),
+            succeeded(exact_i128(9, Domain::Integer)),
         ];
         let stable = stable_set(&rows, Span::default()).unwrap_or_else(|_| panic!("valid rows"));
         assert_eq!(

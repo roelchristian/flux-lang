@@ -15,13 +15,7 @@ fn checked_key(
     remaining: &mut usize,
     span: Span,
 ) -> R<Key> {
-    let value = eval.apply_checked(
-        f.clone(),
-        vec![row.clone()],
-        Some(vec![row_ty.clone()]),
-        Some(key_ty.clone()),
-        span,
-    )?;
+    let value = eval.apply_unary(f.clone(), row.clone(), row_ty.clone(), key_ty.clone(), span)?;
     key_with_budget(&value, remaining, 0).ok_or_else(|| {
         error(
             span,

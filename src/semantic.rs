@@ -339,21 +339,10 @@ fn annotated(t: &TypeAnnotation) -> bool {
     }
 }
 fn private_nominal<'a>(ty: &'a Type, private: &HashSet<&str>) -> Option<&'a NominalId> {
-    use Type::*;
-    match ty {
-        Nominal(id) | Applied(id, _) if private.contains(id.name.as_str()) => Some(id),
-        Applied(_, args) => args.iter().find_map(|t| private_nominal(t, private)),
-        Seq(t) | Optional(t) | Action(t) | Table(t) => private_nominal(t, private),
-        Dict(a, b) | Fun(a, b) | Result(a, b) => {
-            private_nominal(a, private).or_else(|| private_nominal(b, private))
-        }
-        Tuple(ts) => ts.iter().find_map(|t| private_nominal(t, private)),
-        Record(row) => row
-            .fields
-            .iter()
-            .find_map(|(_, t)| private_nominal(t, private)),
+    ty.find_map(|t| match t {
+        Type::Nominal(id) | Type::Applied(id, _) if private.contains(id.name.as_str()) => Some(id),
         _ => None,
-    }
+    })
 }
 fn checked_interfaces(
     program: &Program,

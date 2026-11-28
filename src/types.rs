@@ -1,6 +1,7 @@
 //! Canonical Flux types and type/row unification.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::ops::ControlFlow::{self, Break, Continue};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Prim {
@@ -103,6 +104,45 @@ impl Type {
             }
             _ => None,
         }
+    }
+
+    /// Select the first matching node in preorder, including record fields.
+    pub(crate) fn find_map<'a, B>(
+        &'a self,
+        mut select: impl FnMut(&'a Type) -> Option<B>,
+    ) -> Option<B> {
+        self.walk(&mut |t| select(t).map_or(Continue(()), Break))
+            .break_value()
+    }
+
+    fn walk<'a, B>(&'a self, visit: &mut impl FnMut(&'a Type) -> ControlFlow<B>) -> ControlFlow<B> {
+        visit(self)?;
+        match self {
+            Self::Seq(t) | Self::Optional(t) | Self::Action(t) | Self::Table(t) => t.walk(visit),
+            Self::Dict(a, b) | Self::Fun(a, b) | Self::Result(a, b) => {
+                a.walk(visit)?;
+                b.walk(visit)
+            }
+            Self::Tuple(ts) | Self::Applied(_, ts) => ts.iter().try_for_each(|t| t.walk(visit)),
+            Self::Record(row) => row.fields.iter().try_for_each(|(_, t)| t.walk(visit)),
+            Self::Var(_) | Self::Prim(_) | Self::Nominal(_) | Self::Never => Continue(()),
+        }
+    }
+
+    fn visit(&self, mut visit: impl FnMut(&Type)) {
+        let _: ControlFlow<()> = self.walk(&mut |t| {
+            visit(t);
+            Continue(())
+        });
+    }
+
+    fn try_visit<E>(&self, mut visit: impl FnMut(&Type) -> Result<(), E>) -> Result<(), E> {
+        self.walk(&mut |t| match visit(t) {
+            Ok(()) => Continue(()),
+            Err(error) => Break(error),
+        })
+        .break_value()
+        .map_or(Ok(()), Err)
     }
 }
 
@@ -261,55 +301,25 @@ pub struct InferCtx {
 type R<T> = Result<T, String>;
 
 fn free(t: &Type, out: &mut BTreeSet<u32>) {
-    match t {
-        Type::Var(v) => {
-            out.insert(*v);
+    t.visit(|t| {
+        if let Type::Var(id) | Type::Record(Row { tail: Some(id), .. }) = t {
+            out.insert(*id);
         }
-        Type::Seq(x) | Type::Optional(x) | Type::Action(x) | Type::Table(x) => free(x, out),
-        Type::Dict(a, b) | Type::Fun(a, b) | Type::Result(a, b) => {
-            free(a, out);
-            free(b, out);
-        }
-        Type::Tuple(ts) | Type::Applied(_, ts) => {
-            for t in ts {
-                free(t, out);
-            }
-        }
-        Type::Record(row) => {
-            if let Some(id) = row.tail {
-                out.insert(id);
-            }
-            for (_, ty) in &row.fields {
-                free(ty, out);
-            }
-        }
-        Type::Prim(_) | Type::Nominal(_) | Type::Never => {}
-    }
+    });
 }
+
 fn row_labels(t: &Type, out: &mut BTreeMap<u32, BTreeSet<String>>) {
-    match t {
-        Type::Record(row) => {
-            if let Some(id) = row.tail {
-                out.entry(id)
-                    .or_default()
-                    .extend(row.fields.iter().map(|(n, _)| n.clone()));
-            }
-            for (_, t) in &row.fields {
-                row_labels(t, out);
-            }
+    t.visit(|t| {
+        if let Type::Record(Row {
+            fields,
+            tail: Some(id),
+        }) = t
+        {
+            out.entry(*id)
+                .or_default()
+                .extend(fields.iter().map(|(name, _)| name.clone()));
         }
-        Type::Seq(x) | Type::Optional(x) | Type::Action(x) | Type::Table(x) => row_labels(x, out),
-        Type::Dict(a, b) | Type::Fun(a, b) | Type::Result(a, b) => {
-            row_labels(a, out);
-            row_labels(b, out);
-        }
-        Type::Tuple(xs) | Type::Applied(_, xs) => {
-            for x in xs {
-                row_labels(x, out);
-            }
-        }
-        _ => {}
-    }
+    });
 }
 
 fn remap(t: &Type, ids: &BTreeMap<u32, u32>) -> Type {
@@ -470,33 +480,16 @@ impl InferCtx {
     }
 
     pub(crate) fn register(&mut self, t: &Type) -> R<()> {
-        match t {
-            Type::Var(id) => self.register_kind(*id, false)?,
-            Type::Seq(x) | Type::Optional(x) | Type::Action(x) | Type::Table(x) => {
-                self.register(x)?
-            }
-            Type::Dict(a, b) | Type::Fun(a, b) | Type::Result(a, b) => {
-                self.register(a)?;
-                self.register(b)?;
-            }
-            Type::Tuple(ts) | Type::Applied(_, ts) => {
-                for t in ts {
-                    self.register(t)?;
-                }
-            }
+        t.try_visit(|t| match t {
+            Type::Var(id) => self.register_kind(*id, false),
             Type::Record(row) => {
                 if let Some(id) = row.tail {
                     self.register_kind(id, true)?;
                 }
-                let resolved = self.resolve_row(row);
-                self.register_row(&resolved)?;
-                for (_, t) in &row.fields {
-                    self.register(t)?;
-                }
+                self.register_row(&self.resolve_row(row))
             }
-            Type::Prim(_) | Type::Nominal(_) | Type::Never => {}
-        }
-        Ok(())
+            _ => Ok(()),
+        })
     }
     fn add_lacks(&mut self, id: u32, labels: BTreeSet<String>) -> R<()> {
         self.register_kind(id, true)?;
