@@ -10,6 +10,12 @@ obsolete specifications are not kept as duplicate files.
 - Consolidate shared Rust internals and streamline the reference and example
   index without changing the language. Group integration tests by topic.
 
+## Draft 0.20
+
+- Reorganize the single Rust crate by compiler, shared contracts, typed runtime,
+  numerical arrays, native library, tooling and host interfaces. Isolate the
+  historical oracle. Existing Flux programs and public Rust imports are unchanged.
+
 ## Draft 0.19
 
 - Add Machina packed dense-array buffers, shared views and selected checked

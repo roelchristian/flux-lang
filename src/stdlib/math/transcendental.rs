@@ -1,5 +1,5 @@
 //! Binary64 kernels with explicit finite-result and domain contracts.
-use super::super::{finite, wide05, CoreOp, NumericResult, Type, DIV_BY_ZERO, V};
+use super::super::{finite, wide, CoreOp, NumericResult, Type, DIV_BY_ZERO, V};
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_rational::BigRational;
@@ -7,7 +7,7 @@ use num_traits::{One, Signed};
 use std::f64::consts::{E, PI, TAU};
 
 fn root(degree: &V, x: f64) -> NumericResult<f64> {
-    let n = wide05::integral(degree)?;
+    let n = wide::integral(degree)?;
     if !n.is_positive() {
         return Err("math.root degree must be positive");
     }
@@ -29,7 +29,7 @@ fn root(degree: &V, x: f64) -> NumericResult<f64> {
     }
     // Compute 1/n directly: an arbitrary-precision degree itself might not
     // be representable as a finite floating-point value.
-    let reciprocal = wide05::to_real(&BigRational::new_raw(BigInt::one(), n))?;
+    let reciprocal = wide::to_real(&BigRational::new_raw(BigInt::one(), n))?;
     Ok(libm::pow(x.abs(), reciprocal).copysign(x))
 }
 
@@ -114,7 +114,7 @@ mod tests {
         let v = apply(CoreOp::MathHypot, &[V::Real(3e200), V::Real(4e200)], &r).unwrap();
         assert!(matches!(v, V::Real(h) if (h / 5e200 - 1.0).abs() <= 2.0 * f64::EPSILON));
         let n = (BigInt::one() << 20_000_usize) + BigInt::one();
-        let n = wide05::ratio_value(
+        let n = wide::ratio_value(
             BigRational::from_integer(n),
             super::super::super::Domain::Natural,
         )

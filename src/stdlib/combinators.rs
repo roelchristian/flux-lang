@@ -1,5 +1,7 @@
 //! Option and Result combinators. Callback evidence comes from checked call sites.
-use super::*;
+use super::{
+    fun_arg, invariant, operation_arity, succeeded, CoreOp, Eval, Failure, Rc, Span, Type, R, V,
+};
 
 pub(super) fn handles(op: CoreOp) -> bool {
     use CoreOp::*;

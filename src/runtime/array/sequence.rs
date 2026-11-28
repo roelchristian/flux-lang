@@ -1,6 +1,9 @@
 //! Explicit indexed sequence operations. Unlike dense-array operations these
 //! consume and produce ordinary, potentially nested Flux sequences.
-use super::*;
+use super::super::{
+    error, exact_i128, exact_index, invariant, order, resources, CoreOp, Domain, Eval, Ordering,
+    Rc, Span, Type, R, V,
+};
 
 fn seq(value: &V, span: Span) -> R<&[V]> {
     let V::Sequence(values) = value else {
@@ -138,14 +141,14 @@ fn grade(selector: &V, input: &V, types: &[Type], eval: &mut Eval<'_>, span: Spa
     ))
 }
 
-pub(super) fn handles(op: CoreOp) -> bool {
+pub(in crate::hir_eval) fn handles(op: CoreOp) -> bool {
     matches!(
         op,
         CoreOp::ArrayWindows | CoreOp::ArraySelect | CoreOp::ArrayGrade | CoreOp::ArrayPermute
     )
 }
 
-pub(super) fn apply(
+pub(in crate::hir_eval) fn apply(
     op: CoreOp,
     args: &[V],
     types: &[Type],
@@ -171,6 +174,7 @@ pub(super) fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hir_eval::repr;
 
     fn n(n: i128) -> V {
         exact_i128(n, Domain::Natural)

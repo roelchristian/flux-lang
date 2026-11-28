@@ -1,5 +1,8 @@
 //! Shared numeric and shape inference for Mathesis calls and references.
-use super::*;
+use super::super::{p, s, Engine, Env, R};
+use crate::parser::Expr;
+use crate::types::{Class, Prim, Type};
+
 use crate::builtins::{Builtin, MathShape, MathType, Shape};
 
 impl Engine<'_> {
@@ -11,7 +14,7 @@ impl Engine<'_> {
         want: Option<&Type>,
         effect: bool,
     ) -> R<Type> {
-        let signature = spec.mathesis().expect("registry Mathesis signature");
+        let signature = spec.math_signature().expect("registry Mathesis signature");
         let numeric = self.cx.fresh();
         let mut types = Vec::with_capacity(args.len());
         let wanted = want.map(|ty| self.cx.resolve(ty));
@@ -46,7 +49,7 @@ impl Engine<'_> {
         types: &[Type],
         want: Option<&Type>,
     ) -> R<Type> {
-        let signature = spec.mathesis().expect("registry Mathesis signature");
+        let signature = spec.math_signature().expect("registry Mathesis signature");
         let operands = types
             .iter()
             .map(|ty| self.cx.resolve(ty))
@@ -102,7 +105,8 @@ impl Engine<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::R;
+    use crate::infer::{infer, InferResult};
 
     fn prepare(source: &str) -> R<InferResult> {
         let parsed = crate::parser::parse(source).unwrap();

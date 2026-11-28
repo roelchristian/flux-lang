@@ -1,5 +1,7 @@
 //! Checked signatures and bidirectional elaboration of the array primitives.
-use super::*;
+use super::super::{f, o, p, s, Engine, Env, R};
+use crate::parser::Expr;
+use crate::types::{Class, Prim, Type};
 
 /// Callback operands are resolved after their data inputs, so concrete
 /// element types can guide lambdas and instantiate polymorphic references.
@@ -207,7 +209,8 @@ impl Engine<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::R;
+    use crate::infer::{infer, InferResult};
 
     fn check(source: &str) -> R<InferResult> {
         let program = crate::parser::parse(source).unwrap();

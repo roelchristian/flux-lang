@@ -1,5 +1,5 @@
 //! Checked, seedless left reduction of a sequence.
-use super::*;
+use super::{invariant, Eval, Rc, Span, Type, R, V};
 
 pub(super) fn apply(
     args: &[V],

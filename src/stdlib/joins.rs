@@ -1,5 +1,8 @@
 //! Stable, bounded typed equijoins over checked row and key witnesses.
-use super::*;
+use super::{
+    error, invariant, key_with_budget, resources, CoreOp, Eval, HashMap, Key, Rc, Span,
+    TableSchema, Type, KEY_WORK_LIMIT, R, V,
+};
 
 pub(super) fn handles(op: CoreOp) -> bool {
     use CoreOp::*;

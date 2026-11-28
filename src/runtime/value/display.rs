@@ -1,5 +1,6 @@
 //! Runtime value rendering for script output and REPL inspection.
-use super::*;
+use super::V;
+use crate::hir::TableSchema;
 
 #[derive(Clone, Copy)]
 enum Style {
@@ -7,11 +8,11 @@ enum Style {
     Inspect,
 }
 
-pub(super) fn repr(value: &V) -> String {
+pub(in crate::hir_eval) fn repr(value: &V) -> String {
     render(value, Style::Output)
 }
 
-pub(super) fn inspect(value: &V) -> String {
+pub(in crate::hir_eval) fn inspect(value: &V) -> String {
     render(value, Style::Inspect)
 }
 

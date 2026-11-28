@@ -1,24 +1,25 @@
 //! Heap representation and algorithms reached only when an exact value is
 //! decimal or cannot be held in the inline fraction.
-use super::{decimal05::Decimal, CoreOp, Domain, Exact, NumericResult, DIV_BY_ZERO, V};
+use super::super::{array::Dense, resources, CoreOp, Domain, Exact, NumericResult, DIV_BY_ZERO, V};
+use super::decimal::Decimal;
 use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::{fmt, rc::Rc};
 
-pub(super) const RESOURCE: &str = "exact numeric resource bit limit exceeded";
+pub(in crate::hir_eval) const RESOURCE: &str = "exact numeric resource bit limit exceeded";
 
-pub(super) fn max_bits() -> u64 {
-    super::resources::limits().max_exact_bits
+pub(in crate::hir_eval) fn max_bits() -> u64 {
+    resources::limits().max_exact_bits
 }
 
-pub(super) fn decimal_digit_limit() -> usize {
+pub(in crate::hir_eval) fn decimal_digit_limit() -> usize {
     // 30103/100000 is just above log10(2); leave room for a sign and rounding.
     ((u128::from(max_bits()) * 30_103 / 100_000 + 4).min(usize::MAX as u128)) as usize
 }
 
-pub(super) fn guard_inline(value: Exact) -> NumericResult<Exact> {
+pub(in crate::hir_eval) fn guard_inline(value: Exact) -> NumericResult<Exact> {
     let limit = max_bits();
     if limit < 128 {
         let bits = |n: i128| u64::from(u128::BITS - n.unsigned_abs().leading_zeros());
@@ -29,7 +30,7 @@ pub(super) fn guard_inline(value: Exact) -> NumericResult<Exact> {
     Ok(value)
 }
 
-pub(super) fn guard_value(value: V) -> NumericResult<V> {
+pub(in crate::hir_eval) fn guard_value(value: V) -> NumericResult<V> {
     if let V::Exact(exact) = value {
         guard_inline(exact)?;
     }
@@ -41,7 +42,7 @@ pub(super) fn guard_value(value: V) -> NumericResult<V> {
 /// record (for example date offsets and stable sort indices). Check those
 /// value boundaries under narrower host caps. The default fast path makes
 /// no walk, and nested values use an explicit depth-first stack.
-pub(super) fn guard_embedded(value: V) -> NumericResult<V> {
+pub(in crate::hir_eval) fn guard_embedded(value: V) -> NumericResult<V> {
     let limit = max_bits();
     if limit >= 128 {
         return Ok(value);
@@ -50,7 +51,7 @@ pub(super) fn guard_embedded(value: V) -> NumericResult<V> {
     enum Next {
         Value(V),
         Items(Rc<[V]>, usize),
-        Dense(Rc<super::arrays012::Dense>, usize),
+        Dense(Rc<Dense>, usize),
         Record(Rc<[(Box<str>, V)]>, usize),
         Dict(Rc<[(V, V)]>, usize),
     }
@@ -100,7 +101,7 @@ pub(super) fn guard_embedded(value: V) -> NumericResult<V> {
 }
 
 #[derive(Clone)]
-pub(super) enum Wide {
+pub(in crate::hir_eval) enum Wide {
     Exact { ratio: BigRational, domain: Domain },
     Decimal(Decimal),
 }
@@ -112,14 +113,14 @@ impl fmt::Display for Wide {
         }
     }
 }
-pub(super) fn guard(x: &BigInt) -> NumericResult<()> {
+pub(in crate::hir_eval) fn guard(x: &BigInt) -> NumericResult<()> {
     if x.bits() > max_bits() {
         Err(RESOURCE)
     } else {
         Ok(())
     }
 }
-pub(super) fn parse_int(s: &str) -> NumericResult<BigInt> {
+pub(in crate::hir_eval) fn parse_int(s: &str) -> NumericResult<BigInt> {
     if s.trim_start_matches(['-', '+'])
         .trim_start_matches('0')
         .len()
@@ -133,7 +134,7 @@ pub(super) fn parse_int(s: &str) -> NumericResult<BigInt> {
     guard(&n)?;
     Ok(n)
 }
-pub(super) fn ratio(v: &V) -> NumericResult<BigRational> {
+pub(in crate::hir_eval) fn ratio(v: &V) -> NumericResult<BigRational> {
     Ok(match v {
         V::Exact(x) => BigRational::new_raw(BigInt::from(x.n), BigInt::from(x.d)),
         V::Wide(x) => match x.as_ref() {
@@ -143,7 +144,7 @@ pub(super) fn ratio(v: &V) -> NumericResult<BigRational> {
         _ => return Err("expected an exact number"),
     })
 }
-pub(super) fn kind(v: &V) -> Option<Domain> {
+pub(in crate::hir_eval) fn kind(v: &V) -> Option<Domain> {
     match v {
         V::Exact(x) => Some(x.domain),
         V::Wide(x) => match x.as_ref() {
@@ -153,7 +154,7 @@ pub(super) fn kind(v: &V) -> Option<Domain> {
         _ => None,
     }
 }
-pub(super) fn ratio_value(ratio: BigRational, domain: Domain) -> NumericResult<V> {
+pub(in crate::hir_eval) fn ratio_value(ratio: BigRational, domain: Domain) -> NumericResult<V> {
     guard(ratio.numer())?;
     guard(ratio.denom())?;
     match domain {
@@ -172,7 +173,7 @@ pub(super) fn ratio_value(ratio: BigRational, domain: Domain) -> NumericResult<V
         },
     )
 }
-pub(super) fn integral(v: &V) -> NumericResult<BigInt> {
+pub(in crate::hir_eval) fn integral(v: &V) -> NumericResult<BigInt> {
     if let V::Exact(n) = v {
         return Ok(BigInt::from(n.integral()?));
     }
@@ -182,14 +183,14 @@ pub(super) fn integral(v: &V) -> NumericResult<BigInt> {
     }
     Ok(ratio.into_raw().0)
 }
-pub(super) fn exponent(b: &V) -> NumericResult<BigInt> {
+pub(in crate::hir_eval) fn exponent(b: &V) -> NumericResult<BigInt> {
     let e = integral(b)?;
     if e.is_negative() || kind(b) != Some(Domain::Natural) {
         return Err("power requires a natural exponent");
     }
     Ok(e)
 }
-pub(super) fn binary(op: CoreOp, a: &V, b: &V, domain: Domain) -> NumericResult<V> {
+pub(in crate::hir_eval) fn binary(op: CoreOp, a: &V, b: &V, domain: Domain) -> NumericResult<V> {
     use CoreOp::*;
     let x = ratio(a)?;
     let y = ratio(b)?;
@@ -251,7 +252,7 @@ pub(super) fn binary(op: CoreOp, a: &V, b: &V, domain: Domain) -> NumericResult<
 }
 
 /// Convert a stored finite binary64 payload to its exact mathematical value.
-pub(super) fn from_real(value: f64) -> NumericResult<BigRational> {
+pub(in crate::hir_eval) fn from_real(value: f64) -> NumericResult<BigRational> {
     if !value.is_finite() {
         return Err("nonfinite real value");
     }
@@ -275,7 +276,7 @@ pub(super) fn from_real(value: f64) -> NumericResult<BigRational> {
 }
 
 /// Round a reduced exact fraction straight to IEEE binary64; no double rounding.
-pub(super) fn to_real(x: &BigRational) -> NumericResult<f64> {
+pub(in crate::hir_eval) fn to_real(x: &BigRational) -> NumericResult<f64> {
     if x.is_zero() {
         return Ok(0.0);
     }
@@ -330,7 +331,7 @@ pub(super) fn to_real(x: &BigRational) -> NumericResult<f64> {
 /// A wide exact radicand need not itself fit binary64. Round its square root
 /// from integer bounds so neither intermediate overflow nor cancellation in a
 /// lossy converted radicand determines the result.
-pub(super) fn sqrt(x: &BigRational) -> NumericResult<f64> {
+pub(in crate::hir_eval) fn sqrt(x: &BigRational) -> NumericResult<f64> {
     if x.is_negative() {
         return Err("square root of a negative number");
     }

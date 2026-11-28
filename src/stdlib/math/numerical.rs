@@ -1,5 +1,8 @@
 //! Bounded binary64 solvers. Checked callbacks remain ordinary Flux calls.
-use super::super::*;
+use super::super::{
+    as_seq, effects, error, exact_index, invariant, resources, succeeded, Control, CoreOp, Eval,
+    Prim, Signed, Span, Type, R, V,
+};
 
 const MAX_WORK: usize = 100_000;
 const REAL: Type = Type::Prim(Prim::R);
@@ -416,12 +419,8 @@ pub(super) fn apply(op: CoreOp, args: &[V], eval: &mut Eval<'_>, span: Span) -> 
         Ok(value) => Ok(succeeded(V::Real(value))),
         Err(SolverError::Callback(control)) => Err(control),
         Err(SolverError::Failure { tag, detail }) => {
-            let payload = operations041::variant(eval.p, "solvererr", tag, vec![], span)?;
-            Ok(operations041::failure(
-                payload,
-                span,
-                Some(detail.to_owned()),
-            ))
+            let payload = effects::variant(eval.p, "solvererr", tag, vec![], span)?;
+            Ok(effects::failure(payload, span, Some(detail.to_owned())))
         }
     }
 }

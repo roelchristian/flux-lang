@@ -1,5 +1,8 @@
 //! Typed set, row projection and explicit missing-value transformations.
-use super::*;
+use super::{
+    as_seq, equal, error, invariant, key_with_budget, layout, resources, wrap, CoreOp, Eval, Rc,
+    Span, TableSchema, Type, R, V,
+};
 use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
@@ -283,11 +286,12 @@ pub(super) fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hir_eval::{decimal, exact_i128, repr, succeeded, Domain};
 
     #[test]
     fn first_record_wins_despite_field_order_and_numeric_scale() {
-        let short = decimal05::decimal_literal("3.0").unwrap();
-        let long = decimal05::decimal_literal("3.00").unwrap();
+        let short = decimal::decimal_literal("3.0").unwrap();
+        let long = decimal::decimal_literal("3.00").unwrap();
         let row = |amount, reverse| {
             let mut fields = vec![
                 ("amount".into(), amount),

@@ -1,4 +1,4 @@
-//! Structured semantic diagnostics shared by the Draft 0.4 frontend.
+//! Structured semantic diagnostics shared by the compiler and typed runtime.
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Span {
@@ -83,3 +83,6 @@ impl Diagnostic {
         crate::Error::from_diagnostic(self)
     }
 }
+
+pub(crate) mod error;
+pub(crate) mod source_map;

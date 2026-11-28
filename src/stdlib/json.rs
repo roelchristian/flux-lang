@@ -1,6 +1,9 @@
 //! Typed JSON without a dynamic Flux value or a binary64 conversion path.
-use super::operations041::{failure, variant};
-use super::*;
+use super::effects::{failure, variant};
+use super::{
+    decimal, invariant, parse_exact_value, succeeded, wide, CoreOp, Domain, HashMap, HirProgram,
+    Prim, Rc, Span, TableSchema, Type, Wide, R, V,
+};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
@@ -134,7 +137,7 @@ fn number(raw: &str, kind: Prim, budget: &mut Budget) -> J<V> {
     }
     let plain = plain_number(raw, budget)?;
     if kind == Prim::D {
-        return decimal05::decimal_literal(&plain).map_err(shape);
+        return decimal::decimal_literal(&plain).map_err(shape);
     }
     if kind == Prim::Q {
         return parse_exact_value(&plain, Domain::Rational).map_err(shape);
@@ -148,8 +151,8 @@ fn number(raw: &str, kind: Prim, budget: &mut Budget) -> J<V> {
         return parse_exact_value(&plain, d).map_err(shape);
     }
     let exact = parse_exact_value(&plain, Domain::Rational).map_err(shape)?;
-    let ratio = wide05::ratio(&exact).map_err(shape)?;
-    wide05::ratio_value(ratio, d).map_err(shape)
+    let ratio = wide::ratio(&exact).map_err(shape)?;
+    wide::ratio_value(ratio, d).map_err(shape)
 }
 
 struct Object<'a>(Vec<(String, &'a RawValue)>);
@@ -328,11 +331,11 @@ impl Encoder {
                 let decimal = if matches!(v, V::Wide(w) if matches!(w.as_ref(), Wide::Decimal(_))) {
                     v.clone()
                 } else {
-                    let ratio = wide05::ratio(v).map_err(shape)?;
+                    let ratio = wide::ratio(v).map_err(shape)?;
                     if ratio.is_integer() {
                         return self.push(&ratio.numer().to_string());
                     }
-                    decimal05::decimal_from_exact(v).map_err(shape)?
+                    decimal::decimal_from_exact(v).map_err(shape)?
                 };
                 let V::Wide(wide) = decimal else {
                     return Err(shape("invalid decimal representation"));
@@ -431,6 +434,8 @@ pub(super) fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hir_eval::{rational, repr};
+    use num_bigint::BigInt;
     #[test]
     fn json_numeric_spellings_are_lossless() {
         for (a, b) in [

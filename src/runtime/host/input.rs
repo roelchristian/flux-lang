@@ -1,4 +1,4 @@
-use crate::errors041::{IoFault, IoKind};
+use crate::host_fault::{IoFault, IoKind};
 use std::io::{Read, Write};
 
 #[cfg(any(test, feature = "legacy-oracle"))]

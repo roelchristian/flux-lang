@@ -1,10 +1,18 @@
-//! Effect construction and typed recoverable failures for the 0.4.1 runtime.
-use super::*;
+//! Effect construction and typed recoverable failures in the standard library.
+use super::{
+    error, exact_binary, exact_i128, invariant, read_cell, repr, succeeded, wide, write_cell,
+    Action, CoreOp, Domain, Eval, Failure, HirProgram, ResourcePolicy, Span, TableSchema, Type,
+    VariantValue, DIV_BY_ZERO, R, V,
+};
 use crate::{
     csv::{self, CsvFault, CsvFaultKind, RuntimeInput},
-    errors041::{self, IoFault, IoKind},
+    host_fault::{IoFault, IoKind},
+    standard_errors,
 };
-use std::io::ErrorKind;
+use std::{
+    io::{ErrorKind, Write},
+    rc::Rc,
+};
 
 fn string(s: impl AsRef<str>) -> V {
     V::String(Rc::from(s.as_ref()))
@@ -21,7 +29,7 @@ pub(super) fn variant(
     fields: Vec<V>,
     span: Span,
 ) -> R<V> {
-    let descriptor = errors041::lookup(owner, name)
+    let descriptor = standard_errors::lookup(owner, name)
         .ok_or_else(|| invariant(span, format!("unknown standard constructor {owner}.{name}")))?;
     if descriptor.payload.len() != fields.len() {
         return Err(invariant(
@@ -219,11 +227,20 @@ fn csv_write(path: &str, value: &V) -> Result<V, CsvFailure> {
 }
 
 pub(super) fn apply_action(action: &Action, eval: &mut Eval<'_>, span: Span) -> Option<R<V>> {
-    let program = eval.p;
+    execute(action, eval.p, eval.input, eval.output, span)
+}
+
+fn execute(
+    action: &Action,
+    program: &HirProgram,
+    input: &mut dyn RuntimeInput,
+    output: &mut dyn Write,
+    span: Span,
+) -> Option<R<V>> {
     Some(match action {
         Action::IoRead(path) => on_io(
             program,
-            csv::read_text_with_input(eval.input, path, "text", csv::TEXT_MAX_BYTES).map(string),
+            csv::read_text_with_input(input, path, "text", csv::TEXT_MAX_BYTES).map(string),
             span,
         ),
         Action::IoWrite(path, content) => on_io(
@@ -242,17 +259,16 @@ pub(super) fn apply_action(action: &Action, eval: &mut Eval<'_>, span: Span) -> 
         ),
         Action::IoPrint(value) => {
             let line = repr(value);
-            let result = eval
-                .output
+            let result = output
                 .write_all(line.as_bytes())
-                .and_then(|()| eval.output.write_all(b"\n"))
-                .and_then(|()| eval.output.flush())
+                .and_then(|()| output.write_all(b"\n"))
+                .and_then(|()| output.flush())
                 .map(|()| V::Unit)
                 .map_err(|e| IoFault::details(IoKind::Write, "stdout", format!("stdout: {e}")));
             on_io(program, result, span)
         }
         Action::CsvRead(path, schema) => {
-            on_csv(program, csv_read(eval.input, path, schema.as_ref()), span)
+            on_csv(program, csv_read(input, path, schema.as_ref()), span)
         }
         Action::CsvWrite(path, value) => on_csv(program, csv_write(path, value), span),
         _ => return None,
@@ -293,10 +309,8 @@ pub(super) fn apply_core(
             // Keep the existing checked division range outcome at the
             // default precision. A host override is a runtime budget, not
             // a new recoverable source-level arithmetic result.
-            Err(wide05::RESOURCE)
-                if wide05::max_bits() != ResourcePolicy::default().max_exact_bits =>
-            {
-                Err(error(span, wide05::RESOURCE))
+            Err(wide::RESOURCE) if wide::max_bits() != ResourcePolicy::default().max_exact_bits => {
+                Err(error(span, wide::RESOURCE))
             }
             Err(e) => numeric_failure(program, e, span),
         },

@@ -1,18 +1,19 @@
 //! Exact decimals preserve their written scale; the coefficient is signed.
-use super::{as_ratio, wide05, CoreOp, NumericResult, Wide, V};
+use super::super::{as_ratio, CoreOp, NumericResult, V};
+use super::wide::{self as wide, Wide};
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{One, Signed, Zero};
 use std::{fmt, rc::Rc};
 
-pub(super) const MAX_DECIMAL_SCALE: u32 = 10_000;
+pub(in crate::hir_eval) const MAX_DECIMAL_SCALE: u32 = 10_000;
 const SCALE_LIMIT: &str = "decimal scale exceeds the resource limit (10000)";
 const COEFFICIENT_LIMIT: &str = "decimal coefficient exceeds the resource bit limit";
 const NONFINITE_DECIMAL: &str = "exact value has no finite decimal expansion";
 
 #[derive(Clone, Debug)]
-pub(super) struct Decimal {
+pub(in crate::hir_eval) struct Decimal {
     coefficient: BigInt,
     scale: u32,
 }
@@ -32,7 +33,7 @@ fn check_scale(scale: usize) -> NumericResult<u32> {
 impl Decimal {
     fn new(coefficient: BigInt, scale: u32) -> NumericResult<Self> {
         check_scale(scale as usize)?;
-        if coefficient.bits() > wide05::max_bits() {
+        if coefficient.bits() > wide::max_bits() {
             return Err(COEFFICIENT_LIMIT);
         }
         Ok(Self { coefficient, scale })
@@ -61,7 +62,7 @@ impl Decimal {
             fraction
         };
         // Decimal digits carry at least three bits each after the first.
-        if (whole.len() + fraction.len()).saturating_sub(1) > wide05::decimal_digit_limit() {
+        if (whole.len() + fraction.len()).saturating_sub(1) > wide::decimal_digit_limit() {
             return Err(COEFFICIENT_LIMIT);
         }
         let coefficient = if whole.is_empty() && fraction.is_empty() {
@@ -97,11 +98,11 @@ impl Decimal {
         Self::new(coefficient, scale)
     }
 
-    pub(super) fn storage_bits(&self) -> u64 {
+    pub(in crate::hir_eval) fn storage_bits(&self) -> u64 {
         self.coefficient.bits()
     }
 
-    pub(super) fn exact(&self) -> NumericResult<BigRational> {
+    pub(in crate::hir_eval) fn exact(&self) -> NumericResult<BigRational> {
         Ok(BigRational::new(
             self.coefficient.clone(),
             pow10(self.scale),
@@ -122,7 +123,7 @@ impl Decimal {
             .bits()
             .saturating_add(other.coefficient.bits())
             .saturating_sub(1)
-            > wide05::max_bits()
+            > wide::max_bits()
             && !self.coefficient.is_zero()
             && !other.coefficient.is_zero()
         {
@@ -161,7 +162,7 @@ impl Decimal {
             .bits()
             .saturating_sub(1)
             .saturating_mul(u64::from(exponent))
-            >= wide05::max_bits()
+            >= wide::max_bits()
         {
             return Err(COEFFICIENT_LIMIT);
         }
@@ -224,15 +225,15 @@ fn with_decimal<T>(value: &V, f: impl FnOnce(&Decimal) -> NumericResult<T>) -> N
     f(&Decimal::from_exact(&ratio(value)?)?)
 }
 
-pub(super) fn decimal_literal(raw: &str) -> NumericResult<V> {
+pub(in crate::hir_eval) fn decimal_literal(raw: &str) -> NumericResult<V> {
     Decimal::parse(raw).map(wrap)
 }
 
-pub(super) fn decimal_from_exact(value: &V) -> NumericResult<V> {
+pub(in crate::hir_eval) fn decimal_from_exact(value: &V) -> NumericResult<V> {
     with_decimal(value, |d| Ok(wrap(d.clone())))
 }
 
-pub(super) fn decimal_binary(op: CoreOp, a: &V, b: &V) -> NumericResult<V> {
+pub(in crate::hir_eval) fn decimal_binary(op: CoreOp, a: &V, b: &V) -> NumericResult<V> {
     with_decimal(a, |a| {
         if op == CoreOp::Pow {
             let (exponent, denominator) = as_ratio(b)?;
@@ -253,7 +254,7 @@ pub(super) fn decimal_binary(op: CoreOp, a: &V, b: &V) -> NumericResult<V> {
     })
 }
 
-pub(super) fn decimal_unary(op: CoreOp, value: &V) -> NumericResult<V> {
+pub(in crate::hir_eval) fn decimal_unary(op: CoreOp, value: &V) -> NumericResult<V> {
     with_decimal(value, |d| {
         let coefficient = match op {
             CoreOp::Negate => -&d.coefficient,
@@ -264,7 +265,7 @@ pub(super) fn decimal_unary(op: CoreOp, value: &V) -> NumericResult<V> {
     })
 }
 
-pub(super) fn quantize(value: &V, scale: usize) -> NumericResult<V> {
+pub(in crate::hir_eval) fn quantize(value: &V, scale: usize) -> NumericResult<V> {
     let scale = check_scale(scale)?;
     if let V::Wide(wide) = value {
         if let Wide::Decimal(d) = wide.as_ref() {

@@ -1,5 +1,10 @@
 //! Closed-constructor pattern coverage and lexical arm inference.
-use super::*;
+use super::{mono, o, p, Engine, Env, InferError, R};
+use crate::parser::Expr;
+use crate::resolve::SymbolId;
+use crate::types::{Prim, Row, Type};
+use std::collections::HashSet;
+
 use crate::parser::{MatchCase, MatchPattern, MatchPatternKind};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

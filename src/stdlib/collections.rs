@@ -1,7 +1,11 @@
 //! Collection operations used by the typed evaluator. The checker determines
 //! admissible collection kinds and result types; this layer checks runtime
 //! bounds and shapes, and carries the typed table layout into empty results.
-use super::*;
+use super::{
+    as_bool, as_ratio, as_seq, collection, equal, error, exact_binary, exact_i128, exact_index,
+    invariant, key, layout, order, rational, resources, wrap, CoreOp, Domain, Eval, NumericResult,
+    Rc, Span, TableSchema, Type, R, V,
+};
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
 use std::collections::HashSet;
@@ -346,6 +350,8 @@ pub(super) fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hir_eval::{repr, Exact};
+    use crate::types::Prim;
 
     fn nums(xs: &[i128]) -> V {
         wrap(

@@ -1,6 +1,9 @@
 //! Conservative fusion of checked, shape-preserving total unary operations.
-use super::*;
-use arrays012::Dense;
+use super::super::{
+    array, error, resources, CoreOp, Eval, ExprId, ExprKind, HirProgram, LiftMode, Prim, Target,
+    Type, R, V,
+};
+use array::Dense;
 
 struct Plan {
     stages: Vec<ExprId>,
@@ -149,7 +152,7 @@ impl Plan {
 }
 
 /// Called from eval_kind after the root expression's tick and depth admission.
-pub(super) fn try_eval(eval: &mut Eval<'_>, root: ExprId, env: usize) -> Option<R<V>> {
+pub(in crate::hir_eval) fn try_eval(eval: &mut Eval<'_>, root: ExprId, env: usize) -> Option<R<V>> {
     if !resources::optimized() {
         return None;
     }
@@ -161,6 +164,7 @@ pub(super) fn try_eval(eval: &mut Eval<'_>, root: ExprId, env: usize) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hir_eval::{run_with_options, ResourcePolicy, RuntimeOptions};
 
     fn checked(source: &str) -> HirProgram {
         use crate::semantic::{self, Mode, Policy};

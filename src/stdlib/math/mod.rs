@@ -1,5 +1,9 @@
 //! Mathesis kernels reached through checked HIR operations and the ordinary lift plan.
-use super::*;
+use super::{
+    as_seq, error, exact_i128, inner_type, invariant, lift, lift_one, numeric_identity, resources,
+    scalar_binary, wide, BigRational, CoreOp, Domain, Eval, Integer, LiftMode, NumericResult, Prim,
+    Rc, Span, ToPrimitive, Type, Wide, Zero, COLLECTION_LIMIT, R, V,
+};
 mod elementary;
 mod number_theory;
 mod numerical;

@@ -19,39 +19,7 @@ const MAX_FILES: usize = 1024;
 const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_GRAPH_BYTES: usize = 32 * 1024 * 1024;
 
-/// Original file text and its position in the graph's virtual byte-address space.
-#[derive(Clone, Debug)]
-pub struct SourceFile {
-    pub path: PathBuf,
-    pub base: usize,
-    pub text: Arc<str>,
-    label: String,
-}
-#[derive(Clone, Debug, Default)]
-pub struct SourceMap {
-    files: Vec<SourceFile>,
-}
-impl SourceMap {
-    pub fn files(&self) -> &[SourceFile] {
-        &self.files
-    }
-    fn file_at(&self, global: usize) -> Option<&SourceFile> {
-        let i = self
-            .files
-            .partition_point(|file| file.base <= global)
-            .checked_sub(1)?;
-        let file = &self.files[i];
-        (global - file.base <= file.text.len()).then_some(file)
-    }
-    /// Resolve a global byte offset, including a file's own EOF, to original source.
-    pub fn locate(&self, global: usize) -> Option<(&str, &str, usize)> {
-        let file = self.file_at(global)?;
-        Some((&file.label, &file.text, global - file.base))
-    }
-    pub fn diagnostic(&self, error: &Error) -> String {
-        error.diagnostic_with(|offset| self.locate(offset))
-    }
-}
+pub use crate::diagnostic::source_map::{SourceFile, SourceMap};
 
 /// Parsing alone does not execute or typecheck initializers. Use
 /// `semantic::prepare_modules` to check this graph and produce one typed HIR.

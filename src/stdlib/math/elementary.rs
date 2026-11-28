@@ -1,7 +1,5 @@
 //! Domain-preserving elementary scalar operations.
-use super::super::{
-    decimal05, finite, wide05, CoreOp, Domain, NumericResult, Type, DIV_BY_ZERO, V,
-};
+use super::super::{decimal, finite, wide, CoreOp, Domain, NumericResult, Type, DIV_BY_ZERO, V};
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_rational::BigRational;
@@ -9,7 +7,7 @@ use num_traits::{One, Signed, Zero};
 use std::cmp::Ordering;
 
 fn integer(n: BigInt) -> NumericResult<V> {
-    wide05::ratio_value(BigRational::from_integer(n), Domain::Integer)
+    wide::ratio_value(BigRational::from_integer(n), Domain::Integer)
 }
 
 fn rounded(op: CoreOp, x: &BigRational) -> BigInt {
@@ -47,7 +45,7 @@ fn real(op: CoreOp, x: f64) -> NumericResult<V> {
                 MathRound => x.round_ties_even(),
                 _ => return Err("unknown checked elementary operation"),
             };
-            integer(wide05::from_real(r)?.to_integer())
+            integer(wide::from_real(r)?.to_integer())
         }
     }
 }
@@ -60,7 +58,7 @@ pub(super) fn apply(op: CoreOp, args: &[V], _ty: &Type) -> NumericResult<V> {
     if let V::Real(x) = value {
         return real(op, *x);
     }
-    let x = wide05::ratio(value)?;
+    let x = wide::ratio(value)?;
     match op {
         MathSign => integer(BigInt::from(match x.numer().sign() {
             Sign::Minus => -1,
@@ -71,18 +69,18 @@ pub(super) fn apply(op: CoreOp, args: &[V], _ty: &Type) -> NumericResult<V> {
             if x.is_zero() {
                 Err(DIV_BY_ZERO)
             } else {
-                wide05::ratio_value(x.recip(), Domain::Rational)
+                wide::ratio_value(x.recip(), Domain::Rational)
             }
         }
         MathFrac => {
-            let kind = wide05::kind(value).ok_or("expected an exact scalar")?;
+            let kind = wide::kind(value).ok_or("expected an exact scalar")?;
             if kind == Domain::Decimal {
                 // Subtract a scale-zero integer, preserving the written scale.
                 let truncated = integer(x.to_integer())?;
-                decimal05::decimal_binary(Sub, value, &truncated)
+                decimal::decimal_binary(Sub, value, &truncated)
             } else {
                 let (num, den) = x.into_raw();
-                wide05::ratio_value(BigRational::new(num % &den, den), kind)
+                wide::ratio_value(BigRational::new(num % &den, den), kind)
             }
         }
         MathTrunc | MathFloor | MathCeil | MathRound => integer(rounded(op, &x)),
@@ -109,16 +107,16 @@ mod tests {
             (7, 4),
         ] {
             let ratio = BigRational::new(BigInt::from(n), BigInt::from(2));
-            let value = wide05::ratio_value(ratio, Domain::Rational).unwrap();
+            let value = wide::ratio_value(ratio, Domain::Rational).unwrap();
             let exact = apply(CoreOp::MathRound, &[value], &z).unwrap();
             let approx = apply(CoreOp::MathRound, &[V::Real(f64::from(n) / 2.0)], &z).unwrap();
-            assert_eq!(wide05::integral(&exact).unwrap(), BigInt::from(expected));
-            assert_eq!(wide05::integral(&approx).unwrap(), BigInt::from(expected));
+            assert_eq!(wide::integral(&exact).unwrap(), BigInt::from(expected));
+            assert_eq!(wide::integral(&approx).unwrap(), BigInt::from(expected));
         }
 
         let rounded = apply(CoreOp::MathFloor, &[V::Real(2.0f64.powi(1000))], &z).unwrap();
-        assert_eq!(wide05::integral(&rounded).unwrap(), BigInt::one() << 1000);
+        assert_eq!(wide::integral(&rounded).unwrap(), BigInt::one() << 1000);
         let zero = apply(CoreOp::MathSign, &[V::Real(-0.0)], &z).unwrap();
-        assert!(wide05::integral(&zero).unwrap().is_zero());
+        assert!(wide::integral(&zero).unwrap().is_zero());
     }
 }

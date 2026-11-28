@@ -1,5 +1,9 @@
 //! Shape-changing operations and deterministic axis kernels for dense arrays.
-use super::*;
+use super::{
+    as_bool, error, exact_index, invariant, numeric_identity, numeric_reduce, order, packed,
+    resources, scalar_binary, volume, CoreOp, Dense, Eval, NumericResult, Rc, Span, Type, MAX_RANK,
+    R, V,
+};
 
 pub(super) fn reorder(input: &Dense, permutation: &[usize], span: Span) -> R<V> {
     let shape = permutation.iter().map(|&i| input.shape[i]).collect();
@@ -126,7 +130,7 @@ pub(super) fn along_axis(
     let shape: Rc<[usize]> = shape.into();
     if let LaneOp::Intrinsic(op, ty) = op {
         eval.charge_work(input.len().saturating_add(n), span)?;
-        if let Some(result) = machina_kernels::intrinsic(input, axis, shape.clone(), op, ty, span) {
+        if let Some(result) = packed::intrinsic(input, axis, shape.clone(), op, ty, span) {
             return result;
         }
     }
@@ -138,10 +142,8 @@ pub(super) fn along_axis(
         scan,
     } = op
     {
-        let plan = machina_kernels::ScanPlan::new(input, axis, shape.clone(), scan, span);
-        if let Some(result) =
-            machina_kernels::seeded(plan, (item, accumulator), (callback, seed), eval)
-        {
+        let plan = packed::ScanPlan::new(input, axis, shape.clone(), scan, span);
+        if let Some(result) = packed::seeded(plan, (item, accumulator), (callback, seed), eval) {
             return result;
         }
     }
@@ -269,7 +271,7 @@ pub(super) fn dot(left: &Dense, right: &Dense, ty: &Type, eval: &mut Eval<'_>, s
         return Err(error(span, "arr.dot requires equal vector lengths"));
     }
     charge_contraction(eval, Some(*a), span)?;
-    if let Some(result) = machina_kernels::dot(left, right, ty, span) {
+    if let Some(result) = packed::dot(left, right, ty, span) {
         return result;
     }
     contracted(left.iter(), right.iter(), ty).map_err(|e| error(span, e))
@@ -294,7 +296,7 @@ pub(super) fn matmul(
     if len == 0 {
         return Dense::pack(shape, Rc::from([]), span);
     }
-    if let Some(result) = machina_kernels::matmul(left, right, shape.clone(), ty, span) {
+    if let Some(result) = packed::matmul(left, right, shape.clone(), ty, span) {
         return result;
     }
     let lease = resources::reserve_for::<V>(len).map_err(|message| error(span, message))?;

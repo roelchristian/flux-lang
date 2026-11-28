@@ -1,6 +1,9 @@
 //! Exact integer operations. Resource exhaustion is distinct from a proof of
 //! compositeness, and a factorization is returned only with proven prime factors.
-use super::*;
+use super::{
+    resources, wide, BigRational, CoreOp, Domain, Integer, NumericResult, Rc, ToPrimitive, Type,
+    Wide, Zero, COLLECTION_LIMIT, V,
+};
 use num_bigint::BigUint;
 use num_traits::One;
 use std::cell::Cell;
@@ -20,13 +23,13 @@ const FIRST_PSEUDOPRIME: u128 = 318_665_857_834_031_151_167_461;
 const BASES: [u32; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
 
 fn natural(value: &V) -> NumericResult<BigUint> {
-    wide05::integral(value)?
+    wide::integral(value)?
         .to_biguint()
         .ok_or("expected a natural number")
 }
 
 fn natural_value(value: BigUint) -> NumericResult<V> {
-    wide05::ratio_value(BigRational::from_integer(value.into()), Domain::Natural)
+    wide::ratio_value(BigRational::from_integer(value.into()), Domain::Natural)
 }
 
 fn bounded(value: BigUint, bits: u64) -> NumericResult<BigUint> {
@@ -94,28 +97,28 @@ fn choose(n: BigUint, k: BigUint, lift: Option<&LiftBudget>) -> NumericResult<Bi
     let first = &n - k + 1u8;
     charge_product(&BigUint::one(), k, lift)?;
     charge_product(&first, k, lift)?;
-    let denominator = product(&BigUint::one(), k, wide05::max_bits().saturating_mul(2))?;
+    let denominator = product(&BigUint::one(), k, wide::max_bits().saturating_mul(2))?;
     // If the unreduced numerator exceeded this limit, dividing by the
     // already known denominator could not save the bounded final result.
     let numerator = product(
         &first,
         k,
-        wide05::max_bits().saturating_add(denominator.bits()),
+        wide::max_bits().saturating_add(denominator.bits()),
     )?;
-    bounded(numerator / denominator, wide05::max_bits())
+    bounded(numerator / denominator, wide::max_bits())
 }
 
 fn fibonacci(n: &BigUint, lift: Option<&LiftBudget>) -> NumericResult<BigUint> {
     // F(k+2) >= 2F(k) for k >= 1 bounds the largest useful index.
     let n = n
         .to_u64()
-        .filter(|&n| n <= wide05::max_bits().saturating_mul(2).saturating_add(2))
+        .filter(|&n| n <= wide::max_bits().saturating_mul(2).saturating_add(2))
         .ok_or(THEORY_LIMIT)?;
     if let Some(lift) = lift {
         lift.work.charge(n.div_ceil(64))?;
     }
     // F(n+1) may have one more bit than F(n).
-    let bits = wide05::max_bits().saturating_add(1);
+    let bits = wide::max_bits().saturating_add(1);
     let (mut a, mut b) = (BigUint::zero(), BigUint::one());
     for i in (0..(u64::BITS - n.leading_zeros())).rev() {
         let c = multiply(&a, &((&b << 1usize) - &a), bits)?;
@@ -127,7 +130,7 @@ fn fibonacci(n: &BigUint, lift: Option<&LiftBudget>) -> NumericResult<BigUint> {
             (d, next)
         };
     }
-    bounded(a, wide05::max_bits())
+    bounded(a, wide::max_bits())
 }
 
 struct Budget(Cell<u64>);
@@ -512,8 +515,8 @@ fn calculate(op: CoreOp, args: &[V], work: &Budget, lift: Option<&LiftBudget>) -
     use CoreOp::*;
     let result = match (op, args) {
         (MathGcd | MathLcm, [a, b]) => {
-            let (_, a) = wide05::integral(a)?.into_parts();
-            let (_, b) = wide05::integral(b)?.into_parts();
+            let (_, a) = wide::integral(a)?.into_parts();
+            let (_, b) = wide::integral(b)?.into_parts();
             let g = a.gcd(&b);
             if op == MathGcd || a.is_zero() || b.is_zero() {
                 if op == MathGcd {
@@ -522,14 +525,14 @@ fn calculate(op: CoreOp, args: &[V], work: &Budget, lift: Option<&LiftBudget>) -
                     BigUint::zero()
                 }
             } else {
-                multiply(&(a / g), &b, wide05::max_bits())?
+                multiply(&(a / g), &b, wide::max_bits())?
             }
         }
         (MathFact, [x]) => {
             let first = BigUint::one();
             let count = steps(&natural(x)?)?;
             charge_product(&first, count, lift)?;
-            product(&first, count, wide05::max_bits())?
+            product(&first, count, wide::max_bits())?
         }
         (MathChoose, [n, k]) => choose(natural(n)?, natural(k)?, lift)?,
         (MathPerm, [n, k]) => {
@@ -540,7 +543,7 @@ fn calculate(op: CoreOp, args: &[V], work: &Budget, lift: Option<&LiftBudget>) -
                 let count = steps(&k)?;
                 let first = n - k + 1u8;
                 charge_product(&first, count, lift)?;
-                product(&first, count, wide05::max_bits())?
+                product(&first, count, wide::max_bits())?
             }
         }
         (MathModPow, [base, exponent, modulus]) => modpow(

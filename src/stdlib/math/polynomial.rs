@@ -1,6 +1,9 @@
 //! Dense polynomials in ascending power order. Arithmetic uses the checked
 //! scalar result domain; zero tails are never retained in polynomial outputs.
-use super::*;
+use super::{
+    as_seq, exact_i128, numeric_identity, resources, scalar_binary, CoreOp, Domain, NumericResult,
+    Prim, Rc, Type, Wide, Zero, V,
+};
 
 const POLY_LIMIT: &str = "polynomial resource limit exceeded";
 const MAX_PAIRS: usize = 1_000_000;
