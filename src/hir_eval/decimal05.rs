@@ -1,5 +1,5 @@
 //! Exact decimals preserve their written scale; the coefficient is signed.
-use super::{as_ratio, wide05::MAX_BITS as MAX_COEFFICIENT_BITS, CoreOp, NumericResult, Wide, V};
+use super::{as_ratio, wide05, CoreOp, NumericResult, Wide, V};
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_rational::BigRational;
@@ -8,7 +8,7 @@ use std::{fmt, rc::Rc};
 
 pub(super) const MAX_DECIMAL_SCALE: u32 = 10_000;
 const SCALE_LIMIT: &str = "decimal scale exceeds the resource limit (10000)";
-const COEFFICIENT_LIMIT: &str = "decimal coefficient exceeds the resource limit";
+const COEFFICIENT_LIMIT: &str = "decimal coefficient exceeds the resource bit limit";
 const NONFINITE_DECIMAL: &str = "exact value has no finite decimal expansion";
 
 #[derive(Clone, Debug)]
@@ -32,7 +32,7 @@ fn check_scale(scale: usize) -> NumericResult<u32> {
 impl Decimal {
     fn new(coefficient: BigInt, scale: u32) -> NumericResult<Self> {
         check_scale(scale as usize)?;
-        if coefficient.bits() > MAX_COEFFICIENT_BITS {
+        if coefficient.bits() > wide05::max_bits() {
             return Err(COEFFICIENT_LIMIT);
         }
         Ok(Self { coefficient, scale })
@@ -61,7 +61,7 @@ impl Decimal {
             fraction
         };
         // Decimal digits carry at least three bits each after the first.
-        if (whole.len() + fraction.len()).saturating_sub(1) > MAX_COEFFICIENT_BITS as usize / 3 {
+        if (whole.len() + fraction.len()).saturating_sub(1) > wide05::decimal_digit_limit() {
             return Err(COEFFICIENT_LIMIT);
         }
         let coefficient = if whole.is_empty() && fraction.is_empty() {
@@ -122,7 +122,7 @@ impl Decimal {
             .bits()
             .saturating_add(other.coefficient.bits())
             .saturating_sub(1)
-            > MAX_COEFFICIENT_BITS
+            > wide05::max_bits()
             && !self.coefficient.is_zero()
             && !other.coefficient.is_zero()
         {
@@ -161,7 +161,7 @@ impl Decimal {
             .bits()
             .saturating_sub(1)
             .saturating_mul(u64::from(exponent))
-            >= MAX_COEFFICIENT_BITS
+            >= wide05::max_bits()
         {
             return Err(COEFFICIENT_LIMIT);
         }

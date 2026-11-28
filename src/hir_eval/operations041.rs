@@ -290,6 +290,14 @@ pub(super) fn apply_core(
         (CoreOp::IoPrint, [value]) => Ok(V::Action(Rc::new(Action::IoPrint(value.clone())))),
         (CoreOp::CheckedDiv, [a, b]) => match exact_binary(CoreOp::Div, a, b, Domain::Rational) {
             Ok(v) => Ok(succeeded(v)),
+            // Keep the existing checked division range outcome at the
+            // default precision. A host override is a runtime budget, not
+            // a new recoverable source-level arithmetic result.
+            Err(wide05::RESOURCE)
+                if wide05::max_bits() != ResourcePolicy::default().max_exact_bits =>
+            {
+                Err(error(span, wide05::RESOURCE))
+            }
             Err(e) => numeric_failure(program, e, span),
         },
         (

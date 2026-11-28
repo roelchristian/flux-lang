@@ -83,7 +83,11 @@ impl Prepared<'_> {
     }
 
     pub fn run(&self) -> Result<eval::Output, Error> {
-        hir_eval::run_prevalidated(&self.hir)
+        self.run_with_options(crate::RuntimeOptions::default())
+    }
+
+    pub fn run_with_options(&self, options: crate::RuntimeOptions) -> Result<eval::Output, Error> {
+        hir_eval::run_options_prevalidated(&self.hir, options)
     }
 
     pub fn run_with_output(&self, sink: &mut dyn std::io::Write) -> Result<eval::Output, Error> {
@@ -105,7 +109,26 @@ impl Prepared<'_> {
         arguments: &[String],
         output: &mut dyn std::io::Write,
     ) -> Result<eval::Output, Error> {
-        hir_eval::run_with_host_prevalidated(&self.hir, input, stdin, arguments, output)
+        self.run_with_host_options(
+            input,
+            stdin,
+            arguments,
+            output,
+            crate::RuntimeOptions::default(),
+        )
+    }
+
+    pub fn run_with_host_options(
+        &self,
+        input: &mut dyn crate::RuntimeInput,
+        stdin: &mut dyn std::io::BufRead,
+        arguments: &[String],
+        output: &mut dyn std::io::Write,
+        options: crate::RuntimeOptions,
+    ) -> Result<eval::Output, Error> {
+        hir_eval::run_with_host_options_prevalidated(
+            &self.hir, input, stdin, arguments, output, options,
+        )
     }
 
     pub fn view_with_host(
@@ -115,7 +138,26 @@ impl Prepared<'_> {
         arguments: &[String],
         output: &mut dyn std::io::Write,
     ) -> Result<eval::ReplOutput, Error> {
-        hir_eval::view_with_host_prevalidated(&self.hir, input, stdin, arguments, output)
+        self.view_with_host_options(
+            input,
+            stdin,
+            arguments,
+            output,
+            crate::RuntimeOptions::default(),
+        )
+    }
+
+    pub fn view_with_host_options(
+        &self,
+        input: &mut dyn crate::RuntimeInput,
+        stdin: &mut dyn std::io::BufRead,
+        arguments: &[String],
+        output: &mut dyn std::io::Write,
+        options: crate::RuntimeOptions,
+    ) -> Result<eval::ReplOutput, Error> {
+        hir_eval::view_with_host_options_prevalidated(
+            &self.hir, input, stdin, arguments, output, options,
+        )
     }
 
     pub fn view_with_output(
@@ -126,7 +168,14 @@ impl Prepared<'_> {
     }
 
     pub fn view(&self) -> Result<eval::ReplOutput, Error> {
-        hir_eval::view_entry_prevalidated(&self.hir)
+        self.view_with_options(crate::RuntimeOptions::default())
+    }
+
+    pub fn view_with_options(
+        &self,
+        options: crate::RuntimeOptions,
+    ) -> Result<eval::ReplOutput, Error> {
+        hir_eval::view_options_prevalidated(&self.hir, options)
     }
 }
 

@@ -125,6 +125,7 @@ fn bisect(
         if step == opts.max {
             break;
         }
+        resources::check_iterations(step + 1).map_err(|e| error(samples.span, e))?;
         let value = samples.at(f, mid)?;
         if value == 0.0 {
             return Ok(mid);
@@ -154,6 +155,7 @@ fn newton(
         if step == opts.max {
             break;
         }
+        resources::check_iterations(step + 1).map_err(|e| error(samples.span, e))?;
         let slope = samples.at(derivative, x)?;
         if slope == 0.0 {
             return Err(failure("singular", "Newton derivative is zero"));
@@ -237,10 +239,11 @@ impl Panel {
     }
 }
 
-fn budget(remaining: &mut usize, want: usize) -> Solve<()> {
+fn budget(remaining: &mut usize, maximum: usize, want: usize, span: Span) -> Solve<()> {
     *remaining = remaining
         .checked_sub(want)
         .ok_or_else(|| failure("budget", "adaptive integration exhausted its evaluations"))?;
+    resources::check_iterations(maximum - *remaining).map_err(|e| error(span, e))?;
     Ok(())
 }
 
@@ -254,7 +257,8 @@ fn integrate(samples: &mut Sampler<'_, '_>, f: &V, lo: f64, hi: f64, opts: Optio
         (hi, lo, -1.0)
     };
     let mut remaining = opts.max;
-    budget(&mut remaining, 3)?;
+    let span = samples.span;
+    budget(&mut remaining, opts.max, 3, span)?;
     let mid = mid_inside(lo, hi)?;
     let mut probe = |x| -> Solve<Sample> {
         Ok(Sample {
@@ -270,7 +274,7 @@ fn integrate(samples: &mut Sampler<'_, '_>, f: &V, lo: f64, hi: f64, opts: Optio
         tol,
     }) = pending.pop()
     {
-        budget(&mut remaining, 2)?;
+        budget(&mut remaining, opts.max, 2, span)?;
         let x = mid_inside(a.x, m.x)?;
         let y = mid_inside(m.x, b.x)?;
         let l = probe(x)?;
@@ -316,6 +320,7 @@ fn interpolate(xs: &[V], ys: &[V], x: f64, span: Span) -> Solve<f64> {
     if xs.len() > MAX_WORK {
         return Err(failure("budget", "interpolation exceeds 100000 samples"));
     }
+    resources::check_iterations(xs.len()).map_err(|e| error(span, e))?;
     let mut pair = None;
     let mut previous: Option<Sample> = None;
     for (sample, value) in xs.iter().zip(ys) {
@@ -364,6 +369,7 @@ fn difference(samples: &mut Sampler<'_, '_>, f: &V, x: f64, step: f64) -> Solve<
             "finite-difference step is too small at this point",
         ));
     }
+    resources::check_iterations(2).map_err(|e| error(samples.span, e))?;
     let left = samples.at(f, lo)?;
     let right = samples.at(f, hi)?;
     let dx = hi - lo;

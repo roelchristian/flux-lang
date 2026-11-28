@@ -119,7 +119,7 @@ fn stable_set<'a>(rows: impl IntoIterator<Item = &'a V>, span: Span) -> R<Vec<V>
             }
         }
         if !found {
-            if out.len() >= COLLECTION_LIMIT {
+            if out.len() >= resources::limits().max_elements {
                 return Err(error(span, "table set result exceeds the row limit"));
             }
             bucket.push(row);

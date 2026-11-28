@@ -81,6 +81,7 @@ pub mod semantic;
 pub mod types;
 
 pub use csv::{FsInput, OpenedInput, RuntimeInput};
+pub use hir_eval::{ResourcePolicy, RuntimeOptions};
 
 // Linked names encode a canonical path, but their source names are display metadata.
 fn linked_prefix(name: &str) -> Option<usize> {
@@ -210,6 +211,19 @@ pub fn run_source(source: &str) -> Result<eval::Output, Error> {
     eval::run(&parser::parse(source)?)
 }
 
+/// Check and run source with explicit host resources and optimization policy.
+pub fn run_source_with_options(
+    source: &str,
+    options: RuntimeOptions,
+) -> Result<eval::Output, Error> {
+    semantic::prepare(
+        &parser::parse(source)?,
+        semantic::Mode::Script,
+        semantic::Policy::TypedOnly,
+    )?
+    .run_with_options(options)
+}
+
 /// Failure from a path-based frontend or runtime operation.
 #[derive(Debug)]
 pub enum PathError {
@@ -284,9 +298,17 @@ pub fn interface_path(
 
 /// Load, check and execute one file using typed HIR.
 pub fn run_path(path: impl AsRef<std::path::Path>) -> Result<eval::Output, PathError> {
+    run_path_with_options(path, RuntimeOptions::default())
+}
+
+/// Load, check and run a file with explicit host resources and optimization policy.
+pub fn run_path_with_options(
+    path: impl AsRef<std::path::Path>,
+    options: RuntimeOptions,
+) -> Result<eval::Output, PathError> {
     let loaded = modules::load(path)?;
     prepare_path(&loaded)?
-        .run()
+        .run_with_options(options)
         .map_err(|error| PathError::semantic(&loaded, error))
 }
 

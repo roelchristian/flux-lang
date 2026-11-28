@@ -1,0 +1,15 @@
+<< "arr";
+
+--- Work on a window of a transposed matrix, without expanding the window.
+readings := : r (form [192n 128n] (.. 1z 24576z));
+negative := -: -: -: readings;
+window := arr.sect [17n 33n] [8n 16n] (|: negative);
+
+--- Narrow storage has no effect on the exact result.
+wide := + (form [1n] [9223372036854775807z]) 1z;
+
+!^{
+    ! print (dim readings, # readings, dim window, # window);
+    ! print (.: [1n 1n] window, .: [8n 16n] window, +/ ,. window);
+    ! print .: [1n] wide;
+};

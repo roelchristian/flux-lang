@@ -53,7 +53,9 @@ pub(super) fn apply(
     if left_key != right_key {
         return Err(invariant(span, "join checked key witnesses differ"));
     }
-    if left.len() > COLLECTION_LIMIT || right.len() > COLLECTION_LIMIT {
+    if left.len() > resources::limits().max_elements
+        || right.len() > resources::limits().max_elements
+    {
         return Err(error(span, "join input row limit exceeded"));
     }
     let paired = matches!(op, InnerJoin | LeftJoin);
@@ -91,7 +93,7 @@ pub(super) fn apply(
             (LeftJoin | AntiJoin, None) | (SemiJoin, Some(_)) => 1,
             _ => 0,
         };
-        if count > COLLECTION_LIMIT - rows.len() {
+        if count > resources::limits().max_elements - rows.len() {
             return Err(error(span, "join output row limit exceeded"));
         }
         match (op, matches) {

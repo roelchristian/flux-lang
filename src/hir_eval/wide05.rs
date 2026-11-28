@@ -7,8 +7,97 @@ use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::{fmt, rc::Rc};
 
-pub(super) const MAX_BITS: u64 = 1_048_576;
-pub(super) const RESOURCE: &str = "exact numeric resource limit exceeded (1048576 bits)";
+pub(super) const RESOURCE: &str = "exact numeric resource bit limit exceeded";
+
+pub(super) fn max_bits() -> u64 {
+    super::resources::limits().max_exact_bits
+}
+
+pub(super) fn decimal_digit_limit() -> usize {
+    // 30103/100000 is just above log10(2); leave room for a sign and rounding.
+    ((u128::from(max_bits()) * 30_103 / 100_000 + 4).min(usize::MAX as u128)) as usize
+}
+
+pub(super) fn guard_inline(value: Exact) -> NumericResult<Exact> {
+    let limit = max_bits();
+    if limit < 128 {
+        let bits = |n: i128| u64::from(u128::BITS - n.unsigned_abs().leading_zeros());
+        if bits(value.n).max(bits(value.d)) > limit {
+            return Err(RESOURCE);
+        }
+    }
+    Ok(value)
+}
+
+pub(super) fn guard_value(value: V) -> NumericResult<V> {
+    if let V::Exact(exact) = value {
+        guard_inline(exact)?;
+    }
+    Ok(value)
+}
+
+/// User data and callback-built values have already gone through the scalar
+/// guards. Some primitives synthesize integers inside a result, sequence, or
+/// record (for example date offsets and stable sort indices). Check those
+/// value boundaries under narrower host caps. The default fast path makes
+/// no walk, and nested values use an explicit depth-first stack.
+pub(super) fn guard_embedded(value: V) -> NumericResult<V> {
+    let limit = max_bits();
+    if limit >= 128 {
+        return Ok(value);
+    }
+    let bits = |n: i128| u64::from(u128::BITS - n.unsigned_abs().leading_zeros());
+    enum Next {
+        Value(V),
+        Items(Rc<[V]>, usize),
+        Dense(Rc<super::arrays012::Dense>, usize),
+        Record(Rc<[(Box<str>, V)]>, usize),
+        Dict(Rc<[(V, V)]>, usize),
+    }
+    let mut pending = vec![Next::Value(value.clone())];
+    while let Some(next) = pending.pop() {
+        match next {
+            Next::Value(item) => match item {
+                V::Exact(n) if bits(n.n).max(bits(n.d)) > limit => return Err(RESOURCE),
+                V::Sequence(xs) | V::Tuple(xs) | V::Table(xs, _) => {
+                    pending.push(Next::Items(xs, 0))
+                }
+                V::Dense(xs) => pending.push(Next::Dense(xs, 0)),
+                V::Record(fs) => pending.push(Next::Record(fs, 0)),
+                V::Dict(entries) => pending.push(Next::Dict(entries, 0)),
+                V::Optional(Some(item)) | V::Outcome(Ok(item)) => {
+                    pending.push(Next::Value((*item).clone()))
+                }
+                V::Outcome(Err(f)) => pending.push(Next::Value((*f.payload).clone())),
+                V::Variant(v) => pending.push(Next::Items(v.fields.clone(), 0)),
+                _ => {}
+            },
+            Next::Items(xs, i) if i < xs.len() => {
+                let value = xs[i].clone();
+                pending.push(Next::Items(xs, i + 1));
+                pending.push(Next::Value(value));
+            }
+            Next::Dense(xs, i) if i < xs.len() => {
+                let value = xs.value(i);
+                pending.push(Next::Dense(xs, i + 1));
+                pending.push(Next::Value(value));
+            }
+            Next::Record(fs, i) if i < fs.len() => {
+                let value = fs[i].1.clone();
+                pending.push(Next::Record(fs, i + 1));
+                pending.push(Next::Value(value));
+            }
+            Next::Dict(entries, i) if i < entries.len() => {
+                let (key, value) = entries[i].clone();
+                pending.push(Next::Dict(entries, i + 1));
+                pending.push(Next::Value(value));
+                pending.push(Next::Value(key));
+            }
+            _ => {}
+        }
+    }
+    Ok(value)
+}
 
 #[derive(Clone)]
 pub(super) enum Wide {
@@ -24,14 +113,18 @@ impl fmt::Display for Wide {
     }
 }
 pub(super) fn guard(x: &BigInt) -> NumericResult<()> {
-    if x.bits() > MAX_BITS {
+    if x.bits() > max_bits() {
         Err(RESOURCE)
     } else {
         Ok(())
     }
 }
 pub(super) fn parse_int(s: &str) -> NumericResult<BigInt> {
-    if s.len() > 315_655 {
+    if s.trim_start_matches(['-', '+'])
+        .trim_start_matches('0')
+        .len()
+        > decimal_digit_limit()
+    {
         return Err(RESOURCE);
     }
     let n = s
@@ -145,7 +238,7 @@ pub(super) fn binary(op: CoreOp, a: &V, b: &V, domain: Domain) -> NumericResult<
             } else {
                 let exp = e.to_u32().ok_or(RESOURCE)?;
                 let largest = x.numer().bits().max(x.denom().bits());
-                if (largest - 1).saturating_mul(u64::from(exp)) >= MAX_BITS {
+                if (largest - 1).saturating_mul(u64::from(exp)) >= max_bits() {
                     return Err(RESOURCE);
                 }
                 // Reduced numerator and denominator stay relatively prime under a power.

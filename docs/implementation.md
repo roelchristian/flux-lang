@@ -31,6 +31,77 @@ The combined `!^{ ... }` opener lowers to ordinary action/fallible HIR.
 Inference checks immediate unit action statements before elaboration
 inserts lexical propagation nodes at their original spans.
 
+## Machina execution
+
+Dense arrays use immutable shared buffers with logical shape, strides
+and offset. Eligible elements use packed Boolean (one byte per value,
+not a bitset), signed/unsigned 64-bit integer or binary64 buffers. Wide exact values, decimals,
+unsupported operations and user callbacks use the generic checked
+executor. Transposition, permutation and section update view metadata;
+contiguous reshape reuses storage where possible. Access, rendering,
+comparison and fallback kernels all use logical row-major order.
+
+Specialized kernels cover selected arithmetic, comparisons,
+broadcasting, packed `:r` conversion, real negation, absolute value,
+`math.exp`, `math.sin`, Boolean operations, intrinsic reductions and
+contiguous or strided contractions. Eligibility
+uses checked HIR and the operand layout. Integer overflow in a narrow
+kernel falls back to exact arithmetic, not wrapping or approximation.
+Matrix kernels may use a scratch layout for locality but preserve
+multiply-then-add and the original accumulation order.
+
+The numerical plan only fuses direct same-shape chains of packed
+real negation or Boolean complement when policy allows. It evaluates
+the leaf once, charges the original logical stage work, and replays
+unfused stages if the layout or memory headroom is unsuitable. It is
+not shape inference, arbitrary arithmetic fusion, SIMD or parallelism.
+
+## Runtime policy
+
+Rust hosts configure `ResourcePolicy` and `RuntimeOptions { resources,
+optimize }`. Use `run_source_with_options`, `run_path_with_options`
+or the prepared program's `run_with_host_options` / `view_with_host_options`.
+Existing entry points retain defaults. Each execution validates its
+options and scopes its budget; a nested execution restores the caller's
+policy and accounting when it ends.
+
+The CLI accepts these decimal environment settings for execution:
+
+| Environment variable | Default | Budget |
+| --- | ---: | --- |
+| `FLUX_MAX_RANK` | 16 | Maximum array rank, from 1 through 16 (rank-zero values remain supported) |
+| `FLUX_MAX_ELEMENTS` | 100,000 | Logical array dimensions and element counts; also used for checked range materialization |
+| `FLUX_MAX_MEMORY` | 268,435,456 | Bytes of tracked live dense payload and instrumented scratch storage |
+| `FLUX_MAX_WORK` | 1,000,000 | Evaluator work, including charged logical kernel work |
+| `FLUX_MAX_EXACT_BITS` | 1,048,576 | Size of exact numeric results in bits |
+| `FLUX_MAX_NUMERIC_ITERATIONS` | 100,000 | Work ceiling for instrumented numerical iterations |
+| `FLUX_MAX_DEPTH` | 128 | Evaluation depth, from 1 through 128 |
+
+Limits must be positive and fit the host representation. Dedicated
+algorithm, source and I/O bounds may still apply. Method-specific
+failure can be a typed solver result; exhaustion of a tighter host
+iteration budget is fatal. Memory accounting is
+not a process RSS cap: shared views charge a payload once. Completed
+ordinary sequences, noninstrumented allocations, allocator overhead,
+frames and operating-system I/O are not globally tracked, even
+where a construction scratch buffer has a lease. Set budgets
+conservatively rather than assuming an arbitrarily large setting is
+safe for the host.
+
+`FLUX_OPTIMIZE=0` selects generic typed execution instead of the
+specialized paths. The default, also selected by `FLUX_OPTIMIZE=1`, is
+optimized execution. This switch does not select the legacy interpreter
+or bypass resource checks. Generic mode keeps the shared view
+architecture; it is not a copy-only emulation of Draft 0.18.
+Physical buffers can have different sizes,
+so a tight tracked-memory policy need not admit both layouts. For a
+same-binary comparison:
+
+```sh
+flux run-hir examples/mathematics/dense-views.flx
+FLUX_OPTIMIZE=0 flux run-hir examples/mathematics/dense-views.flx
+```
+
 ## Verification
 
 Use Rust 1.85 or later. From the project root:
@@ -60,6 +131,54 @@ and mode. Retain the old binary for paired comparisons.
 | [compare.py](../benchmarks/compare.py) | Alternate binaries on script, checking and grouped CSV workloads |
 | [phases.py](../benchmarks/phases.py) | Parse, resolve, infer, elaborate and evaluate separately |
 | [tacit.py](../benchmarks/tacit.py), [relational.py](../benchmarks/relational.py) | Composition and relational workloads |
+| [machina.py](../benchmarks/machina.py) | Checked paired wall time and Linux peak RSS for shared workloads, dense kernels and contractions |
+
+```sh
+python3 benchmarks/machina.py FLUX_018 FLUX_019 --reference FLUX_017 \
+  --generic --generic-env FLUX_OPTIMIZE=0 \
+  --elements 10000 100000 --matrix-sizes 64 --runs 7 --allow-limits
+```
+
+Machina samples check shapes and independent exact or tolerance
+references before timing. Reported wall time includes Flux startup,
+checking and setup, not only a kernel. Setup-only controls and
+`--kernel-repeats` distinguish those costs. Matrices are tested with
+both a transposed right operand and a contiguous copy of it.
+`--large` and `--standard-matrices` are opt-in; configure higher host
+budgets explicitly. A checked limit or timeout is not a successful
+timing. See the harness's `--help` for per-binary overrides.
+
+### Draft 0.19 paired sample
+
+Locked Rust 1.85 release builds of Drafts 0.17–0.19 were checked on
+Linux x86-64 (Xeon Platinum 8573C), pinned to one logical CPU.
+These are median elapsed milliseconds from seven alternating samples;
+the generic column is the same 0.19 binary with `FLUX_OPTIMIZE=0`.
+Samples include compilation and preparation. The host showed occasional
+scheduling outliers; this is not a kernel-only or cross-platform claim.
+
+| Workload | 0.17 | 0.18 | 0.19 | 0.19 generic |
+| --- | ---: | ---: | ---: | ---: |
+| Scalar squares, 10k | 5.36 | 5.41 | 5.36 | 5.37 |
+| Static check, 4k declarations | 60.84 | 59.17 | 59.22 | 60.44 |
+| Typed CSV and grouping, 6k rows | 10.00 | 10.23 | 9.65 | 9.37 |
+| Dense integer input, 100k | 6.08 | 6.00 | 7.39 | 6.60 |
+| Dense integer arithmetic, 100k | 36.11 | 34.93 | 9.67 | 26.68 |
+| Dense real arithmetic, 100k | 39.31 | 39.94 | 9.26 | 29.10 |
+| Dense real sum, 100k | 28.18 | 29.12 | 11.42 | 29.71 |
+| Real negation chain, 100k | 50.03 | 50.31 | 8.26 | 36.68 |
+| Transpose with section, 100k | 14.55 | 15.01 | 7.64 | 6.86 |
+| Dense sine, 100k | n/a | 37.07 | 8.88 | 26.95 |
+| Dense exponential, 100k | n/a | 36.84 | 9.17 | 26.97 |
+| 64² product, contiguous right | 17.01 | 17.47 | 3.23 | 17.22 |
+| 64² product, strided right | 17.14 | 17.39 | 2.81 | 17.87 |
+
+The setup-only real input control took 22.05 → 7.71 ms from 0.18 to
+0.19; some end-to-end gains come from preparation. Linux median peak
+RSS for the 100k real arithmetic workload was 22,788 → 13,480 KiB
+(18,476 KiB in generic mode). Dense integer setup itself regressed
+in this run. The scalar, static check and CSV medians changed little
+compared with the dense kernels.
 
 Measurements are environment-specific; see the
 [Draft 0.9 comparison](https://github.com/roelchristian/flux-lang/pull/13)
