@@ -865,6 +865,59 @@ pub fn needs_continuation(source: &str) -> bool {
 
 // Lowered binders cannot collide with a bare identifier, module link or
 // pipeline binding. Every synthetic lambda owns its own resolver scope.
+const DIRECT_ARITY_LIMIT: usize = 64;
+
+fn split_callable_annotation(
+    signature: TypeAnnotation,
+    arity: usize,
+) -> PResult<(Vec<Option<TypeAnnotation>>, TypeAnnotation)> {
+    fn complete(ty: &TypeAnnotation) -> bool {
+        use TypeAnnotationKind::*;
+        match &ty.kind {
+            Hole => false,
+            Optional(t) | Action(t) | Table(t) | Sequence(t) => complete(t),
+            NamedApply(_, ts) | Tuple(ts) | PositionalTable(ts) => ts.iter().all(complete),
+            Dictionary(a, b) | Result(a, b) => complete(a) && complete(b),
+            Record(fields) | OpenRecord(fields, _) => fields.iter().all(|(_, t)| complete(t)),
+            Function(args, ret) => args.iter().all(complete) && complete(ret),
+            Named(_) | Variable(_) | Primitive(_) => true,
+        }
+    }
+    if !complete(&signature) {
+        return Err(Error::new(
+            signature.span.start,
+            "callable arity declaration requires a complete type; `_` is not allowed",
+        ));
+    }
+    let start = signature.span.start;
+    let mut params = Vec::with_capacity(arity);
+    let mut tail = signature;
+    while params.len() < arity {
+        let TypeAnnotationKind::Function(mut args, out) = tail.kind else {
+            return Err(Error::new(start, format!("callable arity /{arity} requires a type with at least {arity} argument domains")));
+        };
+        let take = (arity - params.len()).min(args.len());
+        params.extend(args.drain(..take).map(Some));
+        tail = if args.is_empty() {
+            *out
+        } else {
+            let mut source = args
+                .iter()
+                .map(TypeAnnotation::source)
+                .collect::<Vec<_>>()
+                .join(" ");
+            source.push_str(" -> ");
+            source.push_str(out.source());
+            TypeAnnotation {
+                span: args[0].span.start..tail.span.end,
+                kind: TypeAnnotationKind::Function(args, out),
+                source,
+            }
+        };
+    }
+    Ok((params, tail))
+}
+
 const TACIT_INPUT: &str = "\0tacit-input";
 const TACIT_DEPTH_LIMIT: usize = 64;
 
@@ -1141,6 +1194,28 @@ impl Parser {
         let end = self.end_of_group(i + 1)?;
         (self.at(end + 1) == "::").then_some(end + 1)
     }
+    fn arity_header_at(&self, i: usize) -> bool {
+        self.at(i + 1) == "/" && matches!(self.at(i + 3), ":=" | ":" | ":#" | "|")
+    }
+    fn declared_arity(&self, i: usize) -> PResult<(usize, Range<usize>)> {
+        let [name, slash, count] = &self.toks[i..i + 3] else {
+            unreachable!("arity candidates have at least three tokens");
+        };
+        if name.end != slash.start || slash.end != count.start {
+            return Err(Error::new(
+                slash.start,
+                "write callable arity adjacent as `name/arity`",
+            ));
+        }
+        let arity = count.text.bytes().all(|byte| byte.is_ascii_digit())
+            .then(|| count.text.parse::<usize>().ok())
+            .flatten()
+            .filter(|n| (1..=DIRECT_ARITY_LIMIT).contains(n))
+            .ok_or_else(|| Error::new(count.start, format!(
+                "callable arity must be an unsuffixed positive integer from 1 to {DIRECT_ARITY_LIMIT}"
+            )))?;
+        Ok((arity, count.start..count.end))
+    }
     fn def_at(&self, i: usize) -> bool {
         if !is_ident(self.at(i)) {
             return false;
@@ -1148,6 +1223,7 @@ impl Parser {
         match self.at(i + 1) {
             ":=" | "::" => true,
             "[" => self.type_head(i).is_some(),
+            "/" => self.arity_header_at(i),
             ":" | ":#" => self.find(i + 2, &[":="], &[";"]).is_some(),
             "(" => self.end_of_group(i + 1).is_some_and(|j| {
                 self.at(j + 1) == ":="
@@ -1201,6 +1277,7 @@ impl Parser {
                         None
                     }
                     "::" => Some(Binding::Record),
+                    "/" => Some(Binding::Callable(self.declared_arity(i)?.0)),
                     "(" => {
                         let end = self.end_of_group(i + 1).ok_or_else(|| {
                             Error::new(self.toks[i].start, "unclosed parameter list")
@@ -1572,8 +1649,16 @@ impl Parser {
 
     fn definition(&mut self, effect: bool) -> PResult<Stmt> {
         let start = self.offset();
+        let head = self.pos;
         let surface = self.ident()?;
         let name = self.decl_link(&surface);
+        let arity_header = if self.arity_header_at(head) {
+            let header = self.declared_arity(head)?;
+            self.pos += 2;
+            Some(header)
+        } else {
+            None
+        };
         let mut type_params = Vec::new();
         if self.eat("[") {
             loop {
@@ -1642,12 +1727,25 @@ impl Parser {
                 start,
             });
         }
-        let (params, param_types) = if self.peek() == "(" {
-            self.parameters()?
+        let (params, param_types, result_type) = if let Some((arity, _)) = &arity_header {
+            let params: Vec<_> = (0..*arity)
+                .map(|i| format!("\0callable-arity-{i}"))
+                .collect();
+            if let Some(ty) = self.annotation(&[":=", "|"])? {
+                let (param_types, result_type) = split_callable_annotation(ty, *arity)?;
+                (params, param_types, Some(result_type))
+            } else {
+                (params, vec![None; *arity], None)
+            }
         } else {
-            (Vec::new(), Vec::new())
+            let (params, param_types) = if self.peek() == "(" {
+                self.parameters()?
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let result_type = self.annotation(&[":=", "|"])?;
+            (params, param_types, result_type)
         };
-        let result_type = self.annotation(&[":=", "|"])?;
         if self.eat("|") {
             if params.is_empty() || result_type.is_none() || param_types.iter().any(Option::is_none)
             {
@@ -1678,7 +1776,42 @@ impl Parser {
             return self.err("annotated function result requires annotated parameters");
         }
         self.expect(":=")?;
-        let body = if params.is_empty() {
+        let body = if let Some((_, count_span)) = arity_header {
+            let rhs = self.pos;
+            let mut body = self.expr(false)?;
+            let end = self.pos - 1;
+            let mut atom = rhs;
+            let mut last = end;
+            while self.at(atom) == "(" && self.end_of_group(atom) == Some(last) {
+                atom += 1;
+                last -= 1;
+            }
+            if !matches!(self.at(atom), "&" | "&{" | "\\")
+                || !matches!(
+                    body,
+                    Expr::Lambda(..) | Expr::TypedLambda(..) | Expr::Ref(..)
+                )
+            {
+                return Err(Error::new(
+                    self.toks[rhs].start,
+                    "callable arity right-hand side must be a tacit form, function reference, or lambda",
+                ));
+            }
+            let source = self.toks[rhs].start..self.toks[end].end;
+            for param in &params {
+                let input = originated(
+                    Expr::Name(param.clone()),
+                    Some(count_span.clone()),
+                    &mut self.origins,
+                );
+                body = originated(
+                    Expr::Call("@".into(), vec![body, input]),
+                    Some(source.clone()),
+                    &mut self.origins,
+                );
+            }
+            body
+        } else if params.is_empty() {
             self.expr(effect)?
         } else {
             self.scopes
@@ -3020,5 +3153,106 @@ f(x:q^err^e):q := 0;";
         for bad in ["array :: { x:q; };", "array['a] :: { | leaf 'a; };"] {
             assert!(parse(bad).unwrap_err().message.contains("built-in type"));
         }
+    }
+
+    #[test]
+    fn callable_arity_hoists_and_lowers_with_hygiene_and_origins() {
+        let source = "early := pick 2z; pick/1: z z -> z := (&+);";
+        let p = parse(source).unwrap();
+        let Stmt::Def {
+            body: Expr::Call(_, args),
+            ..
+        } = &p.defs[0]
+        else {
+            panic!("forward call not hoisted");
+        };
+        assert_eq!(args.len(), 1);
+        let Stmt::Def {
+            params,
+            param_types,
+            result_type,
+            body,
+            ..
+        } = &p.defs[1]
+        else {
+            panic!("expected lowered callable");
+        };
+        assert_eq!(params.len(), 1);
+        assert!(params[0].starts_with('\0'));
+        assert!(matches!(
+            param_types[0].as_ref().unwrap().kind,
+            TypeAnnotationKind::Primitive(TypePrimitive::Z)
+        ));
+        assert!(
+            matches!(&result_type.as_ref().unwrap().kind, TypeAnnotationKind::Function(args, _) if args.len() == 1)
+        );
+        let Expr::Call(op, parts) = body else {
+            panic!("expected generated application")
+        };
+        assert_eq!(op, "@");
+        assert!(matches!(&parts[0], Expr::Ref(name) if name == "+"));
+        assert!(matches!(&parts[1], Expr::Name(name) if name == &params[0]));
+        let origins = p.expression_origins();
+        assert!(origins
+            .iter()
+            .any(|(e, range)| std::ptr::eq(*e, body) && &source[range.clone()] == "(&+)"));
+        assert!(origins
+            .iter()
+            .any(|(e, range)| std::ptr::eq(*e, &parts[1]) && &source[range.clone()] == "1"));
+    }
+
+    #[test]
+    fn callable_arity_is_honored_in_nested_groups_and_module_interfaces() {
+        let p = parse("main(x) := { answer := foo 1z 2z; foo/2:=&+; answer };").unwrap();
+        let Stmt::Def {
+            body: Expr::Block(decls, _),
+            ..
+        } = &p.defs[0]
+        else {
+            panic!("local block")
+        };
+        assert!(
+            matches!(&decls[0], Stmt::Def { body: Expr::Call(name, args), .. }
+            if name == "foo" && args.len() == 2)
+        );
+        let lib =
+            parse_module(">> (pick); pick/2:z -> z -> z:=&+;", 100, Some("lib"), &[]).unwrap();
+        assert_eq!(lib.module_members()[0].kind, MemberKind::Callable(2));
+        let interface = [ImportedModule {
+            path: "./lib.flx".into(),
+            members: lib.module_members(),
+        }];
+        let root = parse_module(
+            r#"<< "./lib.flx" : m; x := m.pick 3z 7z;"#,
+            200,
+            Some("main"),
+            &interface,
+        )
+        .unwrap();
+        assert!(
+            matches!(&root.defs[0], Stmt::Def { body: Expr::Call(_, args), .. } if args.len() == 2)
+        );
+    }
+
+    #[test]
+    fn callable_arity_rejects_non_addressable_headers_and_right_hand_sides() {
+        for (source, fragment) in [
+            ("f /2 := &+;", "adjacent"),
+            ("f/ 2 := &+;", "adjacent"),
+            ("f/0 := &+;", "positive"),
+            ("f/2n := &+;", "unsuffixed"),
+            ("f/65 := &+;", "64"),
+            ("f/2:q -> q := &+;", "at least 2"),
+            ("f/1:_ -> q := &.;", "complete type"),
+            ("f/1 | num 'a := &.;", "complete named function"),
+            ("f/1 := 1z;", "right-hand side"),
+            ("f/1 := (&.,1z);", "right-hand side"),
+        ] {
+            assert!(
+                parse(source).unwrap_err().message.contains(fragment),
+                "{source}"
+            );
+        }
+        assert!(parse("x := / 4z 2z; f/1 := (&.);").is_ok());
     }
 }

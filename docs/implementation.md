@@ -9,6 +9,8 @@ for notable changes and use Git for earlier revisions.
 1. `src/lexer.rs` validates ASCII source and records byte spans. Parsing
    discovers declaration and imported callable arity before it consumes
    prefix operands. Arity is lexical, not inferred from a value's type.
+   Explicit `name/arity` headers lower to ordinary named definitions using
+   scoped synthetic inputs, stable expression IDs and checked applications.
 2. `src/modules.rs` loads local source modules and checks interfaces.
    `src/resolve.rs` assigns lexical symbol identities and dependency groups.
 3. `src/infer.rs` and `src/types.rs` check rank-one schemes, shape and member
