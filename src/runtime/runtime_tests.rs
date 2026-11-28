@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::diagnostic::Category;
+use crate::hir::ExprKind;
 use num_bigint::BigInt;
 use num_rational::BigRational;
 

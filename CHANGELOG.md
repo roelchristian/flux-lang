@@ -10,10 +10,14 @@ obsolete specifications are not kept as duplicate files.
 - Consolidate shared Rust internals and streamline the reference and example
   index without changing the language. Group integration tests by topic.
 
-## Draft 0.21 groundwork
+## Draft 0.21
 
-- Establish a checked Machina II benchmark baseline and numerical equivalence
-  gate. This preparation adds no Flux syntax or runtime behavior.
+- Build compact dense arrays directly from checked, non-escaping integer ranges.
+- Extend packed traversal, intrinsic mapping and seedless axis reductions.
+  Fuse selected total, same-shape real and Boolean expressions without
+  changing observable order, rounding or logical work charges.
+- Add paired construction controls and a numerical equivalence gate for
+  optimized and generic typed execution. No Flux syntax changes.
 
 ## Draft 0.20
 

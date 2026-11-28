@@ -65,18 +65,36 @@ comparison and fallback kernels all use logical row-major order.
 
 Specialized kernels cover selected arithmetic, comparisons,
 broadcasting, packed `:r` conversion, real negation, absolute value,
-`math.exp`, `math.sin`, Boolean operations, intrinsic reductions and
-contiguous or strided contractions. Eligibility
-uses checked HIR and the operand layout. Integer overflow in a narrow
-kernel falls back to exact arithmetic, not wrapping or approximation.
-Matrix kernels may use a scratch layout for locality but preserve
-multiply-then-add and the original accumulation order.
+`math.exp`, `math.sin`, `math.cos`, `math.atan`, `math.tanh`, Boolean
+operations, intrinsic reductions and contiguous or strided contractions.
+An ordered stride cursor avoids repeatedly decoding coordinates.
+Integer overflow in a narrow kernel falls back to exact arithmetic,
+not wrapping or approximation. Contractions preserve multiply-then-add
+and the original accumulation order.
 
-The numerical plan only fuses direct same-shape chains of packed
-real negation or Boolean complement when policy allows. It evaluates
-the leaf once, charges the original logical stage work, and replays
-unfused stages if the layout or memory headroom is unsuitable. It is
-not shape inference, arbitrary arithmetic fusion, SIMD or parallelism.
+The checked direct form `form SHAPE (.. LO HI)` can fill one native
+integer buffer when both endpoints fit the selected signed or unsigned
+64-bit representation. Shape and endpoints are still evaluated once in
+their original order. A sequence that escapes, a wider range or an
+unsupported expression uses the ordinary checked path. Selected bare
+primitive callbacks also use packed mapping or axis reduction; seedless
+reductions preserve first-element initialization and optional results.
+
+The bounded numerical planner admits same-shape chains of direct
+packed real or Boolean operations. It covers real negation, absolute
+value, sine, cosine, arctangent, hyperbolic tangent, identity `:r`,
+Boolean complement and conjunction or disjunction with right literals.
+For real right literals it admits addition or subtraction of signed
+zero, multiplication by magnitude at most one, and division by
+magnitude at least one. Each admitted scalar step is total for finite
+input and uses its ordinary rounding, including signed zeros.
+
+A plan evaluates its leaf once, checks and charges stages at their
+original spans, and writes one output buffer when layout and memory
+allow. Otherwise it executes the original stages on the same leaf.
+Partial operations such as exponential, general array-to-array
+broadcasting, and arbitrary or recursive callbacks are not fused.
+This is not a second type checker, SIMD or parallel execution.
 
 ## Runtime policy
 
@@ -170,7 +188,7 @@ both a transposed right operand and a contiguous copy of it.
 budgets explicitly. A checked limit or timeout is not a successful
 timing. See the harness's `--help` for per-binary overrides.
 
-### Machina II baseline
+### Machina II comparison
 
 Keep a locked Rust 1.85 release from Draft 0.20 at `2e447bd`. Before
 taking timing comparisons, cross-check the candidate in both typed modes:
@@ -187,20 +205,32 @@ physical memory use: packed and generic layouts can reserve different bytes.
 The Linux CI smoke runs the fixed cases and two generated sets against its
 own release. Use `--cases 0` for just the fixed cases.
 
-For performance, keep construction-only controls alongside all kernel
-cases, and compare the same repeat count for each binary. Repeated-operation
-medians still include common setup; the difference between repeat counts
-can estimate its effect but is not an isolated kernel timer. Flux's
-`phases` command instruments the frontend and combined evaluation, not
-individual planner or kernel internals. Keep preview measurements separate
-from timings collected under explicitly raised budgets.
+For performance, keep `construction` controls alongside `dense` or
+`mathesis` kernel runs. The `edge` group checks wide exact fallback
+and signed-zero chains. Compare equal `--kernel-repeats` settings;
+the difference between repeat counts can estimate common setup costs
+but is not an isolated kernel timer. `--phases` instruments the frontend
+and combined evaluation, which includes preparation and output. Keep
+default-budget timings separate from explicitly raised-budget runs.
 
-An A/A control using the same locked Draft 0.20 binary in both arms on one
-Linux x86-64 logical CPU completed the 10-million-element inline construction
-cases. Three samples per arm measured 941–963 ms for signed integers and
-992–1,260 ms for explicit conversion to binary64 (range of arm medians).
-Peak RSS medians were about 942,000 KiB. These are construction-and-validation
-measurements, not new-engine speedups or memory guarantees.
+```sh
+python3 benchmarks/machina.py FLUX_020 FLUX_021 --generic --phases \
+  --groups construction dense edge --elements 10000 100000 --runs 7
+```
+
+Locked Draft 0.20 and 0.21 release builds completed two checked,
+10-million-element construction workloads on an isolated Linux x86-64
+host. Results are medians of three samples per arm under the raised
+limits below. Wall time includes startup, array setup and checked output,
+not the time of an individual kernel.
+
+| Construction | 0.20 wall (ms) | 0.21 wall (ms) | 0.20 peak RSS (KiB) | 0.21 peak RSS (KiB) |
+| --- | ---: | ---: | ---: | ---: |
+| Inline signed integer range into `form` | 1,087.083 | 42.402 | 941,804 | 82,488 |
+| Same construction with explicit `:r` conversion | 1,407.492 | 117.867 | 941,828 | 160,572 |
+
+The measurements exercise the direct builder, not escaping sequence
+construction, exact widening or general kernel throughput.
 
 ```sh
 python3 benchmarks/machina.py FLUX_020 FLUX_CANDIDATE --phases --groups construction \

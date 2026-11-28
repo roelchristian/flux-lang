@@ -6,6 +6,7 @@ use super::{
 };
 
 mod algebra;
+pub(super) mod builder;
 pub(super) mod packed;
 pub(super) mod sequence;
 mod storage;
@@ -335,16 +336,19 @@ pub(super) fn apply(
         (ArrayRavel | Flatten, [xs], [_]) => dense(xs, span)?.sequence(span),
         (ArrayAt | Lookup, [coords, xs], [_, _]) => at(coords, dense(xs, span)?, span),
         (ArrayMap | Map, [f, xs], [_, t]) => {
-            let xs = dense(xs, span)?;
+            let array = dense(xs, span)?;
             let input = element(t, span)?;
             let out = element(output, span)?;
+            if let Some(result) = packed::mapped(xs, f, (input, output), eval, span) {
+                return result;
+            }
             let reservation =
-                resources::reserve_for::<V>(xs.len()).map_err(|message| error(span, message))?;
-            let items = xs
+                resources::reserve_for::<V>(array.len()).map_err(|message| error(span, message))?;
+            let items = array
                 .iter()
                 .map(|v| eval.apply_unary(f.clone(), v, input.clone(), out.clone(), span));
-            let cells = collect_values(xs.len(), items)?;
-            Dense::pack_values_reserved(xs.shape.clone(), cells, reservation, span)
+            let cells = collect_values(array.len(), items)?;
+            Dense::pack_values_reserved(array.shape.clone(), cells, reservation, span)
         }
         (ArrayZip | ArrayOuter, [f, a, b], [_, ta, tb]) => pairwise(
             op == ArrayOuter,

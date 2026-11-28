@@ -147,9 +147,22 @@ fn matrix_packed<T: Contract>(
         .then(|| resources::reserve_for::<T>(right_len).ok())
         .flatten();
     let columns = scratch.as_ref().map(|_| {
-        let mut columns = Vec::with_capacity(right_len);
-        for j in 0..n {
-            columns.extend(Lane::new(right, right_start + j * right_col, right_row).iter(k));
+        // Transpose rectangular panels of the logical right operand into
+        // scratch. Read neighboring source columns while a panel is hot,
+        // but keep each actual dot product ordered in k as before.
+        const TILE: usize = 32;
+        let mut columns = vec![T::ZERO; right_len];
+        for first_j in (0..n).step_by(TILE) {
+            for first_k in (0..k).step_by(TILE) {
+                let end_j = (first_j + TILE).min(n);
+                let end_k = (first_k + TILE).min(k);
+                for inner in first_k..end_k {
+                    let start = right_start + inner * right_row;
+                    for j in first_j..end_j {
+                        columns[j * k + inner] = right[start + j * right_col];
+                    }
+                }
+            }
         }
         columns
     });

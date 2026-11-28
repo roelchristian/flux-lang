@@ -1,8 +1,9 @@
 //! Checked packed pointwise operations and broadcast work.
 use super::{
-    array, compact_exact, error, finite_real, real_binary, resources, CoreOp, Fast, LiftMode,
-    NumericResult, Packed, Prim, Rc, Reader, Source, Span, Type, V,
+    array, compact_exact, error, finite_real, real_binary, resources, Cells, CoreOp, Fast,
+    LiftMode, NumericResult, Packed, Prim, Rc, Reader, Source, Span, Type, V,
 };
+use crate::hir_eval::numeric::TotalRealUnary;
 
 fn shape(args: &[V], mode: LiftMode) -> NumericResult<Option<Rc<[usize]>>> {
     match (mode, args) {
@@ -70,8 +71,10 @@ fn pointwise<T: Packed, U: Packed>(
         Err(message) => return Some(Err(error(span, message))),
     };
     let mut values = Vec::with_capacity(len);
-    for i in 0..len {
-        match f(left.at(i, &dims), right.as_ref().map(|r| r.at(i, &dims))) {
+    let left = Cells::new(left, &dims, len);
+    let mut right = right.map(|r| Cells::new(r, &dims, len));
+    for a in left {
+        match f(a, right.as_mut().and_then(Iterator::next)) {
             Ok(Some(value)) => values.push(value),
             Ok(None) => return None, // checked exact overflow: widen via generic HIR
             Err(message) => return Some(Err(error(span, message))),
@@ -177,16 +180,13 @@ pub(in crate::hir_eval) fn unary(
                 .or_else(|| pointwise(args, mode, span, |a: i64, _| Ok(Some(a as f64))))
                 .or_else(|| pointwise(args, mode, span, |a: u64, _| Ok(Some(a as f64))))
         }
-        (Negate | Abs | MathExp | MathSin, Type::Prim(Prim::R)) => {
+        (MathExp, Type::Prim(Prim::R)) => pointwise(args, mode, span, |a: f64, _| {
+            finite_real(libm::exp(a)).map(Some)
+        }),
+        (op @ (Negate | Abs | MathSin | MathCos | MathAtan | MathTanh), Type::Prim(Prim::R)) => {
+            let kernel = TotalRealUnary::from_core(op)?;
             pointwise(args, mode, span, |a: f64, _| {
-                finite_real(match op {
-                    Negate => -a,
-                    Abs => a.abs(),
-                    MathExp => libm::exp(a),
-                    MathSin => libm::sin(a),
-                    _ => unreachable!(),
-                })
-                .map(Some)
+                finite_real(kernel.apply(a)).map(Some)
             })
         }
         (Negate | Abs, Type::Prim(Prim::Z)) if compact_exact() => {

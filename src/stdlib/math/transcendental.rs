@@ -1,5 +1,6 @@
 //! Binary64 kernels with explicit finite-result and domain contracts.
 use super::super::{finite, wide, CoreOp, NumericResult, Type, DIV_BY_ZERO, V};
+use crate::hir_eval::numeric::TotalRealUnary;
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_rational::BigRational;
@@ -35,6 +36,9 @@ fn root(degree: &V, x: f64) -> NumericResult<f64> {
 
 fn unary(op: CoreOp, x: f64) -> NumericResult<f64> {
     use CoreOp::*;
+    if let Some(op) = TotalRealUnary::from_core(op) {
+        return Ok(op.apply(x));
+    }
     Ok(match op {
         MathExp => libm::exp(x),
         MathExpm1 => libm::expm1(x),
@@ -43,18 +47,14 @@ fn unary(op: CoreOp, x: f64) -> NumericResult<f64> {
         MathLog10 => libm::log10(x),
         MathLog1p if x <= -1.0 => return Err("math.log1p requires an argument greater than -1"),
         MathLog1p => libm::log1p(x),
-        MathSin => libm::sin(x),
-        MathCos => libm::cos(x),
         MathTan => libm::tan(x),
         MathAsin | MathAcos if x.abs() > 1.0 => {
             return Err("inverse sine and cosine require an argument in [-1, 1]");
         }
         MathAsin => libm::asin(x),
         MathAcos => libm::acos(x),
-        MathAtan => libm::atan(x),
         MathSinh => libm::sinh(x),
         MathCosh => libm::cosh(x),
-        MathTanh => libm::tanh(x),
         MathAsinh => libm::asinh(x),
         MathAcosh if x < 1.0 => return Err("math.acosh requires an argument at least 1"),
         MathAcosh => libm::acosh(x),
