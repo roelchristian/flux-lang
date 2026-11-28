@@ -217,6 +217,23 @@ const RELATIONAL_06: &[&str] = &[
     "df.present",
 ];
 
+// Exercised through ordinary and strict HIR by tests/draft012_arrays.rs.
+const ARRAYS_012: &[&str] = &[
+    "arr.reshape",
+    "arr.shape",
+    "arr.ravel",
+    "arr.at",
+    "arr.map",
+    "arr.zip",
+    "arr.outer",
+    "arr.rankmap",
+    "arr.scan",
+    "arr.windows",
+    "arr.select",
+    "arr.grade",
+    "arr.permute",
+];
+
 fn expression_source(expression: &str) -> String {
     format!("{PRELUDE}\n!{{ ^= ! io.print {expression} {{ _ : (); }}; }};")
 }
@@ -247,6 +264,7 @@ fn every_runtime_registry_entry_has_a_strict_fixture() {
                 .iter()
                 .chain(STDLIB_05)
                 .chain(RELATIONAL_06)
+                .chain(ARRAYS_012)
                 .copied(),
         )
         .collect();

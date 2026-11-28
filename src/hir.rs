@@ -133,6 +133,19 @@ pub enum CoreOp {
     Fill,
     PresentOnly,
     StructuralRows,
+    ArrayReshape,
+    ArrayShape,
+    ArrayRavel,
+    ArrayAt,
+    ArrayMap,
+    ArrayZip,
+    ArrayOuter,
+    ArrayRankMap,
+    ArrayScan,
+    ArrayWindows,
+    ArraySelect,
+    ArrayGrade,
+    ArrayPermute,
 }
 
 /// Static shape execution plan for direct pointwise operations. Pairwise
