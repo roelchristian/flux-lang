@@ -19,15 +19,17 @@ fn canonical_reference_links_existing_registered_examples() {
         .collect::<BTreeSet<_>>();
     let reference = Path::new("docs/specification.md");
     let mut linked = BTreeSet::new();
-    let mut documents = vec![root.join("README.md"), root.join("examples/README.md")];
-    for dir in ["docs", "docs/archive"] {
-        documents.extend(
-            fs::read_dir(root.join(dir))
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .filter(|path| path.extension().is_some_and(|ext| ext == "md")),
-        );
-    }
+    let mut documents = vec![
+        root.join("README.md"),
+        root.join("CHANGELOG.md"),
+        root.join("examples/README.md"),
+    ];
+    documents.extend(
+        fs::read_dir(root.join("docs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "md")),
+    );
     for path in documents {
         let path = path.strip_prefix(root).unwrap();
         let content = fs::read_to_string(root.join(path)).unwrap();

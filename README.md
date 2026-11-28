@@ -62,7 +62,7 @@ commands, sample inputs and expected outputs.
 
 - [Flux language reference](docs/specification.md): source, types, evaluation, tables, effects and modules.
 - [Implementation guide](docs/implementation.md) and [performance](docs/performance.md).
-- [Historical drafts and reviews](docs/archive/README.md).
+- [Changelog](CHANGELOG.md).
 
 Run `cargo test --locked` for the full suite or
 `cargo test --locked --test example_corpus` for the public examples.

@@ -4,7 +4,7 @@ This is the normative reference for the implemented Draft 0.9 language.
 Unless marked **Limited** or **Proposed**, the rules describe the behavior
 of the Rust reference interpreter. Limited features have the scope stated
 here. Proposed features are not available and do not reserve a design.
-For dated proposals, read the [archive](archive/README.md); for compiler
+For recent changes, read the [changelog](../CHANGELOG.md); for compiler
 structure and validation, read the [implementation guide](implementation.md).
 
 The linked runnable programs are part of [the checked example corpus](../examples/README.md).
@@ -547,5 +547,5 @@ The language has checked nominal sums, recovery patterns, inferred structural
 field constraints, and rank-one sequence operations. This revision does not
 introduce general algebraic pattern matching, parameterized nominal sums,
 explicit row constraints, distinct ranked arrays, a package registry, a
-columnar engine or native compilation. The historical design notes do not
-grant syntax or semantics for those features.
+columnar engine or native compilation. Earlier proposals in Git history do not define syntax or semantics
+for those features.

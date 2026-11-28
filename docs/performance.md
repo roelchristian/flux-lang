@@ -8,6 +8,6 @@ evaluation separately. `benchmarks/tacit.py` and `benchmarks/relational.py`
 cover composition and relational workloads.
 
 Measurements are revision- and environment-specific. See the
-[Draft 0.9 elaboration review](archive/review-0.9-elaboration.md) for a
-paired comparison and its limits, or the
-[historical snapshot](archive/performance.md) for earlier measurements.
+[Draft 0.9 elaboration PR](https://github.com/roelchristian/flux-lang/pull/13)
+for a paired comparison and its limits. Use Git history to find earlier
+benchmark reports.

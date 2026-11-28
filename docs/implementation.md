@@ -1,8 +1,8 @@
 # Flux implementation guide
 
 The [language reference](specification.md) defines current behavior. This
-guide describes the Rust reference implementation; the [archive](archive/README.md)
-contains historical plans, reviews and earlier limits.
+guide describes the Rust reference implementation. See the [changelog](../CHANGELOG.md)
+for notable changes and use Git for earlier revisions.
 
 ## Compiler and runtime
 
@@ -52,5 +52,4 @@ Programs are checked and evaluated eagerly; selected representations and
 numeric operations have resource limits. JSON decoding is schema-directed,
 with limits on depth, size and exact-number expansion. Source modules are
 local and explicitly checked, not packages. Relational execution preserves
-specified ordering; it is not a columnar query optimizer. Proposals belong
-in the archive until implemented and tested.
+specified ordering; it is not a columnar query optimizer. Proposals are not normative until implemented and tested.
